@@ -111,11 +111,17 @@ complete batch as a dry run. File retries must contain the entire intended
 batch, not only rows that previously failed. The result reports explicit
 would-create and would-reuse counts, detailed planned rows, summaries by type,
 currency, placeholder status, and top-level branch, plus a durable owner-scoped
-`importPlanId`. After the user approves that exact preview,
+`importPlanId`, `expiresAt`, a SHA-256 `previewDigest`, and a compact numerical
+summary before the potentially large preview. The MCP advertises and validates
+this result through a formal output schema. After the user approves that exact preview,
 `commit_account_tree_import` accepts only the plan ID, revalidates current
 database state, and atomically creates the currencies and accounts. Plans
 expire after 24 hours, and repeated commit calls return the stored result
-without duplicating ledger data.
+without duplicating ledger data. `get_account_tree_import_plan` retrieves ready,
+committed, expired, or invalidated status across MCP connections and unrelated
+requests. Missing, expired, invalidated, and inconsistent commit attempts return
+machine-readable recovery instructions. An ID owned by someone else is reported
+as not found so ownership is never disclosed.
 
 `import_transactions` is the source-neutral transaction batch dry run. A batch
 contains up to 250 complete transactions and 5,000 nested line items. A stable

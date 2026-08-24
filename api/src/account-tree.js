@@ -286,57 +286,238 @@ function expiresAtTimestamp(date) {
   return date.toISOString().replace("T", " ").replace("Z", "");
 }
 
+const planFailureMetadata = Object.freeze({
+  IMPORT_PLAN_NOT_FOUND: { recoverable: true, requiredAction: "RUN_NEW_DRY_RUN", status: 404 },
+  IMPORT_PLAN_EXPIRED: { recoverable: true, requiredAction: "RUN_NEW_DRY_RUN", status: 410 },
+  IMPORT_PLAN_INVALIDATED: { recoverable: true, requiredAction: "RUN_NEW_DRY_RUN", status: 409 },
+  IMPORT_PLAN_STATE_CONFLICT: { recoverable: true, requiredAction: "RUN_NEW_DRY_RUN", status: 409 },
+  IMPORT_PLAN_OWNER_MISMATCH: { recoverable: true, requiredAction: "RUN_NEW_DRY_RUN", status: 404 },
+});
+
+function planError(code, message) {
+  const metadata = planFailureMetadata[code] ?? planFailureMetadata.IMPORT_PLAN_STATE_CONFLICT;
+  return Object.assign(new Error(message), { code, ...metadata });
+}
+
+export function accountTreeImportPlanFailure(error) {
+  const metadata = planFailureMetadata[error?.code];
+  if (!metadata) return null;
+  return { code: error.code, recoverable: metadata.recoverable, requiredAction: metadata.requiredAction };
+}
+
+function accountTreePlanSummary(preview) {
+  const createdCurrencyCodes = new Set(preview.currencies
+    .filter((currency) => currency.status === "planned")
+    .map((currency) => currencyKey(currency.code)));
+  const reusedCurrencyCodes = new Set(preview.currencies
+    .filter((currency) => currency.status === "existing")
+    .map((currency) => currencyKey(currency.code)));
+  for (const account of preview.accounts) {
+    const code = currencyKey(account.currencyCode);
+    if (!createdCurrencyCodes.has(code)) reusedCurrencyCodes.add(code);
+  }
+  return {
+    accountsCreated: preview.wouldCreateAccountCount,
+    accountsReused: preview.wouldReuseAccountCount,
+    currenciesCreated: createdCurrencyCodes.size,
+    currenciesReused: reusedCurrencyCodes.size,
+    rejectedRows: 0,
+  };
+}
+
+function digest(value) {
+  return hashPayload(JSON.stringify(value));
+}
+
+function previewDigest(hash) {
+  return `sha256:${String(hash)}`;
+}
+
+function isoTimestamp(value) {
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value ?? "").trim();
+  if (!text) throw planError("IMPORT_PLAN_STATE_CONFLICT", "Import plan has no expiration timestamp.");
+  const normalized = text.includes("T") ? text : text.replace(" ", "T");
+  const date = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(normalized) ? normalized : `${normalized}Z`);
+  if (Number.isNaN(date.getTime())) throw planError("IMPORT_PLAN_STATE_CONFLICT", "Import plan expiration is invalid.");
+  return date.toISOString();
+}
+
+function parsePlanJson(value, label) {
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    throw planError("IMPORT_PLAN_STATE_CONFLICT", `Import plan ${label} is invalid.`);
+  }
+}
+
+function parsePlanSummary(value) {
+  const summary = parsePlanJson(value, "summary");
+  const fields = ["accountsCreated", "accountsReused", "currenciesCreated", "currenciesReused", "rejectedRows"];
+  if (!summary || typeof summary !== "object" || fields.some((field) =>
+    !Number.isSafeInteger(summary[field]) || summary[field] < 0)) {
+    throw planError("IMPORT_PLAN_STATE_CONFLICT", "Import plan summary has an invalid shape.");
+  }
+  return Object.fromEntries(fields.map((field) => [field, summary[field]]));
+}
+
+function planIdentity(row) {
+  const storedPreviewHash = String(row.preview_sha256 ?? "");
+  if (!/^[0-9a-f]{64}$/.test(storedPreviewHash)) {
+    throw planError("IMPORT_PLAN_STATE_CONFLICT", "Import plan preview digest is invalid.");
+  }
+  return {
+    importPlanId: String(row.import_plan_id),
+    expiresAt: isoTimestamp(row.expires_at),
+    previewDigest: previewDigest(storedPreviewHash),
+    summary: parsePlanSummary(row.summary_json),
+  };
+}
+
+function readyPlanEnvelope({ importPlanId, expiresAt, previewHash, summary, preview }) {
+  return {
+    readyToCommit: true,
+    importPlanId,
+    status: "ready",
+    expiresAt,
+    previewDigest: previewDigest(previewHash),
+    summary,
+    preview,
+  };
+}
+
+function planStatusEnvelope(row) {
+  const identity = planIdentity(row);
+  if (row.plan_status === "committed") {
+    if (!row.result_json) throw planError("IMPORT_PLAN_STATE_CONFLICT", "Committed import plan has no stored result.");
+    const stored = parsePlanJson(row.result_json, "commit result");
+    return { readyToCommit: false, status: "committed", ...identity, commitResult: stored.commitResult };
+  }
+  if (row.plan_status === "invalidated") {
+    return { readyToCommit: false, status: "invalidated", ...identity,
+      invalidationCode: row.invalidation_code ?? "DATABASE_STATE_CHANGED" };
+  }
+  if (row.plan_status !== "ready") {
+    throw planError("IMPORT_PLAN_STATE_CONFLICT", "Import plan has an unsupported state.");
+  }
+  if (Boolean(row.is_expired)) return { readyToCommit: false, status: "expired", ...identity };
+  return { readyToCommit: true, status: "ready", ...identity };
+}
+
+async function loadAccountTreePlan(connection, personId, importPlanId, { lock = false } = {}) {
+  const [rows] = await connection.query(
+    `SELECT import_plan_id, plan_status, payload_sha256, preview_sha256, payload_json,
+            summary_json, expires_at, committed_at, invalidated_at, invalidation_code,
+            result_json, expires_at <= UTC_TIMESTAMP(6) AS is_expired
+       FROM accounting_import_plans
+      WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'account_tree'${lock ? " FOR UPDATE" : ""}`,
+    [importPlanId, personId],
+  );
+  const plan = rows[0];
+  // Deliberately do not distinguish a missing plan from another owner's plan.
+  if (!plan) throw planError("IMPORT_PLAN_NOT_FOUND", "Account-tree import plan not found.");
+  return plan;
+}
+
 export async function previewAccountTreeImport({ pool, personId, accounts, currencies = [] }) {
   return withPoolTransaction(pool, async (connection) => {
-    const result = await importAccountTreeWithConnection({ connection, personId, accounts, currencies, dryRun: true });
-    const payloadJson = JSON.stringify({ accounts, currencies });
+    const preview = await importAccountTreeWithConnection({ connection, personId, accounts, currencies, dryRun: true });
+    const normalizedPayload = {
+      accounts: preview.accounts.map((account) => ({
+        fullName: account.fullName,
+        type: account.accountType,
+        currencyCode: account.currencyCode,
+        description: account.description,
+        placeholder: account.placeholder,
+      })),
+      currencies: preview.currencies.map((currency) => ({
+        code: currency.code,
+        displayName: currency.displayName,
+        type: currency.type,
+        scale: currency.scale,
+      })),
+    };
+    const payloadJson = JSON.stringify(normalizedPayload);
     const importPlanId = randomUUID();
     const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const previewHash = digest(preview);
+    const summary = accountTreePlanSummary(preview);
     await connection.query(
       `INSERT INTO accounting_import_plans
-        (import_plan_id, owner_person_id, import_kind, source_system, payload_sha256,
-         payload_json, item_count, expires_at)
-       VALUES (?, ?, 'account_tree', NULL, ?, ?, ?, ?)`,
-      [importPlanId, personId, hashPayload(payloadJson), payloadJson, accounts.length, expiresAtTimestamp(expiresAtDate)],
+        (import_plan_id, owner_person_id, import_kind, plan_status, source_system,
+         payload_sha256, preview_sha256, payload_json, summary_json, expires_at)
+       VALUES (?, ?, 'account_tree', 'ready', NULL, ?, ?, ?, ?, ?)`,
+      [importPlanId, personId, hashPayload(payloadJson), previewHash, payloadJson,
+        JSON.stringify(summary), expiresAtTimestamp(expiresAtDate)],
     );
-    return { ...result, readyToCommit: true, importPlanId, importPlanExpiresAt: expiresAtDate.toISOString() };
+    return readyPlanEnvelope({ importPlanId, expiresAt: expiresAtDate.toISOString(), previewHash, summary, preview });
   });
+}
+
+export async function getAccountTreeImportPlan({ pool, personId, importPlanId }) {
+  const resolvedPlanId = String(importPlanId ?? "").trim();
+  if (!resolvedPlanId) throw planError("IMPORT_PLAN_NOT_FOUND", "Account-tree import plan not found.");
+  return withPoolTransaction(pool, async (connection) =>
+    planStatusEnvelope(await loadAccountTreePlan(connection, personId, resolvedPlanId)));
 }
 
 export async function commitAccountTreeImport({ pool, personId, importPlanId }) {
   const resolvedPlanId = String(importPlanId ?? "").trim();
-  if (!resolvedPlanId || [...resolvedPlanId].length > 36) {
-    throw importError("A valid account-tree import plan ID is required.", "IMPORT_PLAN_ID_REQUIRED");
-  }
-  return withPoolTransaction(pool, async (connection) => {
-    const [rows] = await connection.query(
-      `SELECT payload_sha256, payload_json, committed_at, result_json,
-              expires_at <= UTC_TIMESTAMP(6) AS is_expired
-         FROM accounting_import_plans
-        WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'account_tree'
-        FOR UPDATE`,
-      [resolvedPlanId, personId],
-    );
-    const plan = rows[0];
-    if (!plan) throw importError("Account-tree import plan not found.", "IMPORT_PLAN_NOT_FOUND");
+  if (!resolvedPlanId) throw planError("IMPORT_PLAN_NOT_FOUND", "Account-tree import plan not found.");
+  const outcome = await withPoolTransaction(pool, async (connection) => {
+    const plan = await loadAccountTreePlan(connection, personId, resolvedPlanId, { lock: true });
     if (plan.committed_at != null) {
-      if (!plan.result_json) throw importError("The committed import plan has no stored result.", "IMPORT_PLAN_RESULT_MISSING");
-      return { ...JSON.parse(plan.result_json), alreadyCommitted: true };
+      if (plan.plan_status !== "committed" || !plan.result_json) {
+        return { failure: planError("IMPORT_PLAN_STATE_CONFLICT", "Committed import plan state is inconsistent.") };
+      }
+      return { result: parsePlanJson(plan.result_json, "commit result") };
     }
-    if (Boolean(plan.is_expired)) throw importError("Account-tree import plan has expired; run a new dry run.", "IMPORT_PLAN_EXPIRED");
+    if (plan.plan_status === "invalidated") {
+      return { failure: planError("IMPORT_PLAN_INVALIDATED", "Account-tree import plan was invalidated.") };
+    }
+    if (plan.plan_status !== "ready") {
+      return { failure: planError("IMPORT_PLAN_STATE_CONFLICT", "Account-tree import plan is not ready.") };
+    }
+    if (Boolean(plan.is_expired)) {
+      return { failure: planError("IMPORT_PLAN_EXPIRED", "Account-tree import plan has expired.") };
+    }
     if (hashPayload(plan.payload_json) !== String(plan.payload_sha256)) {
-      throw importError("Stored account-tree import plan failed its integrity check.", "IMPORT_PLAN_INTEGRITY_FAILURE");
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'PAYLOAD_INTEGRITY_FAILURE'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: planError("IMPORT_PLAN_INVALIDATED", "Account-tree import plan failed its integrity check.") };
     }
-    const payload = JSON.parse(plan.payload_json);
-    const imported = await importAccountTreeWithConnection({ connection, personId, ...payload, dryRun: false });
-    const result = { ...imported, readyToCommit: false, importPlanId: resolvedPlanId,
-      committed: true, alreadyCommitted: false };
+    const payload = parsePlanJson(plan.payload_json, "payload");
+    try {
+      await importAccountTreeWithConnection({ connection, personId, ...payload, dryRun: true });
+    } catch (error) {
+      if (!(Number(error?.status) >= 400 && Number(error?.status) < 500)) throw error;
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'DATABASE_STATE_CHANGED'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: planError("IMPORT_PLAN_INVALIDATED", `Account-tree import plan is no longer valid: ${error.message}`) };
+    }
+    const commitResult = await importAccountTreeWithConnection({ connection, personId, ...payload, dryRun: false });
+    const identity = planIdentity(plan);
+    const result = { readyToCommit: false, importPlanId: resolvedPlanId, status: "committed",
+      expiresAt: identity.expiresAt, previewDigest: identity.previewDigest,
+      summary: identity.summary, commitResult };
     await connection.query(
       `UPDATE accounting_import_plans
-          SET committed_at = UTC_TIMESTAMP(6), result_json = ?
+          SET plan_status = 'committed', committed_at = UTC_TIMESTAMP(6), result_json = ?
         WHERE import_plan_id = ? AND owner_person_id = ?`,
       [JSON.stringify(result), resolvedPlanId, personId],
     );
-    return result;
+    return { result };
   });
+  if (outcome.failure) throw outcome.failure;
+  return outcome.result;
 }

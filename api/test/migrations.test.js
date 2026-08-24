@@ -48,5 +48,8 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(transactionImportMigration.sql, /source_fingerprint CHAR\(64\)/);
   assert.match(transactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_import_plans/);
   assert.match(transactionImportMigration.sql, /ENUM\('account_tree','transactions'\)/);
+  assert.match(transactionImportMigration.sql, /plan_status ENUM\('ready','committed','invalidated'\)/);
+  assert.match(transactionImportMigration.sql, /preview_sha256 CHAR\(64\)/);
+  assert.match(transactionImportMigration.sql, /summary_json LONGTEXT/);
   assert.doesNotMatch(transactionImportMigration.sql, /GENERATED ALWAYS/i);
 });

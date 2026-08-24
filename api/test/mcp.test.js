@@ -15,6 +15,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const seen = [];
   let imported;
   let committedAccountPlan;
+  let readAccountPlan;
   let importedTransactions;
   let committedTransactionPlan;
   let createdCurrency;
@@ -30,11 +31,47 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     },
     async importAccountTree(input) {
       imported = input;
-      return { dryRun: input.dryRun, totalCount: input.accounts.length, plannedCount: input.accounts.length };
+      return {
+        readyToCommit: true,
+        importPlanId: "11111111-1111-4111-8111-111111111111",
+        status: "ready",
+        expiresAt: "2026-08-25T18:42:00.000Z",
+        previewDigest: `sha256:${"a".repeat(64)}`,
+        summary: { accountsCreated: 1, accountsReused: 0, currenciesCreated: 1, currenciesReused: 0, rejectedRows: 0 },
+        preview: { dryRun: true, totalCount: input.accounts.length, plannedCount: input.accounts.length },
+      };
     },
     async commitAccountTreeImport(input) {
       committedAccountPlan = input;
-      return { committed: true, createdCount: 1 };
+      if (input.importPlanId.startsWith("3333")) {
+        throw Object.assign(new Error("expired"), { code: "IMPORT_PLAN_EXPIRED" });
+      }
+      if (input.importPlanId.startsWith("4444")) {
+        throw Object.assign(new Error("state conflict"), { code: "IMPORT_PLAN_STATE_CONFLICT" });
+      }
+      return {
+        readyToCommit: false,
+        importPlanId: input.importPlanId,
+        status: "committed",
+        expiresAt: "2026-08-25T18:42:00.000Z",
+        previewDigest: `sha256:${"a".repeat(64)}`,
+        summary: { accountsCreated: 1, accountsReused: 0, currenciesCreated: 1, currenciesReused: 0, rejectedRows: 0 },
+        commitResult: { createdCount: 1 },
+      };
+    },
+    async getAccountTreeImportPlan(input) {
+      readAccountPlan = input;
+      if (input.importPlanId.startsWith("2222")) {
+        throw Object.assign(new Error("not found"), { code: "IMPORT_PLAN_NOT_FOUND" });
+      }
+      return {
+        readyToCommit: true,
+        importPlanId: input.importPlanId,
+        status: "ready",
+        expiresAt: "2026-08-25T18:42:00.000Z",
+        previewDigest: `sha256:${"a".repeat(64)}`,
+        summary: { accountsCreated: 1, accountsReused: 0, currenciesCreated: 1, currenciesReused: 0, rejectedRows: 0 },
+      };
     },
     async previewTransactionImport(input) {
       importedTransactions = input;
@@ -57,6 +94,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "describe_accounting_schema"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_account_tree_import"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_account_tree_import_plan"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import"), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
@@ -70,6 +108,10 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /created, reused, skipped, or rejected/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /importPlanId/);
   assert.match(tools.tools.find((tool) => tool.name === "commit_account_tree_import").description, /only import_plan_id/);
+  const accountTreeOutputSchema = tools.tools.find((tool) => tool.name === "import_account_tree").outputSchema;
+  assert.match(JSON.stringify(accountTreeOutputSchema), /readyToCommit/);
+  assert.match(JSON.stringify(accountTreeOutputSchema), /previewDigest/);
+  assert.match(JSON.stringify(accountTreeOutputSchema), /expiresAt/);
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /source-neutral/);
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /unknown or ambiguous paths/);
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
@@ -144,7 +186,27 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     type: "security",
     scale: 4,
   }]);
-  assert.equal(importResult.structuredContent.import.plannedCount, 1);
+  assert.equal(importResult.structuredContent.readyToCommit, true);
+  assert.equal(importResult.structuredContent.preview.plannedCount, 1);
+  assert.equal(importResult.structuredContent.summary.accountsCreated, 1);
+
+  const planStatus = await client.callTool({
+    name: "get_account_tree_import_plan",
+    arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
+  });
+  assert.equal(planStatus.structuredContent.status, "ready");
+  assert.deepEqual(readAccountPlan, {
+    pool: {}, personId: 7, importPlanId: "11111111-1111-4111-8111-111111111111",
+  });
+
+  const missingPlan = await client.callTool({
+    name: "get_account_tree_import_plan",
+    arguments: { import_plan_id: "22222222-2222-4222-8222-222222222222" },
+  });
+  assert.equal(missingPlan.isError, true);
+  assert.deepEqual(missingPlan.structuredContent, {
+    code: "IMPORT_PLAN_NOT_FOUND", recoverable: true, requiredAction: "RUN_NEW_DRY_RUN",
+  });
 
   await client.callTool({
     name: "commit_account_tree_import",
@@ -153,6 +215,19 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.deepEqual(committedAccountPlan, {
     pool: {}, personId: 7, importPlanId: "11111111-1111-4111-8111-111111111111",
   });
+
+  for (const [planId, code] of [
+    ["33333333-3333-4333-8333-333333333333", "IMPORT_PLAN_EXPIRED"],
+    ["44444444-4444-4444-8444-444444444444", "IMPORT_PLAN_STATE_CONFLICT"],
+  ]) {
+    const failure = await client.callTool({
+      name: "commit_account_tree_import", arguments: { import_plan_id: planId },
+    });
+    assert.equal(failure.isError, true);
+    assert.deepEqual(failure.structuredContent, {
+      code, recoverable: true, requiredAction: "RUN_NEW_DRY_RUN",
+    });
+  }
 
   const transactionPreview = await client.callTool({
     name: "import_transactions",
@@ -226,7 +301,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.4.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.5.0");
 
   await handler.close();
 });

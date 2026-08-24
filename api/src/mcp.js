@@ -11,7 +11,12 @@ import {
   listTransactions,
   verifyAllPostedTransactions,
 } from "./accounting.js";
-import { commitAccountTreeImport, previewAccountTreeImport } from "./account-tree.js";
+import {
+  accountTreeImportPlanFailure,
+  commitAccountTreeImport,
+  getAccountTreeImportPlan,
+  previewAccountTreeImport,
+} from "./account-tree.js";
 import { createCurrency, listCurrencies, userCurrencyTypes } from "./currencies.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 import { commitTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
@@ -55,7 +60,7 @@ const operations = Object.freeze({
   },
   importAccountTree: {
     name: "import_account_tree",
-    purpose: "Validate and atomically import a colon-delimited account hierarchy in parent-first order.",
+    purpose: "Validate a colon-delimited account hierarchy and save a durable owner-scoped commit plan.",
     schemaObjects: ["accounts", "currencies"],
     fields: {
       accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
@@ -177,6 +182,27 @@ function toolResult(value) {
   };
 }
 
+function toolFailureResult(value) {
+  return {
+    isError: true,
+    content: [{ type: "text", text: JSON.stringify(value) }],
+    structuredContent: value,
+  };
+}
+
+async function accountTreePlanToolResult(work, { schemaSemantics = null, operation = null } = {}) {
+  try {
+    const result = await work();
+    return toolResult(schemaSemantics && operation
+      ? withSchemaProjection(schemaSemantics, result, operation)
+      : result);
+  } catch (error) {
+    const failure = accountTreeImportPlanFailure(error);
+    if (!failure) throw error;
+    return toolFailureResult(failure);
+  }
+}
+
 function positiveInteger(label) {
   return z.number().int().positive().describe(label);
 }
@@ -189,6 +215,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     createAccount: services.createAccount ?? createAccount,
     previewAccountTreeImport: services.previewAccountTreeImport ?? services.importAccountTree ?? previewAccountTreeImport,
     commitAccountTreeImport: services.commitAccountTreeImport ?? commitAccountTreeImport,
+    getAccountTreeImportPlan: services.getAccountTreeImportPlan ?? getAccountTreeImportPlan,
     listTransactions: services.listTransactions ?? listTransactions,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
@@ -198,7 +225,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.4.0" });
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.5.0" });
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
@@ -286,6 +313,54 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     currency_type: z.enum(userCurrencyTypes),
     scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
   });
+  const accountTreePlanSummarySchema = z.object({
+    accountsCreated: z.number().int().nonnegative(),
+    accountsReused: z.number().int().nonnegative(),
+    currenciesCreated: z.number().int().nonnegative(),
+    currenciesReused: z.number().int().nonnegative(),
+    rejectedRows: z.number().int().nonnegative(),
+  });
+  const accountTreePlanFailureSchema = z.object({
+    code: z.enum(["IMPORT_PLAN_NOT_FOUND", "IMPORT_PLAN_EXPIRED", "IMPORT_PLAN_INVALIDATED",
+      "IMPORT_PLAN_STATE_CONFLICT", "IMPORT_PLAN_OWNER_MISMATCH"]),
+    recoverable: z.boolean(),
+    requiredAction: z.literal("RUN_NEW_DRY_RUN"),
+  });
+  const accountTreePreviewOutputSchema = z.union([z.object({
+    readyToCommit: z.literal(true),
+    importPlanId: z.string().uuid(),
+    status: z.literal("ready"),
+    expiresAt: z.string().datetime(),
+    previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    summary: accountTreePlanSummarySchema,
+    preview: z.record(z.string(), z.unknown()),
+    schemaProjection: z.unknown(),
+  }), accountTreePlanFailureSchema]);
+  const accountTreeCommitOutputSchema = z.union([z.object({
+    readyToCommit: z.literal(false),
+    importPlanId: z.string().uuid(),
+    status: z.literal("committed"),
+    expiresAt: z.string().datetime(),
+    previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    summary: accountTreePlanSummarySchema,
+    commitResult: z.record(z.string(), z.unknown()),
+    schemaProjection: z.unknown(),
+  }), accountTreePlanFailureSchema]);
+  const accountTreePlanStatusOutputSchema = z.union([
+    z.object({ readyToCommit: z.literal(true), status: z.literal("ready"), importPlanId: z.string().uuid(),
+      expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      summary: accountTreePlanSummarySchema }),
+    z.object({ readyToCommit: z.literal(false), status: z.literal("committed"), importPlanId: z.string().uuid(),
+      expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      summary: accountTreePlanSummarySchema, commitResult: z.record(z.string(), z.unknown()) }),
+    z.object({ readyToCommit: z.literal(false), status: z.literal("expired"), importPlanId: z.string().uuid(),
+      expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      summary: accountTreePlanSummarySchema }),
+    z.object({ readyToCommit: z.literal(false), status: z.literal("invalidated"), importPlanId: z.string().uuid(),
+      expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      summary: accountTreePlanSummarySchema, invalidationCode: z.string().min(1) }),
+    accountTreePlanFailureSchema,
+  ]);
   server.registerTool("import_account_tree", {
     title: "Preview account tree import",
     description: "Run a complete account-tree dry run and save its exact normalized input as a durable, owner-scoped import plan. Accepts optional user-owned currency definitions plus up to 1,000 colon-delimited account paths. For a file import, the dry run must contain the entire intended file batch; testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. If the source does not specify an exact scale for a new unit, stop and ask the user for the scale of each such unit; never guess. A successful dry run is a change preview: report what would be created, reused, skipped, or rejected, including the numerical summaries and planned rows. A successful result has readyToCommit=true and importPlanId; then explicitly tell the user they may approve the import. Do not replay this large input after approval and do not write ledger data with this tool; call commit_account_tree_import with only that plan ID.",
@@ -294,9 +369,9 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       accounts: z.array(importedAccountSchema).min(1).max(1000),
       dry_run: z.literal(true).default(true).describe("Run the entire intended batch as a dry run and save a durable confirmation plan without changing ledger data. Never reduce a file retry to only previously blocked rows."),
     },
+    outputSchema: accountTreePreviewOutputSchema,
     annotations: idempotentWrite,
-  }, async ({ currencies, accounts }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: await accounting.previewAccountTreeImport({
+  }, async ({ currencies, accounts }) => accountTreePlanToolResult(async () => accounting.previewAccountTreeImport({
       pool,
       personId,
       currencies: currencies.map((currency) => ({
@@ -312,8 +387,19 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
         description: account.description,
         placeholder: account.placeholder,
       })),
-    }),
-  }, operations.importAccountTree)));
+    }), { schemaSemantics, operation: operations.importAccountTree }));
+
+  server.registerTool("get_account_tree_import_plan", {
+    title: "Get account tree import plan",
+    description: "Read the durable status of an account-tree import plan without changing it. Returns ready, committed, expired, or invalidated with the opaque plan ID, expiration, preview digest, compact numerical summary, and the original commit result when committed. Plans persist across MCP connections, agent turns, blank interactions, and unrelated tool calls.",
+    inputSchema: {
+      import_plan_id: z.string().trim().uuid().describe("Exact opaque importPlanId returned by import_account_tree."),
+    },
+    outputSchema: accountTreePlanStatusOutputSchema,
+    annotations: readOnly,
+  }, async ({ import_plan_id }) => accountTreePlanToolResult(() => accounting.getAccountTreeImportPlan({
+    pool, personId, importPlanId: import_plan_id,
+  })));
 
   server.registerTool("commit_account_tree_import", {
     title: "Commit account tree import",
@@ -321,10 +407,12 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_account_tree."),
     },
+    outputSchema: accountTreeCommitOutputSchema,
     annotations: idempotentWrite,
-  }, async ({ import_plan_id }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: await accounting.commitAccountTreeImport({ pool, personId, importPlanId: import_plan_id }),
-  }, operations.commitAccountTreeImport)));
+  }, async ({ import_plan_id }) => accountTreePlanToolResult(
+    () => accounting.commitAccountTreeImport({ pool, personId, importPlanId: import_plan_id }),
+    { schemaSemantics, operation: operations.commitAccountTreeImport },
+  ));
 
   server.registerTool("list_transactions", {
     title: "List transactions",

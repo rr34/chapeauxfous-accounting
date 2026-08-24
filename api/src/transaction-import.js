@@ -538,13 +538,21 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const expiresAt = mariaDbUtcTimestamp(expiresAtDate);
     const payloadJson = JSON.stringify(normalized);
+    const preview = summarize(normalized, entries);
+    const transactionSummary = {
+      transactionsCreated: preview.wouldCreateTransactionCount,
+      transactionsReused: preview.wouldReuseTransactionCount,
+      lineItemsCreated: preview.wouldCreateLineItemCount,
+      lineItemsReused: preview.wouldReuseLineItemCount,
+      rejectedTransactions: preview.rejectedTransactionCount,
+    };
     await connection.query(
       `INSERT INTO accounting_import_plans
-        (import_plan_id, owner_person_id, import_kind, source_system, payload_sha256, payload_json,
-         item_count, expires_at)
-       VALUES (?, ?, 'transactions', ?, ?, ?, ?, ?)`,
-      [importPlanId, personId, normalized.sourceSystem, payloadHash(payloadJson), payloadJson,
-        normalized.transactions.length, expiresAt],
+        (import_plan_id, owner_person_id, import_kind, plan_status, source_system,
+         payload_sha256, preview_sha256, payload_json, summary_json, expires_at)
+       VALUES (?, ?, 'transactions', 'ready', ?, ?, ?, ?, ?, ?)`,
+      [importPlanId, personId, normalized.sourceSystem, payloadHash(payloadJson), payloadHash(JSON.stringify(preview)),
+        payloadJson, JSON.stringify(transactionSummary), expiresAt],
     );
     return summarize(normalized, entries, { importPlanId, expiresAt: expiresAtDate.toISOString() });
   });
@@ -588,7 +596,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
   const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
   return withPoolTransaction(pool, async (connection) => {
     const [planRows] = await connection.query(
-      `SELECT import_plan_id, source_system, payload_sha256, payload_json, expires_at,
+      `SELECT import_plan_id, plan_status, source_system, payload_sha256, payload_json, expires_at,
               committed_at, result_json, expires_at <= UTC_TIMESTAMP(6) AS is_expired
          FROM accounting_import_plans
         WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'transactions'
@@ -623,7 +631,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     const resultJson = JSON.stringify(result);
     await connection.query(
       `UPDATE accounting_import_plans
-          SET committed_at = UTC_TIMESTAMP(6), result_json = ?
+          SET plan_status = 'committed', committed_at = UTC_TIMESTAMP(6), result_json = ?
         WHERE import_plan_id = ? AND owner_person_id = ?`,
       [resultJson, resolvedPlanId, personId],
     );

@@ -79,10 +79,12 @@ function memoryPool() {
             }))];
           }
           if (sql.includes("INSERT INTO accounting_import_plans")) {
-            const [planId, ownerPersonId, sourceSystem, payloadSha256, payloadJson, itemCount, expiresAt] = params;
+            const [planId, ownerPersonId, sourceSystem, payloadSha256, previewSha256,
+              payloadJson, summaryJson, expiresAt] = params;
             state.plans.set(planId, { import_plan_id: planId, owner_person_id: ownerPersonId,
-              import_kind: "transactions", source_system: sourceSystem, payload_sha256: payloadSha256,
-              payload_json: payloadJson, item_count: itemCount, expires_at: expiresAt,
+              import_kind: "transactions", plan_status: "ready", source_system: sourceSystem,
+              payload_sha256: payloadSha256, preview_sha256: previewSha256,
+              payload_json: payloadJson, summary_json: summaryJson, expires_at: expiresAt,
               committed_at: null, result_json: null, is_expired: 0 });
             return [{ insertId: 0 }];
           }
@@ -147,6 +149,7 @@ function memoryPool() {
             const [resultJson, planId, ownerPersonId] = params;
             const plan = state.plans.get(planId);
             if (plan && Number(plan.owner_person_id) === Number(ownerPersonId)) {
+              plan.plan_status = "committed";
               plan.committed_at = "now";
               plan.result_json = resultJson;
             }
