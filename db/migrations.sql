@@ -7,6 +7,46 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0008: add-user-owned-currencies
+-- writer downtime: required while the API changes currency reads from a
+-- global catalog to the authenticated user's global-plus-private catalog.
+-- deployment order: apply this migration before restarting the API version
+-- that reads currency ownership, display names, and semantic types.
+-- locking: currencies is small, but its ALTER statements require metadata
+-- locks and rebuild its uniqueness rule.
+-- recovery: restore the verified pre-migration backup if the application must
+-- be rolled back; changing scale remains outside this migration.
+
+ALTER TABLE currencies
+  ADD COLUMN owner_person_id INT NULL AFTER currency_id,
+  ADD COLUMN display_name VARCHAR(255) NULL AFTER CurrencyAbbreviation,
+  ADD COLUMN currency_type
+    ENUM('iso_4217','crypto','security','commodity','custom')
+    NOT NULL DEFAULT 'iso_4217' AFTER display_name;
+
+UPDATE currencies
+   SET display_name = CurrencyAbbreviation
+ WHERE display_name IS NULL;
+
+UPDATE currencies
+   SET currency_type = 'crypto'
+ WHERE CurrencyAbbreviation IN ('BTC', 'BTC satoshi');
+
+ALTER TABLE currencies
+  MODIFY display_name VARCHAR(255) NOT NULL,
+  ADD COLUMN scope_owner_person_id INT
+    GENERATED ALWAYS AS (IFNULL(owner_person_id, 0)) STORED,
+  DROP INDEX currencies_unique,
+  ADD UNIQUE KEY currencies_scope_code_UQ
+    (scope_owner_person_id, CurrencyAbbreviation),
+  ADD KEY currencies_owner_type_IDX
+    (owner_person_id, currency_type, CurrencyAbbreviation),
+  ADD CONSTRAINT currencies_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT;
+
+-- end migration 0008
+
 -- migration 0007: add-account-description-and-placeholder
 -- writer downtime: not required; both columns have backward-compatible
 -- defaults and existing accounts remain ordinary postable accounts.

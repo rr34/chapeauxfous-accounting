@@ -3,11 +3,14 @@ import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
 import type {
   Account, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
-  TransactionDetail, TransactionSummary, User,
+  CurrencyType, TransactionDetail, TransactionSummary, User,
 } from "./types";
 
 const tokenKey = "cf-accounting-token";
 const today = () => new Date().toISOString().slice(0, 10);
+const currencyLabel = (currency: Currency) => currency.displayName === currency.code
+  ? currency.code
+  : `${currency.code} — ${currency.displayName}`;
 
 function errorMessage(error: unknown) {
   if (error instanceof ApiError || error instanceof Error) return error.message;
@@ -78,6 +81,13 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
   const [knownBalance, setKnownBalance] = useState("");
   const [assertionError, setAssertionError] = useState("");
   const [assertionBusy, setAssertionBusy] = useState(false);
+  const [showCurrencyForm, setShowCurrencyForm] = useState(false);
+  const [currencyCode, setCurrencyCode] = useState("");
+  const [currencyDisplayName, setCurrencyDisplayName] = useState("");
+  const [currencyType, setCurrencyType] = useState<Exclude<CurrencyType, "iso_4217">>("security");
+  const [currencyScale, setCurrencyScale] = useState("4");
+  const [currencyError, setCurrencyError] = useState("");
+  const [currencyBusy, setCurrencyBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
@@ -103,6 +113,21 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
     finally { setAssertionBusy(false); }
   }
 
+  async function createCurrency(event: FormEvent) {
+    event.preventDefault(); setCurrencyBusy(true); setCurrencyError("");
+    try {
+      await api("/currencies", { method: "POST", body: JSON.stringify({
+        code: currencyCode,
+        displayName: currencyDisplayName,
+        type: currencyType,
+        scale: Number(currencyScale),
+      }) }, token);
+      setCurrencyCode(""); setCurrencyDisplayName(""); setCurrencyType("security"); setCurrencyScale("4");
+      setShowCurrencyForm(false); await onChanged();
+    } catch (nextError) { setCurrencyError(errorMessage(nextError)); }
+    finally { setCurrencyBusy(false); }
+  }
+
   return <aside className="accounts-panel">
     <div className="section-heading"><div><p className="eyebrow">Chart</p><h2>Accounts</h2></div><button onClick={() => setShowForm(!showForm)}>＋</button></div>
     {showForm && <form className="compact-form" onSubmit={submit}>
@@ -113,7 +138,7 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
       </select><select required value={currencyId} onChange={(event) => setCurrencyId(event.target.value ? Number(event.target.value) : "")}>
         <option value="">Choose currency…</option>
-        {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}
+        {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}
       </select></div>
       <select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
         <option value="">No parent</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
@@ -127,6 +152,29 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         {account.description && <small>{account.description}</small>}</div>
       <b>{unitsToDecimal(account.balanceUnits, account.scale)}</b>
     </div>)}</div>
+    <section className="currencies-panel">
+      <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
+        <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
+      {showCurrencyForm && <form className="compact-form" onSubmit={createCurrency}>
+        <div className="form-row"><input required maxLength={50} placeholder="Code or ticker" value={currencyCode}
+          onChange={(event) => setCurrencyCode(event.target.value.toUpperCase())} />
+          <select value={currencyType} onChange={(event) => setCurrencyType(event.target.value as Exclude<CurrencyType, "iso_4217">)}>
+            <option value="security">Security / fund</option><option value="crypto">Crypto</option>
+            <option value="commodity">Commodity</option><option value="custom">Custom unit</option>
+          </select></div>
+        <input required maxLength={255} placeholder="Display name" value={currencyDisplayName}
+          onChange={(event) => setCurrencyDisplayName(event.target.value)} />
+        <label>Decimal places<input required type="number" min="0" max="18" value={currencyScale}
+          onChange={(event) => setCurrencyScale(event.target.value)} /></label>
+        {currencyError && <p className="error">{currencyError}</p>}
+        <button className="primary" disabled={currencyBusy}>{currencyBusy ? "Creating…" : "Create unit"}</button>
+      </form>}
+      <div className="currency-list">{currencies.filter((currency) => currency.userDefined).map((currency) =>
+        <div className="currency-row" key={currency.id}><div><strong>{currency.code}</strong><span>{currency.displayName}</span></div>
+          <small>{currency.type} · {currency.scale} decimals</small></div>)}
+        {!currencies.some((currency) => currency.userDefined) && <p className="assertion-empty">No custom units yet.</p>}
+      </div>
+    </section>
     <section className="assertions-panel">
       <div><p className="eyebrow">Reconciliation</p><h3>Known balances</h3></div>
       <form className="assertion-form" onSubmit={saveAssertion}>
@@ -212,7 +260,7 @@ function TransactionComposer({ accounts, currencies, token, onCreated }: {
         <label>Value currency<select required value={valuationCurrencyId}
           onChange={(event) => setValuationCurrencyId(event.target.value ? Number(event.target.value) : "")}>
           <option value="">Choose currency…</option>
-          {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}</select></label></div>
+          {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}</select></label></div>
       <div className="line-editor"><div className="line-head"><span>Account</span><span>Native amount</span><span>Memo</span><span>Tags</span><span /></div>
         {lines.map((line, index) => <div className="line-grid" key={index}>
           <select value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}><option value="">Choose…</option>
@@ -364,22 +412,24 @@ export default function App() {
   const [showAgentAccess, setShowAgentAccess] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { api<{ currencies: Currency[] }>("/currencies").then((result) => setCurrencies(result.currencies)).finally(() => setLoading(false)); }, []);
   useEffect(() => {
-    if (!token) { setUser(null); return; }
+    if (!token) { setUser(null); setCurrencies([]); setLoading(false); return; }
+    setLoading(true);
     api<{ user: User }>("/auth/me", {}, token).then((result) => setUser(result.user)).catch(() => {
       localStorage.removeItem(tokenKey); setToken(null);
-    });
+    }).finally(() => setLoading(false));
   }, [token]);
 
   async function refresh() {
     if (!token) return;
-    const [accountResult, assertionResult, transactionResult] = await Promise.all([
+    const [currencyResult, accountResult, assertionResult, transactionResult] = await Promise.all([
+      api<{ currencies: Currency[] }>("/currencies", {}, token),
       api<{ accounts: Account[] }>("/accounts", {}, token),
       api<{ assertions: BalanceAssertion[] }>("/balance-assertions", {}, token),
       api<{ transactions: TransactionSummary[] }>("/transactions", {}, token),
     ]);
-    setAccounts(accountResult.accounts); setAssertions(assertionResult.assertions); setTransactions(transactionResult.transactions);
+    setCurrencies(currencyResult.currencies); setAccounts(accountResult.accounts);
+    setAssertions(assertionResult.assertions); setTransactions(transactionResult.transactions);
   }
   useEffect(() => { if (token && user) void refresh(); }, [token, user]);
 

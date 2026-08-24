@@ -1,5 +1,6 @@
 import { addFractions, fraction } from "./money.js";
 import { withTransaction } from "./db.js";
+import { requireAccessibleCurrency } from "./currencies.js";
 
 function applicationError(message, status = 400, code = "INVALID_ACCOUNTING_OPERATION", details = undefined) {
   return Object.assign(new Error(message), { status, code, details });
@@ -9,13 +10,6 @@ function integerString(value, field) {
   const normalized = String(value ?? "").trim();
   if (!/^-?\d+$/.test(normalized)) throw applicationError(`${field} must be an integer string.`);
   return normalized;
-}
-
-export async function listCurrencies(pool) {
-  const [rows] = await pool.query(
-    "SELECT currency_id, CurrencyAbbreviation, scale FROM currencies ORDER BY CurrencyAbbreviation",
-  );
-  return rows.map((row) => ({ id: Number(row.currency_id), code: row.CurrencyAbbreviation.trim(), scale: Number(row.scale) }));
 }
 
 export async function listAccounts(pool, personId) {
@@ -62,8 +56,7 @@ export async function createAccount({ personId, name, description, placeholder =
       );
       if (!parentRows.length) throw applicationError("Parent account not found.", 404, "PARENT_ACCOUNT_NOT_FOUND");
     }
-    const [currencyRows] = await connection.query("SELECT currency_id FROM currencies WHERE currency_id = ?", [resolvedCurrencyId]);
-    if (!currencyRows.length) throw applicationError("Currency not found.", 404, "CURRENCY_NOT_FOUND");
+    await requireAccessibleCurrency(connection, personId, resolvedCurrencyId);
     const [result] = await connection.query(
       `INSERT INTO accounts
         (owner_person_id, AccountName, description, is_placeholder, parent_account_id, AccountType, account_currency_id)
@@ -169,8 +162,7 @@ export async function createTransaction({ personId, description, transactionDate
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(transactionDate ?? ""))) throw applicationError("Transaction date must be YYYY-MM-DD.");
   if (!Array.isArray(lineItems) || lineItems.length < 2) throw applicationError("At least two line items are required.");
   return withTransaction(async (connection) => {
-    const [currencyRows] = await connection.query("SELECT currency_id FROM currencies WHERE currency_id = ?", [valuationCurrencyId]);
-    if (!currencyRows.length) throw applicationError("Valuation currency not found.", 404, "CURRENCY_NOT_FOUND");
+    await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
     const [result] = await connection.query(
       `INSERT INTO transactions
         (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate, source_system, source_id)

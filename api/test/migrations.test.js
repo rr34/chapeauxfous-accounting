@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -37,4 +37,10 @@ test("the repository migration ledger is valid and contiguous", () => {
   const accountMetadataMigration = migrations.find((migration) => migration.version === 7);
   assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS description TEXT NULL/);
   assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS is_placeholder TINYINT\(1\) NOT NULL DEFAULT 0/);
+  const ownedCurrenciesMigration = migrations.find((migration) => migration.version === 8);
+  assert.match(ownedCurrenciesMigration.sql, /ADD COLUMN owner_person_id INT NULL/);
+  assert.match(ownedCurrenciesMigration.sql, /ENUM\('iso_4217','crypto','security','commodity','custom'\)/);
+  assert.match(ownedCurrenciesMigration.sql, /GENERATED ALWAYS AS \(IFNULL\(owner_person_id, 0\)\) STORED/);
+  assert.match(ownedCurrenciesMigration.sql, /UNIQUE KEY currencies_scope_code_UQ/);
+  assert.match(ownedCurrenciesMigration.sql, /FOREIGN KEY \(owner_person_id\) REFERENCES people2_people \(person_id\)/);
 });

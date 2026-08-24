@@ -1,4 +1,14 @@
-export type Currency = { id: number; code: string; scale: number };
+export type CurrencyType = "iso_4217" | "crypto" | "security" | "commodity" | "custom";
+
+export type Currency = {
+  id: number;
+  code: string;
+  displayName: string;
+  type: CurrencyType;
+  scale: number;
+  ownerPersonId: number | null;
+  userDefined: boolean;
+};
 
 export type User = {
   personId: number;

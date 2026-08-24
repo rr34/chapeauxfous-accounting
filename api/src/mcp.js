@@ -8,11 +8,11 @@ import {
   createTransaction,
   getTransaction,
   listAccounts,
-  listCurrencies,
   listTransactions,
   verifyAllPostedTransactions,
 } from "./accounting.js";
 import { importAccountTree } from "./account-tree.js";
+import { createCurrency, listCurrencies, userCurrencyTypes } from "./currencies.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
@@ -21,9 +21,15 @@ const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, 
 const operations = Object.freeze({
   listCurrencies: {
     name: "list_currencies",
-    purpose: "List the supported currencies and their native minor-unit scale.",
+    purpose: "List global and user-owned currencies, securities, commodities, and their native-unit scales.",
     schemaObjects: ["currencies"],
-    fields: { currencies: ["currency_id", "CurrencyAbbreviation", "scale"] },
+    fields: { currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"] },
+  },
+  createCurrency: {
+    name: "create_currency",
+    purpose: "Create one user-owned currency, security, commodity, or other accounting unit.",
+    schemaObjects: ["currencies"],
+    fields: { currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"] },
   },
   listAccounts: {
     name: "list_accounts",
@@ -51,7 +57,7 @@ const operations = Object.freeze({
     schemaObjects: ["accounts", "currencies"],
     fields: {
       accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation"],
+      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
     },
   },
   listTransactions: {
@@ -143,6 +149,7 @@ function positiveInteger(label) {
 export function createAccountingMcpServer({ personId, pool, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
   const accounting = {
     listCurrencies: services.listCurrencies ?? listCurrencies,
+    createCurrency: services.createCurrency ?? createCurrency,
     listAccounts: services.listAccounts ?? listAccounts,
     createAccount: services.createAccount ?? createAccount,
     importAccountTree: services.importAccountTree ?? importAccountTree,
@@ -153,7 +160,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.2.0" });
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.3.0" });
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
@@ -166,12 +173,33 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
   server.registerTool("list_currencies", {
     title: "List currencies",
-    description: "List currency ids, codes, and minor-unit scales. Monetary amounts elsewhere are integer native units, not decimal strings.",
+    description: "List global and user-owned accounting units with ids, codes, display names, semantic types, and native-unit scales. Amounts elsewhere are integer native units, not decimal strings.",
     inputSchema: {},
     annotations: readOnly,
   }, async () => toolResult(withSchemaProjection(schemaSemantics, {
-    currencies: await accounting.listCurrencies(pool),
+    currencies: await accounting.listCurrencies(pool, personId),
   }, operations.listCurrencies)));
+
+  server.registerTool("create_currency", {
+    title: "Create currency or security",
+    description: "Create a private accounting unit for the API-token owner. Use security for stocks and mutual funds. Scale is the number of fractional decimal places and cannot safely change after amounts have been recorded.",
+    inputSchema: {
+      code: z.string().trim().min(1).max(50).describe("Short user-facing code or ticker, such as VTSAX."),
+      display_name: z.string().trim().min(1).max(255),
+      currency_type: z.enum(userCurrencyTypes),
+      scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts."),
+    },
+    annotations: writesData,
+  }, async ({ code, display_name, currency_type, scale }) => toolResult(withSchemaProjection(schemaSemantics, {
+    currency: await accounting.createCurrency({
+      pool,
+      personId,
+      code,
+      displayName: display_name,
+      type: currency_type,
+      scale,
+    }),
+  }, operations.createCurrency)));
 
   server.registerTool("list_accounts", {
     title: "List accounts",
@@ -214,19 +242,32 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     description: z.string().trim().max(16000).nullable().optional(),
     placeholder: z.boolean().default(false).describe("Whether this is a non-postable organizational account."),
   });
+  const importedCurrencySchema = z.object({
+    code: z.string().trim().min(1).max(50),
+    display_name: z.string().trim().min(1).max(255),
+    currency_type: z.enum(userCurrencyTypes),
+    scale: z.number().int().min(0).max(18),
+  });
   server.registerTool("import_account_tree", {
     title: "Import account tree",
-    description: "Validate and import up to 1,000 accounts from colon-delimited full names. Input order does not matter, every non-root parent must be present in this batch or already exist, and the write is atomic. Existing paths are reused only when all supplied fields match. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
+    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. Use currency_type=security for mutual funds and stocks. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
     inputSchema: {
+      currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),
       dry_run: z.boolean().default(true).describe("Validate and report the complete plan without writing. Set false only after reviewing a successful dry run."),
     },
     annotations: { ...writesData, idempotentHint: true },
-  }, async ({ accounts, dry_run }) => toolResult(withSchemaProjection(schemaSemantics, {
+  }, async ({ currencies, accounts, dry_run }) => toolResult(withSchemaProjection(schemaSemantics, {
     import: await accounting.importAccountTree({
       pool,
       personId,
       dryRun: dry_run,
+      currencies: currencies.map((currency) => ({
+        code: currency.code,
+        displayName: currency.display_name,
+        type: currency.currency_type,
+        scale: currency.scale,
+      })),
       accounts: accounts.map((account) => ({
         fullName: account.full_name,
         type: account.account_type,

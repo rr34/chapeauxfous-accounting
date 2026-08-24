@@ -8,9 +8,10 @@ import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
-  createAccount, createTransaction, getTransaction, listAccounts, listCurrencies,
+  createAccount, createTransaction, getTransaction, listAccounts,
   listTransactions, verifyAllPostedTransactions,
 } from "./accounting.js";
+import { createCurrency, listCurrencies } from "./currencies.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 5004);
@@ -28,8 +29,15 @@ app.get("/health", async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get("/api/currencies", async (_req, res, next) => {
-  try { res.json({ currencies: await listCurrencies(pool) }); } catch (error) { next(error); }
+app.get("/api/currencies", requireAuth, async (req, res, next) => {
+  try { res.json({ currencies: await listCurrencies(pool, req.auth.personId) }); } catch (error) { next(error); }
+});
+
+app.post("/api/currencies", requireAuth, async (req, res, next) => {
+  try {
+    const currency = await createCurrency({ pool, personId: req.auth.personId, ...req.body });
+    res.status(201).json({ currency });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/auth/register", async (req, res, next) => {

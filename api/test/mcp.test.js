@@ -14,8 +14,13 @@ const { createAccountingMcpHandler, createAccountingMcpServer } = await import("
 test("the MCP exposes scoped tools with schema-semantic projections", async () => {
   const seen = [];
   let imported;
+  let createdCurrency;
   const services = {
-    async listCurrencies() { return [{ id: 2, code: "BTC", scale: 8 }]; },
+    async listCurrencies(_pool, personId) {
+      seen.push(`currencies:${personId}`);
+      return [{ id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8 }];
+    },
+    async createCurrency(input) { createdCurrency = input; return { id: 12, ...input }; },
     async listAccounts(_pool, personId) {
       seen.push(personId);
       return [{ id: 10, name: "Wallet", balanceUnits: "123" }];
@@ -37,10 +42,29 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
+  assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
 
+  const currenciesResult = await client.callTool({ name: "list_currencies", arguments: {} });
+  assert.equal(currenciesResult.structuredContent.currencies[0].displayName, "Bitcoin");
+
+  await client.callTool({
+    name: "create_currency",
+    arguments: {
+      code: "VTSAX",
+      display_name: "Vanguard Total Stock Market Index Fund Admiral Shares",
+      currency_type: "security",
+      scale: 4,
+    },
+  });
+  assert.deepEqual(createdCurrency, {
+    pool: {}, personId: 7, code: "VTSAX",
+    displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
+    type: "security", scale: 4,
+  });
+
   const result = await client.callTool({ name: "list_accounts", arguments: {} });
-  assert.deepEqual(seen, [7]);
+  assert.deepEqual(seen, ["currencies:7", 7]);
   assert.equal(result.structuredContent.accounts[0].name, "Wallet");
   assert.equal(
     result.structuredContent.schemaProjection.product,
@@ -54,6 +78,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const importResult = await client.callTool({
     name: "import_account_tree",
     arguments: {
+      currencies: [{
+        code: "VTSAX",
+        display_name: "Vanguard Total Stock Market Index Fund Admiral Shares",
+        currency_type: "security",
+        scale: 4,
+      }],
       accounts: [{
         full_name: "Assets:Bank",
         account_type: "asset",
@@ -70,6 +100,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     currencyCode: "USD",
     description: "Primary bank grouping",
     placeholder: true,
+  }]);
+  assert.deepEqual(imported.currencies, [{
+    code: "VTSAX",
+    displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
+    type: "security",
+    scale: 4,
   }]);
   assert.equal(importResult.structuredContent.import.plannedCount, 1);
 
@@ -114,7 +150,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.2.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.3.0");
 
   await handler.close();
 });

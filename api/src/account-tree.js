@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
+import { createOrMatchUserCurrencies, currencyKey } from "./currencies.js";
 
 const allowedTypes = new Set(["asset", "liability", "equity", "income", "expense"]);
 const importSourceSystem = "account_tree";
@@ -10,10 +11,6 @@ function importError(message, code, details = undefined) {
 
 function normalizedDescription(value) {
   return String(value ?? "").trim() || null;
-}
-
-function currencyKey(value) {
-  return String(value ?? "").trim().toLocaleLowerCase("en-US");
 }
 
 function parsePath(value) {
@@ -143,16 +140,15 @@ function sourceId(path) {
   return createHash("sha256").update(path, "utf8").digest("hex");
 }
 
-export async function importAccountTree({ pool, personId, accounts, dryRun = true }) {
+export async function importAccountTree({ pool, personId, accounts, currencies: currencyDefinitions = [], dryRun = true }) {
   const inputs = normalizeImportRows(accounts);
   return withPoolTransaction(pool, async (connection) => {
-    const [currencyRows] = await connection.query(
-      "SELECT currency_id, CurrencyAbbreviation FROM currencies ORDER BY currency_id",
+    const { currenciesByCode: currencies, results: currencyResults } = await createOrMatchUserCurrencies(
+      connection,
+      personId,
+      currencyDefinitions,
+      { dryRun },
     );
-    const currencies = new Map(currencyRows.map((row) => [currencyKey(row.CurrencyAbbreviation), {
-      id: Number(row.currency_id),
-      code: String(row.CurrencyAbbreviation).trim(),
-    }]));
     for (const input of inputs) {
       const currency = currencies.get(currencyKey(input.currencyCode));
       if (!currency) {
@@ -220,6 +216,10 @@ export async function importAccountTree({ pool, personId, accounts, dryRun = tru
       createdCount: results.filter((result) => result.status === "created").length,
       existingCount: results.filter((result) => result.status === "existing").length,
       plannedCount: results.filter((result) => result.status === "planned").length,
+      currencyCreatedCount: currencyResults.filter((result) => result.status === "created").length,
+      currencyExistingCount: currencyResults.filter((result) => result.status === "existing").length,
+      currencyPlannedCount: currencyResults.filter((result) => result.status === "planned").length,
+      currencies: currencyResults,
       accounts: results,
     };
   });

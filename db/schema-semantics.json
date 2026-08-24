@@ -8,9 +8,9 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 7,
-    "schemaFingerprint": "f724b09bcf2ef9cbc4affe2e84dec7d1c75a348ff571bc18028504a63f66e450",
-    "extractedAt": "2026-08-24T11:17:16.000Z"
+    "schemaVersion": 8,
+    "schemaFingerprint": "30defe5f44ba7a29f73619998da2a0093172787c6997cd3f020d8b93653e47e4",
+    "extractedAt": "2026-08-24T12:17:31.362Z"
   },
   "instructions": {
     "humanOwned": "Fill only semantics properties. Null, empty arrays, and empty objects are intentional blanks.",
@@ -687,8 +687,20 @@
         "definition": null,
         "indexes": [
           {
-            "name": "currencies_unique",
+            "name": "currencies_owner_type_IDX",
             "columns": [
+              "owner_person_id",
+              "currency_type",
+              "CurrencyAbbreviation"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "currencies_scope_code_UQ",
+            "columns": [
+              "scope_owner_person_id",
               "CurrencyAbbreviation"
             ],
             "unique": true,
@@ -707,24 +719,31 @@
         ]
       },
       "semantics": {
-        "purpose": "Define supported currencies and the scale used to interpret their integer native units.",
-        "rowMeaning": "One supported currency or monetary unit.",
+        "purpose": "Define global and user-owned currencies, securities, commodities, and custom units with the scale used to interpret integer native amounts.",
+        "rowMeaning": "One globally available or user-owned accounting unit.",
         "sourceOfTruth": true,
         "derivedFrom": [],
         "synonyms": [
           "currency code",
-          "money unit"
+          "money unit",
+          "security",
+          "commodity",
+          "mutual fund"
         ],
         "keywords": [
           "USD",
           "BTC",
           "minor units",
           "decimal places",
-          "scale"
+          "scale",
+          "ticker",
+          "shares"
         ],
         "routingWeight": 0.8,
         "importantRules": [
-          "Amounts are stored as integers; divide by 10 raised to scale only for human display."
+          "Amounts are stored as integers; divide by 10 raised to scale only for human display.",
+          "A NULL owner_person_id identifies a global catalog row; a non-NULL owner identifies a private user-created unit.",
+          "A unit's scale must not change after accounting amounts reference it."
         ],
         "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
       },
@@ -756,11 +775,40 @@
             "sensitivity": "Private accounting data belonging to the authenticated user."
           }
         },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": true,
+            "default": "NULL",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person who owns this private unit; NULL identifies a globally available catalog unit.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [
+              "Users may access global units and units bearing their own person identifier, never another user's private units."
+            ],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
         "CurrencyAbbreviation": {
           "mechanics": {
             "present": true,
             "name": "CurrencyAbbreviation",
-            "ordinal": 1,
+            "ordinal": 2,
             "type": "varchar(50)",
             "nullable": false,
             "default": null,
@@ -783,11 +831,77 @@
             "sensitivity": "Private accounting data belonging to the authenticated user."
           }
         },
+        "display_name": {
+          "mechanics": {
+            "present": true,
+            "name": "display_name",
+            "ordinal": 3,
+            "type": "varchar(255)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Full human-facing name for the currency, security, commodity, or custom unit.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting metadata when the unit is user-owned."
+          }
+        },
+        "currency_type": {
+          "mechanics": {
+            "present": true,
+            "name": "currency_type",
+            "ordinal": 4,
+            "type": "enum('iso_4217','crypto','security','commodity','custom')",
+            "nullable": false,
+            "default": "'iso_4217'",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": [
+              "iso_4217",
+              "crypto",
+              "security",
+              "commodity",
+              "custom"
+            ]
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Semantic class of accounting unit, distinguishing ISO 4217 currencies, crypto assets, securities, commodities, and custom units.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {
+              "iso_4217": "System-defined ISO 4217 currency or official unit-of-account code.",
+              "crypto": "Cryptocurrency or a native subdivision of one.",
+              "security": "Stock, mutual fund, exchange-traded fund, or another security measured in shares.",
+              "commodity": "Physical or financial commodity measured in its native quantity.",
+              "custom": "User-defined accounting unit not covered by the other classes."
+            },
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting metadata when the unit is user-owned."
+          }
+        },
         "scale": {
           "mechanics": {
             "present": true,
             "name": "scale",
-            "ordinal": 2,
+            "ordinal": 5,
             "type": "tinyint(3) unsigned",
             "nullable": false,
             "default": "2",
@@ -808,6 +922,35 @@
             "examples": [],
             "importantRules": [],
             "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "scope_owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "scope_owner_person_id",
+            "ordinal": 6,
+            "type": "int(11)",
+            "nullable": true,
+            "default": "NULL",
+            "primaryKeyPosition": 0,
+            "generated": true,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Generated uniqueness scope: zero for global units and owner_person_id for private units.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.3,
+            "examples": [],
+            "importantRules": [
+              "This generated implementation field enforces per-owner code uniqueness and is not user input."
+            ],
+            "sensitivity": "Private tenant identifier; do not expose as an application field."
           }
         }
       },
@@ -1957,20 +2100,24 @@
         ]
       },
       "semantics": {
-        "purpose": "Store exact rational exchange rates for multi-currency transactions and optional reference rates.",
+        "purpose": "Store exact rational exchange rates for transactions plus timestamped reference rates such as security and mutual-fund market prices.",
         "rowMeaning": "One exact ratio converting positive source units to positive target units.",
         "sourceOfTruth": true,
         "derivedFrom": [],
         "synonyms": [
           "exchange rate",
           "currency conversion",
-          "FX rate"
+          "FX rate",
+          "market price",
+          "security price"
         ],
         "keywords": [
           "foreign currency",
           "convert",
           "valuation currency",
-          "rate"
+          "rate",
+          "price history",
+          "net asset value"
         ],
         "routingWeight": 0.8,
         "importantRules": [

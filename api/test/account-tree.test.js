@@ -11,7 +11,12 @@ const { importAccountTree } = await import("../src/account-tree.js");
 function memoryPool(initialAccounts = []) {
   const state = {
     accounts: structuredClone(initialAccounts),
+    currencies: [{
+      currency_id: 1, owner_person_id: null, CurrencyAbbreviation: "USD",
+      display_name: "USD", currency_type: "iso_4217", scale: 2,
+    }],
     nextId: Math.max(0, ...initialAccounts.map((account) => Number(account.account_id))) + 1,
+    nextCurrencyId: 2,
     inserts: [],
     commits: 0,
     rollbacks: 0,
@@ -19,18 +24,37 @@ function memoryPool(initialAccounts = []) {
   return {
     state,
     async getConnection() {
-      const snapshot = structuredClone(state.accounts);
+      const accountSnapshot = structuredClone(state.accounts);
+      const currencySnapshot = structuredClone(state.currencies);
       return {
         async beginTransaction() {},
         async commit() { state.commits += 1; },
-        async rollback() { state.rollbacks += 1; state.accounts = snapshot; },
+        async rollback() {
+          state.rollbacks += 1;
+          state.accounts = accountSnapshot;
+          state.currencies = currencySnapshot;
+        },
         release() {},
         async query(sql, params = []) {
           if (sql.includes("FROM currencies")) {
-            return [[{ currency_id: 1, CurrencyAbbreviation: "USD" }]];
+            return [state.currencies.filter((currency) =>
+              currency.owner_person_id == null || Number(currency.owner_person_id) === 7)];
+          }
+          if (sql.includes("INSERT INTO currencies")) {
+            const [owner, code, displayName, type, scale] = params;
+            const row = {
+              currency_id: state.nextCurrencyId++, owner_person_id: owner,
+              CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale,
+            };
+            state.currencies.push(row);
+            return [{ insertId: row.currency_id }];
           }
           if (sql.includes("FROM accounts a")) {
-            return [state.accounts.map((account) => ({ ...account, CurrencyAbbreviation: "USD" }))];
+            return [state.accounts.map((account) => ({
+              ...account,
+              CurrencyAbbreviation: state.currencies.find((currency) =>
+                Number(currency.currency_id) === Number(account.account_currency_id))?.CurrencyAbbreviation,
+            }))];
           }
           if (sql.includes("INSERT INTO accounts")) {
             const [owner, name, description, placeholder, parentId, type, currencyId, sourceSystem, sourceId] = params;
@@ -86,6 +110,32 @@ test("dry-run validates the complete tree without inserting", async () => {
   assert.equal(result.plannedCount, 3);
   assert.equal(result.createdCount, 0);
   assert.equal(pool.state.inserts.length, 0);
+});
+
+test("account-tree import atomically creates explicit user-owned securities", async () => {
+  const pool = memoryPool();
+  const input = {
+    pool,
+    personId: 7,
+    currencies: [{ code: "vtsax", displayName: "Vanguard Total Stock Market Index Fund", type: "security", scale: 4 }],
+    accounts: [
+      { fullName: "Assets", type: "asset", currencyCode: "USD", placeholder: true },
+      { fullName: "Assets:Investments", type: "asset", currencyCode: "USD", placeholder: true },
+      { fullName: "Assets:Investments:VTSAX", type: "asset", currencyCode: "VTSAX" },
+    ],
+    dryRun: false,
+  };
+  const result = await importAccountTree(input);
+  assert.equal(result.currencyCreatedCount, 1);
+  assert.equal(result.createdCount, 3);
+  assert.equal(pool.state.currencies[1].CurrencyAbbreviation, "VTSAX");
+  assert.equal(pool.state.currencies[1].currency_type, "security");
+  assert.equal(pool.state.inserts[2].account_currency_id, pool.state.currencies[1].currency_id);
+
+  const retry = await importAccountTree(input);
+  assert.equal(retry.currencyExistingCount, 1);
+  assert.equal(retry.currencyCreatedCount, 0);
+  assert.equal(retry.createdCount, 0);
 });
 
 test("a missing parent rolls back the atomic import", async () => {
