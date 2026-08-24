@@ -22,7 +22,10 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const services = {
     async listCurrencies(_pool, personId) {
       seen.push(`currencies:${personId}`);
-      return [{ id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8 }];
+      return [
+        { id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8 },
+        { id: 1, code: "USD", displayName: "US Dollar", type: "iso_4217", scale: 2 },
+      ];
     },
     async createCurrency(input) { createdCurrency = input; return { id: 12, ...input }; },
     async listAccounts(_pool, personId) {
@@ -102,11 +105,11 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
   assert.match(tools.tools.find((tool) => tool.name === "create_currency").description, /Never guess or choose a default scale/);
-  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /ask the user for the scale of each such unit/);
-  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended file batch/);
-  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /successful dry run is a change preview/);
-  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /created, reused, skipped, or rejected/);
-  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /importPlanId/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /even when new currency details or scales are unknown/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended batch/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /status=needs_input/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /numerical created\/reused summaries/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /nextAction\.onApproval/);
   assert.match(tools.tools.find((tool) => tool.name === "commit_account_tree_import").description, /only import_plan_id/);
   const accountTreeOutputSchema = tools.tools.find((tool) => tool.name === "import_account_tree").outputSchema;
   assert.match(JSON.stringify(accountTreeOutputSchema), /readyToCommit/);
@@ -121,7 +124,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   );
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.currencies.items.properties.scale.description,
-    /explicitly confirmed by the user/,
+    /Omit this when unknown/,
   );
 
   const currenciesResult = await client.callTool({ name: "list_currencies", arguments: {} });
@@ -189,6 +192,33 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(importResult.structuredContent.readyToCommit, true);
   assert.equal(importResult.structuredContent.preview.plannedCount, 1);
   assert.equal(importResult.structuredContent.summary.accountsCreated, 1);
+  assert.equal(importResult.structuredContent.requiredAction, "REQUEST_USER_CONFIRMATION");
+  assert.deepEqual(importResult.structuredContent.nextAction.onApproval, {
+    tool: "commit_account_tree_import",
+    arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
+  });
+  assert.deepEqual(seen, ["currencies:7", 7, "currencies:7"]);
+
+  const missingScales = await client.callTool({
+    name: "import_account_tree",
+    arguments: {
+      currencies: [
+        { code: "VIGIX", display_name: "Vanguard Growth Index Fund", currency_type: "security" },
+        { code: "S5L", display_name: "Shiloh's Five Loaves", currency_type: "security", scale: null },
+      ],
+      accounts: [
+        { full_name: "Assets:VIGIX", account_type: "asset", currency_code: "VIGIX" },
+        { full_name: "Assets:S5L", account_type: "asset", currency_code: "S5L" },
+      ],
+      dry_run: true,
+    },
+  });
+  assert.equal(missingScales.structuredContent.status, "needs_input");
+  assert.equal(missingScales.structuredContent.requiredAction, "ASK_USER_FOR_CURRENCY_SCALES");
+  assert.equal(missingScales.structuredContent.batchSummary.accountCount, 2);
+  assert.deepEqual(missingScales.structuredContent.missingCurrencies.map((currency) => currency.code), ["S5L", "VIGIX"]);
+  assert.equal(missingScales.structuredContent.nextAction.retry.preserveEntireBatch, true);
+  assert.equal(imported.accounts.length, 1);
 
   const planStatus = await client.callTool({
     name: "get_account_tree_import_plan",
@@ -247,6 +277,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     },
   });
   assert.equal(transactionPreview.structuredContent.import.wouldCreateTransactionCount, 1);
+  assert.equal(transactionPreview.structuredContent.import.requiredAction, "REQUEST_USER_CONFIRMATION");
   assert.deepEqual(importedTransactions.transactions[0].lineItems[0], {
     externalId: "1", accountFullName: "Assets:Cash", amountDecimal: "-1.00",
     valueDecimal: undefined, memo: undefined,
@@ -301,7 +332,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.5.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.6.0");
 
   await handler.close();
 });

@@ -305,6 +305,21 @@ test("an account-tree plan survives a new MCP connection and unrelated tool call
     },
   });
   const planId = dryRun.structuredContent.importPlanId;
+  const blocked = await firstClient.callTool({
+    name: "import_account_tree",
+    arguments: {
+      accounts: [
+        { full_name: "Assets", account_type: "asset", currency_code: "USD", placeholder: true },
+        { full_name: "Assets", account_type: "asset", currency_code: "USD", placeholder: true },
+      ],
+      dry_run: true,
+    },
+  });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.structuredContent.status, "blocked");
+  assert.equal(blocked.structuredContent.code, "DUPLICATE_ACCOUNT_PATH");
+  assert.equal(blocked.structuredContent.requiredAction, "CORRECT_INPUT_AND_RUN_NEW_DRY_RUN");
+  assert.equal(blocked.structuredContent.nextAction.retry.preserveEntireBatch, true);
   await firstClient.close();
   await firstServer.close();
 

@@ -190,7 +190,11 @@ function toolFailureResult(value) {
   };
 }
 
-async function accountTreePlanToolResult(work, { schemaSemantics = null, operation = null } = {}) {
+async function accountTreePlanToolResult(work, {
+  schemaSemantics = null,
+  operation = null,
+  includeValidationRecovery = false,
+} = {}) {
   try {
     const result = await work();
     return toolResult(schemaSemantics && operation
@@ -198,13 +202,148 @@ async function accountTreePlanToolResult(work, { schemaSemantics = null, operati
       : result);
   } catch (error) {
     const failure = accountTreeImportPlanFailure(error);
-    if (!failure) throw error;
-    return toolFailureResult(failure);
+    if (failure) return toolFailureResult(failure);
+    if (includeValidationRecovery && error?.code && [400, 409].includes(Number(error.status))) {
+      return toolFailureResult({
+        readyToCommit: false,
+        status: "blocked",
+        code: String(error.code),
+        message: String(error.message),
+        details: error.details ?? null,
+        recoverable: true,
+        requiredAction: "CORRECT_INPUT_AND_RUN_NEW_DRY_RUN",
+        nextAction: {
+          type: "correct_import_batch",
+          retry: { tool: "import_account_tree", preserveEntireBatch: true },
+        },
+      });
+    }
+    throw error;
   }
 }
 
 function positiveInteger(label) {
   return z.number().int().positive().describe(label);
+}
+
+function accountingUnitKey(value) {
+  return String(value ?? "").trim().toLocaleUpperCase("en-US");
+}
+
+function accountTreeCurrencyRequirements({ accounts, currencies, accessibleCurrencies }) {
+  const accessibleCodes = new Set(accessibleCurrencies.map((currency) => accountingUnitKey(currency.code)));
+  const definitions = new Map(currencies.map((currency) => [accountingUnitKey(currency.code), currency]));
+  const references = new Map();
+  for (const account of accounts) {
+    const key = accountingUnitKey(account.currency_code);
+    const reference = references.get(key) ?? { code: String(account.currency_code).trim(), paths: [] };
+    reference.paths.push(account.full_name);
+    references.set(key, reference);
+  }
+
+  const unknownCodes = new Set([
+    ...[...references.keys()].filter((code) => !accessibleCodes.has(code)),
+    ...[...definitions.keys()].filter((code) => !accessibleCodes.has(code)),
+  ]);
+  return [...unknownCodes].sort().flatMap((key) => {
+    const definition = definitions.get(key);
+    const reference = references.get(key);
+    const missingFields = [];
+    if (!definition?.display_name) missingFields.push("display_name");
+    if (!definition?.currency_type) missingFields.push("currency_type");
+    if (definition?.scale == null) missingFields.push("scale");
+    if (!missingFields.length) return [];
+
+    const code = definition?.code ?? reference?.code ?? key;
+    const userQuestions = [];
+    if (missingFields.includes("scale")) {
+      userQuestions.push(`What decimal scale (0 through 18) should be used for ${code}?`);
+    }
+    if (missingFields.includes("display_name")) {
+      userQuestions.push(`What display name should be used for ${code}?`);
+    }
+    if (missingFields.includes("currency_type")) {
+      userQuestions.push(`Should ${code} be a crypto, security, commodity, or custom unit?`);
+    }
+    return [{
+      code,
+      displayName: definition?.display_name ?? null,
+      currencyType: definition?.currency_type ?? null,
+      missingFields,
+      referencedByAccountCount: reference?.paths.length ?? 0,
+      exampleAccountPaths: reference?.paths.slice(0, 5) ?? [],
+      userQuestions,
+    }];
+  });
+}
+
+function accountTreeNeedsInputWorkflow({ accounts, currencies, requirements }) {
+  const onlyScalesMissing = requirements.every((requirement) =>
+    requirement.missingFields.length === 1 && requirement.missingFields[0] === "scale");
+  return {
+    readyToCommit: false,
+    status: "needs_input",
+    code: onlyScalesMissing ? "CURRENCY_SCALES_REQUIRED" : "CURRENCY_DETAILS_REQUIRED",
+    requiredAction: onlyScalesMissing ? "ASK_USER_FOR_CURRENCY_SCALES" : "COMPLETE_CURRENCY_DEFINITIONS",
+    message: onlyScalesMissing
+      ? "Ask the user for the listed currency scales, then repeat this dry run with the complete original batch."
+      : "Complete the listed currency definitions from authoritative source data or ask the user, then repeat this dry run with the complete original batch.",
+    batchSummary: {
+      accountCount: accounts.length,
+      suppliedCurrencyDefinitionCount: currencies.length,
+      unresolvedCurrencyCount: requirements.length,
+    },
+    missingCurrencies: requirements,
+    nextAction: {
+      type: "collect_currency_details",
+      askUser: requirements.flatMap((requirement) => requirement.userQuestions),
+      retry: {
+        tool: "import_account_tree",
+        preserveEntireBatch: true,
+        instruction: "Repeat import_account_tree with the entire original accounts array and completed currency definitions. Do not retry only the affected rows.",
+      },
+    },
+  };
+}
+
+function accountTreeReadyWorkflow(result) {
+  const { preview, ...identity } = result;
+  return {
+    ...identity,
+    requiredAction: "REQUEST_USER_CONFIRMATION",
+    nextAction: {
+      type: "request_user_confirmation",
+      instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the import payload.",
+      onApproval: {
+        tool: "commit_account_tree_import",
+        arguments: { import_plan_id: result.importPlanId },
+      },
+    },
+    preview,
+  };
+}
+
+function transactionPreviewWorkflow(result) {
+  if (result.readyToCommit && result.importPlanId) {
+    return {
+      ...result,
+      requiredAction: "REQUEST_USER_CONFIRMATION",
+      nextAction: {
+        type: "request_user_confirmation",
+        instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the transaction batch.",
+        onApproval: { tool: "commit_transaction_import", arguments: { import_plan_id: result.importPlanId } },
+      },
+    };
+  }
+  return {
+    ...result,
+    requiredAction: "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN",
+    nextAction: {
+      type: "correct_rejected_transactions",
+      instruction: "Report every rejection and unknown or ambiguous account path, correct the complete batch, then run a new dry run.",
+      retry: { tool: "import_transactions", preserveEntireBatch: true },
+    },
+  };
 }
 
 export function createAccountingMcpServer({ personId, pool, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
@@ -225,7 +364,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.5.0" });
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.6.0" });
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
@@ -309,9 +448,12 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   });
   const importedCurrencySchema = z.object({
     code: z.string().trim().min(1).max(50),
-    display_name: z.string().trim().min(1).max(255),
-    currency_type: z.enum(userCurrencyTypes),
-    scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
+    display_name: z.string().trim().min(1).max(255).optional()
+      .describe("Display name for a new unit. It may be omitted on the first preflight call so the MCP can return an exact next-action response."),
+    currency_type: z.enum(userCurrencyTypes).optional()
+      .describe("Type for a new unit. It may be omitted on the first preflight call so the MCP can return an exact next-action response."),
+    scale: z.number().int().min(0).max(18).nullable().optional()
+      .describe("Decimal places retained for integer native-unit amounts. Omit this when unknown: import_account_tree will identify every missing scale and direct the agent to ask the user. Never infer a default."),
   });
   const accountTreePlanSummarySchema = z.object({
     accountsCreated: z.number().int().nonnegative(),
@@ -333,8 +475,62 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     expiresAt: z.string().datetime(),
     previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     summary: accountTreePlanSummarySchema,
+    requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
+    nextAction: z.object({
+      type: z.literal("request_user_confirmation"),
+      instruction: z.string().min(1),
+      onApproval: z.object({
+        tool: z.literal("commit_account_tree_import"),
+        arguments: z.object({ import_plan_id: z.string().uuid() }),
+      }),
+    }),
     preview: z.record(z.string(), z.unknown()),
     schemaProjection: z.unknown(),
+  }), z.object({
+    readyToCommit: z.literal(false),
+    status: z.literal("needs_input"),
+    code: z.enum(["CURRENCY_SCALES_REQUIRED", "CURRENCY_DETAILS_REQUIRED"]),
+    requiredAction: z.enum(["ASK_USER_FOR_CURRENCY_SCALES", "COMPLETE_CURRENCY_DEFINITIONS"]),
+    message: z.string().min(1),
+    batchSummary: z.object({
+      accountCount: z.number().int().positive(),
+      suppliedCurrencyDefinitionCount: z.number().int().nonnegative(),
+      unresolvedCurrencyCount: z.number().int().positive(),
+    }),
+    missingCurrencies: z.array(z.object({
+      code: z.string().min(1),
+      displayName: z.string().nullable(),
+      currencyType: z.enum(userCurrencyTypes).nullable(),
+      missingFields: z.array(z.enum(["display_name", "currency_type", "scale"])).min(1),
+      referencedByAccountCount: z.number().int().nonnegative(),
+      exampleAccountPaths: z.array(z.string()),
+      userQuestions: z.array(z.string().min(1)).min(1),
+    })).min(1),
+    nextAction: z.object({
+      type: z.literal("collect_currency_details"),
+      askUser: z.array(z.string().min(1)).min(1),
+      retry: z.object({
+        tool: z.literal("import_account_tree"),
+        preserveEntireBatch: z.literal(true),
+        instruction: z.string().min(1),
+      }),
+    }),
+    schemaProjection: z.unknown(),
+  }), z.object({
+    readyToCommit: z.literal(false),
+    status: z.literal("blocked"),
+    code: z.string().min(1),
+    message: z.string().min(1),
+    details: z.unknown().nullable(),
+    recoverable: z.literal(true),
+    requiredAction: z.literal("CORRECT_INPUT_AND_RUN_NEW_DRY_RUN"),
+    nextAction: z.object({
+      type: z.literal("correct_import_batch"),
+      retry: z.object({
+        tool: z.literal("import_account_tree"),
+        preserveEntireBatch: z.literal(true),
+      }),
+    }),
   }), accountTreePlanFailureSchema]);
   const accountTreeCommitOutputSchema = z.union([z.object({
     readyToCommit: z.literal(false),
@@ -363,7 +559,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   ]);
   server.registerTool("import_account_tree", {
     title: "Preview account tree import",
-    description: "Run a complete account-tree dry run and save its exact normalized input as a durable, owner-scoped import plan. Accepts optional user-owned currency definitions plus up to 1,000 colon-delimited account paths. For a file import, the dry run must contain the entire intended file batch; testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. If the source does not specify an exact scale for a new unit, stop and ask the user for the scale of each such unit; never guess. A successful dry run is a change preview: report what would be created, reused, skipped, or rejected, including the numerical summaries and planned rows. A successful result has readyToCommit=true and importPlanId; then explicitly tell the user they may approve the import. Do not replay this large input after approval and do not write ledger data with this tool; call commit_account_tree_import with only that plan ID.",
+    description: "Start or continue a complete account-tree import workflow. Call this tool with the entire intended batch even when new currency details or scales are unknown; omit unknown fields and the MCP will return status=needs_input, exact questions for the user, and a machine-readable retry instruction. Do not inspect historical receipts or guess missing values instead of calling this tool. Testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. A successful dry run saves the exact normalized input as a durable owner-scoped plan and returns status=ready, numerical created/reused summaries, and nextAction.onApproval containing the exact commit tool and plan ID. Report the preview and ask for confirmation. After approval, call commit_account_tree_import once with that plan ID; never replay the large batch.",
     inputSchema: {
       currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),
@@ -371,15 +567,23 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     },
     outputSchema: accountTreePreviewOutputSchema,
     annotations: idempotentWrite,
-  }, async ({ currencies, accounts }) => accountTreePlanToolResult(async () => accounting.previewAccountTreeImport({
+  }, async ({ currencies, accounts }) => accountTreePlanToolResult(async () => {
+    const accessibleCurrencies = await accounting.listCurrencies(pool, personId);
+    const requirements = accountTreeCurrencyRequirements({ accounts, currencies, accessibleCurrencies });
+    if (requirements.length) {
+      return accountTreeNeedsInputWorkflow({ accounts, currencies, requirements });
+    }
+    const accessibleCodes = new Set(accessibleCurrencies.map((currency) => accountingUnitKey(currency.code)));
+    const result = await accounting.previewAccountTreeImport({
       pool,
       personId,
-      currencies: currencies.map((currency) => ({
-        code: currency.code,
-        displayName: currency.display_name,
-        type: currency.currency_type,
-        scale: currency.scale,
-      })),
+      currencies: currencies.filter((currency) => !accessibleCodes.has(accountingUnitKey(currency.code)))
+        .map((currency) => ({
+          code: currency.code,
+          displayName: currency.display_name,
+          type: currency.currency_type,
+          scale: currency.scale,
+        })),
       accounts: accounts.map((account) => ({
         fullName: account.full_name,
         type: account.account_type,
@@ -387,7 +591,13 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
         description: account.description,
         placeholder: account.placeholder,
       })),
-    }), { schemaSemantics, operation: operations.importAccountTree }));
+    });
+    return accountTreeReadyWorkflow(result);
+  }, {
+    schemaSemantics,
+    operation: operations.importAccountTree,
+    includeValidationRecovery: true,
+  }));
 
   server.registerTool("get_account_tree_import_plan", {
     title: "Get account tree import plan",
@@ -521,7 +731,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     },
     annotations: idempotentWrite,
   }, async ({ source_system, transactions }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: await accounting.previewTransactionImport({
+    import: transactionPreviewWorkflow(await accounting.previewTransactionImport({
       pool,
       personId,
       sourceSystem: source_system,
@@ -538,7 +748,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
           memo: line.memo,
         })),
       })),
-    }),
+    })),
   }, operations.importTransactions)));
 
   server.registerTool("commit_transaction_import", {
