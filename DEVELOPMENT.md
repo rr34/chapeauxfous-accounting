@@ -100,7 +100,9 @@ retrieve a relevant projection before another tool is selected.
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated
 users see those rows plus only their own units. A unit's integer `scale` must be
-chosen before amounts are recorded and must not later be reinterpreted.
+chosen before amounts are recorded and must not later be reinterpreted. When
+source data does not supply an exact scale, the agent must ask the user for each
+unit's scale rather than guessing or proposing a default.
 
 `import_account_tree` accepts optional user-owned currency definitions followed
 by up to 1,000 accounts with colon-delimited full names, normalized account

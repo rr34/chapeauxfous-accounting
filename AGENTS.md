@@ -39,6 +39,15 @@ These instructions apply to the entire repository.
 - Before applying a migration to a database containing user data, create and
   verify a recoverable backup. Use the repository migration and verification
   commands documented in `db/MIGRATIONS.md`.
+- Keep the database schema conventional: ordinary tables with explicitly
+  stored fields, primary keys, straightforward single-column foreign keys, and
+  enum fields where a closed set of values is appropriate.
+- Do not use generated or computed columns, triggers, stored procedures,
+  composite foreign keys, or complex database constraints to derive,
+  synchronize, or validate application data.
+- Calculate helper values and enforce cross-field, cross-row, ownership, and
+  accounting rules centrally in application code, then store the resulting
+  values explicitly in ordinary fields.
 - Keep foreign keys straightforward and single-column. Enforce cross-row and
   double-entry accounting invariants centrally in application code rather than
   through composite foreign keys or complex database constraints.

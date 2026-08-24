@@ -182,12 +182,12 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
   server.registerTool("create_currency", {
     title: "Create currency or security",
-    description: "Create a private accounting unit for the API-token owner. Use security for stocks and mutual funds. Scale is the number of fractional decimal places and cannot safely change after amounts have been recorded.",
+    description: "Create a private accounting unit for the API-token owner. Use security for stocks and mutual funds. Scale is the number of fractional decimal places and cannot safely change after amounts have been recorded. Never guess or choose a default scale: when the source data does not specify it, ask the user for the scale before calling this tool.",
     inputSchema: {
       code: z.string().trim().min(1).max(50).describe("Short user-facing code or ticker, such as VTSAX."),
       display_name: z.string().trim().min(1).max(255),
       currency_type: z.enum(userCurrencyTypes),
-      scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts."),
+      scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
     },
     annotations: writesData,
   }, async ({ code, display_name, currency_type, scale }) => toolResult(withSchemaProjection(schemaSemantics, {
@@ -246,11 +246,11 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     code: z.string().trim().min(1).max(50),
     display_name: z.string().trim().min(1).max(255),
     currency_type: z.enum(userCurrencyTypes),
-    scale: z.number().int().min(0).max(18),
+    scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
   });
   server.registerTool("import_account_tree", {
     title: "Import account tree",
-    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. Use currency_type=security for mutual funds and stocks. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
+    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. Use currency_type=security for mutual funds and stocks. If an account references a unit that is not already listed and the source data does not specify its exact scale, stop and ask the user for the scale of each such unit; never guess or offer an arbitrary default. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
     inputSchema: {
       currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),

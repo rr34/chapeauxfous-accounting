@@ -44,6 +44,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
+  assert.match(tools.tools.find((tool) => tool.name === "create_currency").description, /Never guess or choose a default scale/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /ask the user for the scale of each such unit/);
+  assert.match(
+    tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.currencies.items.properties.scale.description,
+    /explicitly confirmed by the user/,
+  );
 
   const currenciesResult = await client.callTool({ name: "list_currencies", arguments: {} });
   assert.equal(currenciesResult.structuredContent.currencies[0].displayName, "Bitcoin");
