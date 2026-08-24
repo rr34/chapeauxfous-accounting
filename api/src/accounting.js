@@ -67,6 +67,152 @@ export async function createAccount({ personId, name, description, placeholder =
   });
 }
 
+export async function updateAccount({ personId, accountId, name, description, placeholder = false, parentAccountId, type, currencyId }, runInTransaction = withTransaction) {
+  const resolvedAccountId = Number(accountId);
+  const accountName = String(name ?? "").trim();
+  const accountDescription = String(description ?? "").trim() || null;
+  const isPlaceholder = placeholder === true;
+  const resolvedParentId = parentAccountId == null ? null : Number(parentAccountId);
+  const resolvedCurrencyId = Number(currencyId);
+  const allowedTypes = new Set(["asset", "liability", "equity", "income", "expense"]);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  if (!accountName) throw applicationError("Account name is required.");
+  if (!allowedTypes.has(type)) throw applicationError("Invalid account type.");
+  if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) throw applicationError("Currency is required.");
+  if (resolvedParentId != null && (!Number.isInteger(resolvedParentId) || resolvedParentId <= 0)) {
+    throw applicationError("Parent account not found.", 404, "PARENT_ACCOUNT_NOT_FOUND");
+  }
+  if (resolvedParentId === resolvedAccountId) throw applicationError("An account cannot be its own parent.", 409, "ACCOUNT_PARENT_CYCLE");
+
+  return runInTransaction(async (connection) => {
+    const [accountRows] = await connection.query(
+      `SELECT account_id, AccountName, description, is_placeholder, parent_account_id,
+              AccountType, account_currency_id
+         FROM accounts
+        WHERE account_id = ? AND owner_person_id = ?
+        FOR UPDATE`,
+      [resolvedAccountId, personId],
+    );
+    const account = accountRows[0];
+    if (!account) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+
+    if (resolvedParentId != null && Number(account.parent_account_id) !== resolvedParentId) {
+      const visited = new Set([resolvedAccountId]);
+      let ancestorId = resolvedParentId;
+      while (ancestorId != null) {
+        if (visited.has(ancestorId)) throw applicationError("An account cannot be moved beneath itself.", 409, "ACCOUNT_PARENT_CYCLE");
+        visited.add(ancestorId);
+        const [parentRows] = await connection.query(
+          `SELECT account_id, parent_account_id
+             FROM accounts
+            WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL
+            FOR UPDATE`,
+          [ancestorId, personId],
+        );
+        const parent = parentRows[0];
+        if (!parent) throw applicationError("Parent account not found.", 404, "PARENT_ACCOUNT_NOT_FOUND");
+        ancestorId = parent.parent_account_id == null ? null : Number(parent.parent_account_id);
+      }
+    }
+
+    const currencyChanged = Number(account.account_currency_id) !== resolvedCurrencyId;
+    const becomingPlaceholder = !Boolean(account.is_placeholder) && isPlaceholder;
+    if (currencyChanged || becomingPlaceholder) {
+      const [lineItems] = await connection.query(
+        "SELECT line_item_id FROM line_items WHERE account_id = ? LIMIT 1 FOR UPDATE",
+        [resolvedAccountId],
+      );
+      if (lineItems.length) {
+        const message = currencyChanged
+          ? "Account currency cannot change after transactions reference it."
+          : "An account with transactions cannot become a placeholder.";
+        throw applicationError(message, 409, currencyChanged ? "ACCOUNT_CURRENCY_IN_USE" : "ACCOUNT_HAS_TRANSACTIONS");
+      }
+      const [assertions] = await connection.query(
+        "SELECT account_balance_assertion_id FROM account_balance_assertions WHERE account_id = ? LIMIT 1 FOR UPDATE",
+        [resolvedAccountId],
+      );
+      if (assertions.length) {
+        const message = currencyChanged
+          ? "Account currency cannot change after balance assertions reference it."
+          : "An account with balance assertions cannot become a placeholder.";
+        throw applicationError(message, 409, currencyChanged ? "ACCOUNT_CURRENCY_IN_USE" : "ACCOUNT_HAS_BALANCE_ASSERTIONS");
+      }
+    }
+
+    if (currencyChanged) await requireAccessibleCurrency(connection, personId, resolvedCurrencyId);
+    const [result] = await connection.query(
+      `UPDATE accounts
+          SET AccountName = ?, description = ?, is_placeholder = ?, parent_account_id = ?,
+              AccountType = ?, account_currency_id = ?
+        WHERE account_id = ? AND owner_person_id = ?`,
+      [accountName, accountDescription, isPlaceholder, resolvedParentId, type, resolvedCurrencyId, resolvedAccountId, personId],
+    );
+    if (Number(result.affectedRows) !== 1) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+    return { updated: true, accountId: resolvedAccountId };
+  });
+}
+
+export async function deleteAccount({ personId, accountId }, runInTransaction = withTransaction) {
+  const resolvedAccountId = Number(accountId);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+
+  return runInTransaction(async (connection) => {
+    const [accountRows] = await connection.query(
+      `SELECT account_id, AccountName
+         FROM accounts
+        WHERE account_id = ? AND owner_person_id = ?
+        FOR UPDATE`,
+      [resolvedAccountId, personId],
+    );
+    const account = accountRows[0];
+    if (!account) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+
+    const [children] = await connection.query(
+      "SELECT account_id FROM accounts WHERE parent_account_id = ? LIMIT 1 FOR UPDATE",
+      [resolvedAccountId],
+    );
+    if (children.length) {
+      throw applicationError("Move or delete this account's child accounts first.", 409, "ACCOUNT_HAS_CHILDREN");
+    }
+
+    const [lineItems] = await connection.query(
+      "SELECT line_item_id FROM line_items WHERE account_id = ? LIMIT 1 FOR UPDATE",
+      [resolvedAccountId],
+    );
+    if (lineItems.length) {
+      throw applicationError("Account cannot be deleted because transactions reference it.", 409, "ACCOUNT_HAS_TRANSACTIONS");
+    }
+
+    const [assertions] = await connection.query(
+      "SELECT account_balance_assertion_id FROM account_balance_assertions WHERE account_id = ? LIMIT 1 FOR UPDATE",
+      [resolvedAccountId],
+    );
+    if (assertions.length) {
+      throw applicationError("Delete this account's balance assertions before deleting the account.", 409, "ACCOUNT_HAS_BALANCE_ASSERTIONS");
+    }
+
+    try {
+      const [result] = await connection.query(
+        "DELETE FROM accounts WHERE account_id = ? AND owner_person_id = ?",
+        [resolvedAccountId, personId],
+      );
+      if (Number(result.affectedRows) !== 1) {
+        throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+      }
+    } catch (error) {
+      if (error?.code === "ER_ROW_IS_REFERENCED_2") {
+        throw applicationError("Account is still referenced and cannot be deleted.", 409, "ACCOUNT_IN_USE");
+      }
+      throw error;
+    }
+
+    return { deleted: true, accountId: resolvedAccountId, name: account.AccountName };
+  });
+}
+
 async function attachTags(connection, personId, lineItemId, tags) {
   for (const input of Array.isArray(tags) ? tags : []) {
     const key = String(input?.key ?? "").trim().toLowerCase();

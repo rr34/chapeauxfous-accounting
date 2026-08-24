@@ -64,6 +64,86 @@ function AuthScreen({ onAuthenticated }: AuthProps) {
   </main>;
 }
 
+function AccountEditDialog({ account, accounts, currencies, token, onClose, onChanged }: {
+  account: Account; accounts: Account[]; currencies: Currency[]; token: string;
+  onClose: () => void; onChanged: () => Promise<void>;
+}) {
+  const [name, setName] = useState(account.name);
+  const [description, setDescription] = useState(account.description ?? "");
+  const [placeholder, setPlaceholder] = useState(account.placeholder);
+  const [type, setType] = useState<Account["type"]>(account.type);
+  const [currencyId, setCurrencyId] = useState(account.currencyId);
+  const [parentAccountId, setParentAccountId] = useState(account.parentAccountId == null ? "" : String(account.parentAccountId));
+  const [error, setError] = useState("");
+  const [busyAction, setBusyAction] = useState<"save" | "delete" | "">("");
+  const unavailableParentIds = useMemo(() => {
+    const ids = new Set([account.id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const candidate of accounts) {
+        if (candidate.parentAccountId != null && ids.has(candidate.parentAccountId) && !ids.has(candidate.id)) {
+          ids.add(candidate.id); changed = true;
+        }
+      }
+    }
+    return ids;
+  }, [account.id, accounts]);
+
+  async function save(event: FormEvent) {
+    event.preventDefault(); setBusyAction("save"); setError("");
+    try {
+      await api(`/accounts/${account.id}`, { method: "PATCH", body: JSON.stringify({
+        name,
+        description,
+        placeholder,
+        type,
+        currencyId,
+        parentAccountId: parentAccountId ? Number(parentAccountId) : null,
+      }) }, token);
+      await onChanged(); onClose();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusyAction(""); }
+  }
+
+  async function remove() {
+    if (!window.confirm(`Permanently delete “${account.name}”? Accounts with children, transactions, or balance assertions cannot be deleted.`)) return;
+    setBusyAction("delete"); setError("");
+    try {
+      await api(`/accounts/${account.id}`, { method: "DELETE" }, token);
+      await onChanged(); onClose();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusyAction(""); }
+  }
+
+  return <div className="dialog-backdrop" role="presentation">
+    <section className="agent-dialog account-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="account-edit-title">
+      <div className="dialog-heading"><div><p className="eyebrow">Chart of accounts</p><h2 id="account-edit-title">Edit account</h2></div>
+        <button className="dialog-close" aria-label="Close account editor" onClick={onClose}>×</button></div>
+      <form onSubmit={save}>
+        <label>Name<input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+        <div className="form-row"><label>Type<select value={type} onChange={(event) => setType(event.target.value as Account["type"])}>
+          {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
+        </select></label><label>Currency<select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
+          {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}
+        </select></label></div>
+        <label>Parent<select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
+          <option value="">No parent</option>
+          {accounts.filter((candidate) => !candidate.archivedAt && !unavailableParentIds.has(candidate.id)).map((candidate) =>
+            <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+        </select></label>
+        <label className="checkbox-field"><input type="checkbox" checked={placeholder}
+          onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
+        {error && <p className="error">{error}</p>}
+        <div className="account-dialog-actions"><button type="button" className="danger-button" disabled={Boolean(busyAction)}
+          onClick={() => void remove()}>{busyAction === "delete" ? "Deleting…" : "Delete account"}</button>
+          <button className="primary" disabled={Boolean(busyAction)}>{busyAction === "save" ? "Saving…" : "Save changes"}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
 function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
   accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[];
   token: string; onChanged: () => Promise<void>;
@@ -88,6 +168,11 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
   const [currencyScale, setCurrencyScale] = useState("4");
   const [currencyError, setCurrencyError] = useState("");
   const [currencyBusy, setCurrencyBusy] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+
+  useEffect(() => {
+    if (assertionAccountId && !accounts.some((account) => account.id === Number(assertionAccountId))) setAssertionAccountId("");
+  }, [accounts, assertionAccountId]);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
@@ -147,11 +232,12 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
-    <div className="account-list">{accounts.map((account) => <div className="account-row" key={account.id}>
+    <div className="account-list">{accounts.map((account) => <button type="button" className="account-row" key={account.id}
+      aria-label={`Edit account ${account.name}`} onClick={() => setEditingAccount(account)}>
       <div><strong>{account.name}</strong><span>{account.type} · {account.currencyCode}{account.placeholder ? " · placeholder" : ""}</span>
         {account.description && <small>{account.description}</small>}</div>
       <b>{unitsToDecimal(account.balanceUnits, account.scale)}</b>
-    </div>)}</div>
+    </button>)}</div>
     <section className="currencies-panel">
       <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
         <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
@@ -200,6 +286,8 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         {!assertions.length && <p className="assertion-empty">No known balances recorded.</p>}
       </div>
     </section>
+    {editingAccount && <AccountEditDialog key={editingAccount.id} account={editingAccount} accounts={accounts} currencies={currencies}
+      token={token} onClose={() => setEditingAccount(null)} onChanged={onChanged} />}
   </aside>;
 }
 

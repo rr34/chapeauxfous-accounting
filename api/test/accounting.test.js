@@ -6,7 +6,7 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { validateTransaction } = await import("../src/accounting.js");
+const { deleteAccount, updateAccount, validateTransaction } = await import("../src/accounting.js");
 
 function fakeConnection({ lines, rates }) {
   return {
@@ -59,4 +59,107 @@ test("posting fails when a line item uses a placeholder account", async () => {
     }), 44, 7),
     (error) => error.code === "PLACEHOLDER_ACCOUNT",
   );
+});
+
+test("an owner can edit ordinary account fields", async () => {
+  const statements = [];
+  const runInTransaction = async (work) => work({
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.startsWith("UPDATE accounts")) return [{ affectedRows: 1 }];
+      if (sql.includes("AccountName") && sql.includes("FROM accounts")) {
+        return [[{
+          account_id: 3, AccountName: "Equity", description: null, is_placeholder: 0,
+          parent_account_id: null, AccountType: "equity", account_currency_id: 1,
+        }]];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  const result = await updateAccount({
+    personId: 7,
+    accountId: 3,
+    name: "Owner Equity",
+    description: "Capital and retained earnings",
+    placeholder: false,
+    parentAccountId: null,
+    type: "equity",
+    currencyId: 1,
+  }, runInTransaction);
+  assert.deepEqual(result, { updated: true, accountId: 3 });
+  const update = statements.at(-1);
+  assert.match(update.sql, /^UPDATE accounts/);
+  assert.deepEqual(update.params, ["Owner Equity", "Capital and retained earnings", false, null, "equity", 1, 3, 7]);
+});
+
+test("an account currency cannot change after transactions reference it", async () => {
+  const runInTransaction = async (work) => work({
+    async query(sql) {
+      if (sql.includes("AccountName") && sql.includes("FROM accounts")) {
+        return [[{
+          account_id: 3, AccountName: "Equity", description: null, is_placeholder: 0,
+          parent_account_id: null, AccountType: "equity", account_currency_id: 1,
+        }]];
+      }
+      if (sql.includes("FROM line_items")) return [[{ line_item_id: 9 }]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  await assert.rejects(
+    updateAccount({
+      personId: 7, accountId: 3, name: "Equity", description: null, placeholder: false,
+      parentAccountId: null, type: "equity", currencyId: 2,
+    }, runInTransaction),
+    (error) => error.code === "ACCOUNT_CURRENCY_IN_USE" && error.status === 409,
+  );
+});
+
+function deletionTransaction({ account = { account_id: 3, AccountName: "Equity" }, children = [], lineItems = [], assertions = [] } = {}) {
+  const statements = [];
+  const runInTransaction = async (work) => work({
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.startsWith("DELETE FROM accounts")) return [{ affectedRows: 1 }];
+      if (sql.includes("FROM accounts") && sql.includes("owner_person_id")) {
+        return [account ? [account] : []];
+      }
+      if (sql.includes("FROM accounts") && sql.includes("parent_account_id")) return [children];
+      if (sql.includes("FROM line_items")) return [lineItems];
+      if (sql.includes("FROM account_balance_assertions")) return [assertions];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  return { statements, runInTransaction };
+}
+
+test("an empty leaf account can be permanently deleted by its owner", async () => {
+  const transaction = deletionTransaction();
+  const result = await deleteAccount({ personId: 7, accountId: 3 }, transaction.runInTransaction);
+  assert.deepEqual(result, { deleted: true, accountId: 3, name: "Equity" });
+  assert.equal(transaction.statements.at(-1).sql.startsWith("DELETE FROM accounts"), true);
+  assert.deepEqual(transaction.statements.at(-1).params, [3, 7]);
+});
+
+test("account deletion does not reveal or delete another user's account", async () => {
+  const transaction = deletionTransaction({ account: null });
+  await assert.rejects(
+    deleteAccount({ personId: 7, accountId: 3 }, transaction.runInTransaction),
+    (error) => error.code === "ACCOUNT_NOT_FOUND" && error.status === 404,
+  );
+  assert.equal(transaction.statements.some(({ sql }) => sql.startsWith("DELETE FROM accounts")), false);
+});
+
+test("account deletion reports application-level blockers before deleting", async () => {
+  for (const [fixture, code] of [
+    [{ children: [{ account_id: 4 }] }, "ACCOUNT_HAS_CHILDREN"],
+    [{ lineItems: [{ line_item_id: 9 }] }, "ACCOUNT_HAS_TRANSACTIONS"],
+    [{ assertions: [{ account_balance_assertion_id: 12 }] }, "ACCOUNT_HAS_BALANCE_ASSERTIONS"],
+  ]) {
+    const transaction = deletionTransaction(fixture);
+    await assert.rejects(
+      deleteAccount({ personId: 7, accountId: 3 }, transaction.runInTransaction),
+      (error) => error.code === code && error.status === 409,
+    );
+    assert.equal(transaction.statements.some(({ sql }) => sql.startsWith("DELETE FROM accounts")), false);
+  }
 });

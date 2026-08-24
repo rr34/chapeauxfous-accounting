@@ -116,6 +116,14 @@ currencies and accounts are created in one transaction, parents are ordered
 automatically, and exact matching definitions and paths make retries
 idempotent.
 
+New registrations create only the user identity and begin with an empty chart
+of accounts. Clicking an account in the web client opens its editor; the
+permanent-delete action is kept inside that modal. Only an empty leaf account
+can be deleted, so accounts with children, transaction lines, or balance
+assertions must have those references resolved first. Currency changes and
+conversion to a placeholder are also blocked once native-unit amounts or
+balance assertions depend on the account.
+
 Timestamped security, mutual-fund, commodity, and FX price history belongs in
 owned `xrates` rows with `xrate_type = 'reference'`. Posted accounting continues
 to use only the exact `transaction` rate copied into each transaction.

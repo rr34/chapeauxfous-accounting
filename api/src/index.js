@@ -8,8 +8,8 @@ import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
-  createAccount, createTransaction, getTransaction, listAccounts,
-  listTransactions, verifyAllPostedTransactions,
+  createAccount, createTransaction, deleteAccount, getTransaction, listAccounts,
+  listTransactions, updateAccount, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
 
@@ -79,6 +79,18 @@ app.get("/api/accounts", requireAuth, async (req, res, next) => {
 
 app.post("/api/accounts", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createAccount({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
+});
+
+app.delete("/api/accounts/:accountId", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await deleteAccount({ personId: req.auth.personId, accountId: req.params.accountId }));
+  } catch (error) { next(error); }
+});
+
+app.patch("/api/accounts/:accountId", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await updateAccount({ personId: req.auth.personId, accountId: req.params.accountId, ...req.body }));
+  } catch (error) { next(error); }
 });
 
 app.get("/api/balance-assertions", requireAuth, async (req, res, next) => {
