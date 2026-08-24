@@ -9,7 +9,7 @@
     "engine": "mariadb",
     "name": "cfaccounting",
     "schemaVersion": 8,
-    "schemaFingerprint": "30defe5f44ba7a29f73619998da2a0093172787c6997cd3f020d8b93653e47e4",
+    "schemaFingerprint": "ad51333b148a41ee2a989b39e12fdbf328b22eacdf3121a68c9c159a4bdae86b",
     "extractedAt": "2026-08-24T12:17:31.362Z"
   },
   "instructions": {
@@ -743,6 +743,7 @@
         "importantRules": [
           "Amounts are stored as integers; divide by 10 raised to scale only for human display.",
           "A NULL owner_person_id identifies a global catalog row; a non-NULL owner identifies a private user-created unit.",
+          "The application stores zero in scope_owner_person_id for global units and the owner person identifier for private units.",
           "A unit's scale must not change after accounting amounts reference it."
         ],
         "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
@@ -930,16 +931,16 @@
             "name": "scope_owner_person_id",
             "ordinal": 6,
             "type": "int(11)",
-            "nullable": true,
-            "default": "NULL",
+            "nullable": false,
+            "default": "0",
             "primaryKeyPosition": 0,
-            "generated": true,
+            "generated": false,
             "hidden": false,
             "allowedValues": []
           },
           "semantics": {
             "inheritsFrom": null,
-            "meaning": "Generated uniqueness scope: zero for global units and owner_person_id for private units.",
+            "meaning": "Stored uniqueness scope: zero for global units and owner_person_id for private units.",
             "units": null,
             "format": null,
             "allowedValueMeanings": {},
@@ -948,7 +949,7 @@
             "routingWeight": 0.3,
             "examples": [],
             "importantRules": [
-              "This generated implementation field enforces per-owner code uniqueness and is not user input."
+              "The application maintains this implementation field when it creates a private unit; it enforces per-owner code uniqueness and is not user input."
             ],
             "sensitivity": "Private tenant identifier; do not expose as an application field."
           }

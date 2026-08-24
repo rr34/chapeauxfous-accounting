@@ -18,9 +18,9 @@
 -- be rolled back; changing scale remains outside this migration.
 
 ALTER TABLE currencies
-  ADD COLUMN owner_person_id INT NULL AFTER currency_id,
-  ADD COLUMN display_name VARCHAR(255) NULL AFTER CurrencyAbbreviation,
-  ADD COLUMN currency_type
+  ADD COLUMN IF NOT EXISTS owner_person_id INT NULL AFTER currency_id,
+  ADD COLUMN IF NOT EXISTS display_name VARCHAR(255) NULL AFTER CurrencyAbbreviation,
+  ADD COLUMN IF NOT EXISTS currency_type
     ENUM('iso_4217','crypto','security','commodity','custom')
     NOT NULL DEFAULT 'iso_4217' AFTER display_name;
 
@@ -33,9 +33,8 @@ UPDATE currencies
  WHERE CurrencyAbbreviation IN ('BTC', 'BTC satoshi');
 
 ALTER TABLE currencies
-  MODIFY display_name VARCHAR(255) NOT NULL,
-  ADD COLUMN scope_owner_person_id INT
-    GENERATED ALWAYS AS (IFNULL(owner_person_id, 0)) STORED,
+  MODIFY COLUMN display_name VARCHAR(255) NOT NULL,
+  ADD COLUMN scope_owner_person_id INT NOT NULL DEFAULT 0,
   DROP INDEX currencies_unique,
   ADD UNIQUE KEY currencies_scope_code_UQ
     (scope_owner_person_id, CurrencyAbbreviation),
@@ -43,7 +42,7 @@ ALTER TABLE currencies
     (owner_person_id, currency_type, CurrencyAbbreviation),
   ADD CONSTRAINT currencies_owner_FK
     FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
-    ON UPDATE CASCADE ON DELETE RESTRICT;
+    ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 -- end migration 0008
 

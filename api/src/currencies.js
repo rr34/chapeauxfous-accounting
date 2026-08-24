@@ -142,9 +142,9 @@ export async function createOrMatchUserCurrencies(connection, personId, definiti
 
     const [insert] = await connection.query(
       `INSERT INTO currencies
-        (owner_person_id, CurrencyAbbreviation, display_name, currency_type, scale)
-       VALUES (?, ?, ?, ?, ?)`,
-      [personId, input.code, input.displayName, input.type, input.scale],
+        (owner_person_id, scope_owner_person_id, CurrencyAbbreviation, display_name, currency_type, scale)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [personId, personId, input.code, input.displayName, input.type, input.scale],
     );
     const created = { id: Number(insert.insertId), ownerPersonId: personId, userDefined: true, ...input, status: "created" };
     byCode.set(input.code, created);

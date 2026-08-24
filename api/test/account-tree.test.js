@@ -41,9 +41,10 @@ function memoryPool(initialAccounts = []) {
               currency.owner_person_id == null || Number(currency.owner_person_id) === 7)];
           }
           if (sql.includes("INSERT INTO currencies")) {
-            const [owner, code, displayName, type, scale] = params;
+            const [owner, scopeOwner, code, displayName, type, scale] = params;
             const row = {
               currency_id: state.nextCurrencyId++, owner_person_id: owner,
+              scope_owner_person_id: scopeOwner,
               CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale,
             };
             state.currencies.push(row);

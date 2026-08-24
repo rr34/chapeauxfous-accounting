@@ -119,5 +119,9 @@ to use only the exact `transaction` rate copied into each transaction.
 1. Install the pinned dependencies from `package-lock.json`.
 2. Create and verify a recoverable database backup.
 3. Stop API writers and apply all pending migrations through 0008 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
-4. Run `npm run schema:semantics:sync`, review the semantic-form diff, and fill any reported blanks.
-5. Run `npm run schema:verify`, then restart the API service.
+4. Run `npm run schema:verify`, then restart the API service.
+
+`schema:semantics:sync` is a development command that rewrites the tracked
+semantic form from a migrated development database. Do not run it in a
+production checkout during deployment; production verifies the committed form
+with `schema:verify` instead.

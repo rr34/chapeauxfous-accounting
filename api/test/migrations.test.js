@@ -38,9 +38,10 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS description TEXT NULL/);
   assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS is_placeholder TINYINT\(1\) NOT NULL DEFAULT 0/);
   const ownedCurrenciesMigration = migrations.find((migration) => migration.version === 8);
-  assert.match(ownedCurrenciesMigration.sql, /ADD COLUMN owner_person_id INT NULL/);
+  assert.match(ownedCurrenciesMigration.sql, /ADD COLUMN IF NOT EXISTS owner_person_id INT NULL/);
   assert.match(ownedCurrenciesMigration.sql, /ENUM\('iso_4217','crypto','security','commodity','custom'\)/);
-  assert.match(ownedCurrenciesMigration.sql, /GENERATED ALWAYS AS \(IFNULL\(owner_person_id, 0\)\) STORED/);
+  assert.match(ownedCurrenciesMigration.sql, /ADD COLUMN scope_owner_person_id INT NOT NULL DEFAULT 0/);
+  assert.doesNotMatch(ownedCurrenciesMigration.sql, /GENERATED ALWAYS/);
   assert.match(ownedCurrenciesMigration.sql, /UNIQUE KEY currencies_scope_code_UQ/);
   assert.match(ownedCurrenciesMigration.sql, /FOREIGN KEY \(owner_person_id\) REFERENCES people2_people \(person_id\)/);
 });

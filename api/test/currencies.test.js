@@ -31,8 +31,8 @@ function memoryPool() {
         return [state.rows.filter((row) => row.owner_person_id == null || Number(row.owner_person_id) === Number(params[0]))];
       }
       if (sql.includes("INSERT INTO currencies")) {
-        const [owner, code, displayName, type, scale] = params;
-        const row = { currency_id: state.nextId++, owner_person_id: owner, CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale };
+        const [owner, scopeOwner, code, displayName, type, scale] = params;
+        const row = { currency_id: state.nextId++, owner_person_id: owner, scope_owner_person_id: scopeOwner, CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale };
         state.rows.push(row);
         return [{ insertId: row.currency_id }];
       }
@@ -57,6 +57,7 @@ test("users can create private securities but cannot shadow global codes", async
   });
   assert.equal(created.code, "VTSAX");
   assert.equal(created.ownerPersonId, 7);
+  assert.equal(pool.state.rows.at(-1).scope_owner_person_id, 7);
 
   await assert.rejects(
     createCurrency({ pool, personId: 7, code: "USD", displayName: "Fake dollars", type: "custom", scale: 2 }),
