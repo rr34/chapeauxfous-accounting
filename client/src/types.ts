@@ -24,6 +24,8 @@ export type CreatedApiToken = {
 export type Account = {
   id: number;
   name: string;
+  description: string | null;
+  placeholder: boolean;
   parentAccountId: number | null;
   type: "asset" | "liability" | "equity" | "income" | "expense";
   currencyId: number;

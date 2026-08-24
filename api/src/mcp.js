@@ -12,6 +12,7 @@ import {
   listTransactions,
   verifyAllPostedTransactions,
 } from "./accounting.js";
+import { importAccountTree } from "./account-tree.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
@@ -29,7 +30,7 @@ const operations = Object.freeze({
     purpose: "List this user's accounts and balances derived from posted line items.",
     schemaObjects: ["accounts", "currencies", "transactions", "line_items"],
     fields: {
-      accounts: ["account_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
+      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       transactions: ["transaction_id", "TransactionState"],
       line_items: ["transaction_id", "amount_units", "account_id"],
@@ -40,8 +41,17 @@ const operations = Object.freeze({
     purpose: "Create one user-owned accounting account.",
     schemaObjects: ["accounts", "currencies"],
     fields: {
-      accounts: ["account_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id"],
+      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+    },
+  },
+  importAccountTree: {
+    name: "import_account_tree",
+    purpose: "Validate and atomically import a colon-delimited account hierarchy in parent-first order.",
+    schemaObjects: ["accounts", "currencies"],
+    fields: {
+      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation"],
     },
   },
   listTransactions: {
@@ -75,7 +85,7 @@ const operations = Object.freeze({
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
       line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
-      accounts: ["account_id", "account_currency_id", "archived_at"],
+      accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       tags: ["tag_id", "tag_key", "tag_value"],
       lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
@@ -88,7 +98,7 @@ const operations = Object.freeze({
     schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
     fields: {
       account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "AccountName", "account_currency_id"],
+      accounts: ["account_id", "AccountName", "account_currency_id", "is_placeholder"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       transactions: ["transaction_id", "TransactionDate", "TransactionState"],
       line_items: ["transaction_id", "amount_units", "account_id"],
@@ -100,7 +110,7 @@ const operations = Object.freeze({
     schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
     fields: {
       account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "AccountName", "account_currency_id", "archived_at"],
+      accounts: ["account_id", "AccountName", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       transactions: ["transaction_id", "TransactionDate", "TransactionState"],
       line_items: ["transaction_id", "amount_units", "account_id"],
@@ -113,7 +123,7 @@ const operations = Object.freeze({
     fields: {
       transactions: ["transaction_id", "owner_person_id", "valuation_currency_id", "TransactionState"],
       line_items: ["line_item_id", "transaction_id", "amount_units", "account_id"],
-      accounts: ["account_id", "owner_person_id", "account_currency_id"],
+      accounts: ["account_id", "owner_person_id", "account_currency_id", "is_placeholder"],
       xrates: ["transaction_id", "xrate_type", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
   },
@@ -135,6 +145,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     listCurrencies: services.listCurrencies ?? listCurrencies,
     listAccounts: services.listAccounts ?? listAccounts,
     createAccount: services.createAccount ?? createAccount,
+    importAccountTree: services.importAccountTree ?? importAccountTree,
     listTransactions: services.listTransactions ?? listTransactions,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
@@ -164,7 +175,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
   server.registerTool("list_accounts", {
     title: "List accounts",
-    description: "List all accounts belonging to the API-token owner, including posted native-unit balances and archived state.",
+    description: "List all accounts belonging to the API-token owner, including descriptions, placeholder state, posted native-unit balances, and archived state.",
     inputSchema: {},
     annotations: readOnly,
   }, async () => toolResult(withSchemaProjection(schemaSemantics, {
@@ -176,21 +187,55 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     description: "Create an account for the API-token owner. No root account, account type, or currency is inferred.",
     inputSchema: {
       name: z.string().trim().min(1).describe("Human-facing account name."),
+      description: z.string().trim().max(16000).nullable().optional(),
+      placeholder: z.boolean().default(false).describe("Placeholder accounts organize the tree and cannot receive transactions or balance assertions."),
       parent_account_id: positiveInteger("Optional parent account id owned by the same user.").nullable().optional(),
       account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
       currency_id: positiveInteger("Currency id returned by list_currencies."),
     },
     annotations: writesData,
-  }, async ({ name, parent_account_id, account_type, currency_id }) => {
+  }, async ({ name, description, placeholder, parent_account_id, account_type, currency_id }) => {
     const created = await accounting.createAccount({
       personId,
       name,
+      description,
+      placeholder,
       parentAccountId: parent_account_id,
       type: account_type,
       currencyId: currency_id,
     });
     return toolResult(withSchemaProjection(schemaSemantics, { account: created }, operations.createAccount));
   });
+
+  const importedAccountSchema = z.object({
+    full_name: z.string().trim().min(1).max(4096).describe("Complete account path with colon-separated account names, such as Assets:Bank:Checking."),
+    account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
+    currency_code: z.string().trim().min(1).max(50).describe("Currency code returned by list_currencies."),
+    description: z.string().trim().max(16000).nullable().optional(),
+    placeholder: z.boolean().default(false).describe("Whether this is a non-postable organizational account."),
+  });
+  server.registerTool("import_account_tree", {
+    title: "Import account tree",
+    description: "Validate and import up to 1,000 accounts from colon-delimited full names. Input order does not matter, every non-root parent must be present in this batch or already exist, and the write is atomic. Existing paths are reused only when all supplied fields match. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
+    inputSchema: {
+      accounts: z.array(importedAccountSchema).min(1).max(1000),
+      dry_run: z.boolean().default(true).describe("Validate and report the complete plan without writing. Set false only after reviewing a successful dry run."),
+    },
+    annotations: { ...writesData, idempotentHint: true },
+  }, async ({ accounts, dry_run }) => toolResult(withSchemaProjection(schemaSemantics, {
+    import: await accounting.importAccountTree({
+      pool,
+      personId,
+      dryRun: dry_run,
+      accounts: accounts.map((account) => ({
+        fullName: account.full_name,
+        type: account.account_type,
+        currencyCode: account.currency_code,
+        description: account.description,
+        placeholder: account.placeholder,
+      })),
+    }),
+  }, operations.importAccountTree)));
 
   server.registerTool("list_transactions", {
     title: "List transactions",
@@ -230,7 +275,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   });
   server.registerTool("create_transaction", {
     title: "Create transaction",
-    description: "Atomically create and validate a double-entry transaction. Values must balance in valuation_currency_id; provide a positive-unit exchange rate for each foreign account currency.",
+    description: "Atomically create and validate a double-entry transaction using non-placeholder accounts. Values must balance in valuation_currency_id; provide a positive-unit exchange rate for each foreign account currency.",
     inputSchema: {
       description: z.string().trim().nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),

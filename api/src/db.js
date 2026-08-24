@@ -16,8 +16,8 @@ export const pool = mysql.createPool({
   charset: "utf8mb4",
 });
 
-export async function withTransaction(work) {
-  const connection = await pool.getConnection();
+export async function withPoolTransaction(transactionPool, work) {
+  const connection = await transactionPool.getConnection();
   try {
     await connection.beginTransaction();
     const result = await work(connection);
@@ -31,3 +31,6 @@ export async function withTransaction(work) {
   }
 }
 
+export async function withTransaction(work) {
+  return withPoolTransaction(pool, work);
+}

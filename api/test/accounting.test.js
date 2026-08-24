@@ -47,3 +47,16 @@ test("posting fails when a foreign commodity has no transaction rate", async () 
     (error) => error.code === "MISSING_RATE",
   );
 });
+
+test("posting fails when a line item uses a placeholder account", async () => {
+  await assert.rejects(
+    validateTransaction(fakeConnection({
+      lines: [
+        { line_item_id: 1, amount_units: "100", account_id: 10, account_owner_person_id: 7, account_currency_id: 3, is_placeholder: 1 },
+        { line_item_id: 2, amount_units: "-100", account_id: 11, account_owner_person_id: 7, account_currency_id: 3, is_placeholder: 0 },
+      ],
+      rates: [],
+    }), 44, 7),
+    (error) => error.code === "PLACEHOLDER_ACCOUNT",
+  );
+});

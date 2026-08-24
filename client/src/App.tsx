@@ -67,6 +67,8 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [placeholder, setPlaceholder] = useState(false);
   const [type, setType] = useState<Account["type"] | "">("");
   const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
@@ -80,9 +82,9 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
     try {
-      await api("/accounts", { method: "POST", body: JSON.stringify({ name, type, currencyId: Number(currencyId),
+      await api("/accounts", { method: "POST", body: JSON.stringify({ name, description, placeholder, type, currencyId: Number(currencyId),
         parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
-      setName(""); setShowForm(false); await onChanged();
+      setName(""); setDescription(""); setPlaceholder(false); setShowForm(false); await onChanged();
     } catch (nextError) { setError(errorMessage(nextError)); }
   }
 
@@ -105,6 +107,7 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
     <div className="section-heading"><div><p className="eyebrow">Chart</p><h2>Accounts</h2></div><button onClick={() => setShowForm(!showForm)}>＋</button></div>
     {showForm && <form className="compact-form" onSubmit={submit}>
       <input placeholder="Account name" value={name} onChange={(event) => setName(event.target.value)} />
+      <input placeholder="Description (optional)" value={description} onChange={(event) => setDescription(event.target.value)} />
       <div className="form-row"><select required value={type} onChange={(event) => setType(event.target.value as Account["type"] | "")}>
         <option value="">Choose type…</option>
         {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
@@ -115,10 +118,13 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
       <select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
         <option value="">No parent</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
       </select>
+      <label className="checkbox-field"><input type="checkbox" checked={placeholder}
+        onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
     <div className="account-list">{accounts.map((account) => <div className="account-row" key={account.id}>
-      <div><strong>{account.name}</strong><span>{account.type} · {account.currencyCode}</span></div>
+      <div><strong>{account.name}</strong><span>{account.type} · {account.currencyCode}{account.placeholder ? " · placeholder" : ""}</span>
+        {account.description && <small>{account.description}</small>}</div>
       <b>{unitsToDecimal(account.balanceUnits, account.scale)}</b>
     </div>)}</div>
     <section className="assertions-panel">
@@ -126,7 +132,7 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
       <form className="assertion-form" onSubmit={saveAssertion}>
         <select aria-label="Account" required value={assertionAccountId} onChange={(event) => setAssertionAccountId(event.target.value)}>
           <option value="">Choose account…</option>
-          {accounts.filter((account) => !account.archivedAt).map((account) =>
+          {accounts.filter((account) => !account.archivedAt && !account.placeholder).map((account) =>
             <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}
         </select>
         <div className="form-row"><input aria-label="End of date" type="date" required value={assertionDate}
@@ -210,7 +216,7 @@ function TransactionComposer({ accounts, currencies, token, onCreated }: {
       <div className="line-editor"><div className="line-head"><span>Account</span><span>Native amount</span><span>Memo</span><span>Tags</span><span /></div>
         {lines.map((line, index) => <div className="line-grid" key={index}>
           <select value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}><option value="">Choose…</option>
-            {accounts.filter((account) => !account.archivedAt).map((account) => <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}</select>
+            {accounts.filter((account) => !account.archivedAt && !account.placeholder).map((account) => <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}</select>
           <input value={line.amount} onChange={(event) => updateLine(index, { amount: event.target.value })} placeholder="+100 or -100" />
           <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Optional" />
           <input value={line.tags} onChange={(event) => updateLine(index, { tags: event.target.value })} placeholder="job:main, tax:repair" />

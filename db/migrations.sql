@@ -7,6 +7,21 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0007: add-account-description-and-placeholder
+-- writer downtime: not required; both columns have backward-compatible
+-- defaults and existing accounts remain ordinary postable accounts.
+-- deployment order: apply this migration before restarting the API version
+-- that reads and writes account descriptions and placeholder state.
+-- locking: a metadata lock is required while MariaDB alters accounts.
+-- recovery: both additions are non-destructive; restore the pre-migration
+-- backup if the application must be rolled back to the prior schema.
+
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS description TEXT NULL AFTER AccountName,
+  ADD COLUMN IF NOT EXISTS is_placeholder TINYINT(1) NOT NULL DEFAULT 0 AFTER description;
+
+-- end migration 0007
+
 -- migration 0006: add-user-api-tokens
 -- writer downtime: not required; this creates an independent table used only
 -- by the new MCP endpoint.

@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -31,6 +31,10 @@ test("the repository migration ledger is valid and contiguous", () => {
   const accountDefaultsMigration = migrations.find((migration) => migration.version === 5);
   assert.match(accountDefaultsMigration.sql, /MODIFY AccountType ENUM\('asset','liability','income','expense','equity'\) NOT NULL;/);
   assert.match(accountDefaultsMigration.sql, /DROP TABLE IF EXISTS accounting_profiles/);
-  assert.match(migrations.at(-1).sql, /CREATE TABLE IF NOT EXISTS api_tokens/);
-  assert.match(migrations.at(-1).sql, /token_hash BINARY\(32\) NOT NULL/);
+  const apiTokenMigration = migrations.find((migration) => migration.version === 6);
+  assert.match(apiTokenMigration.sql, /CREATE TABLE IF NOT EXISTS api_tokens/);
+  assert.match(apiTokenMigration.sql, /token_hash BINARY\(32\) NOT NULL/);
+  const accountMetadataMigration = migrations.find((migration) => migration.version === 7);
+  assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS description TEXT NULL/);
+  assert.match(accountMetadataMigration.sql, /ADD COLUMN IF NOT EXISTS is_placeholder TINYINT\(1\) NOT NULL DEFAULT 0/);
 });

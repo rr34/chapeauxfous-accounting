@@ -8,9 +8,9 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 6,
-    "schemaFingerprint": "1461c1f80cd6acbc0031a74a6b571d2a024fd480c56e08262ba5fb01a5c7a32f",
-    "extractedAt": "2026-08-24T02:48:22.794Z"
+    "schemaVersion": 7,
+    "schemaFingerprint": "f724b09bcf2ef9cbc4affe2e84dec7d1c75a348ff571bc18028504a63f66e450",
+    "extractedAt": "2026-08-24T11:17:16.000Z"
   },
   "instructions": {
     "humanOwned": "Fill only semantics properties. Null, empty arrays, and empty objects are intentional blanks.",
@@ -309,13 +309,15 @@
           "liability",
           "income",
           "expense",
-          "equity"
+          "equity",
+          "placeholder account"
         ],
         "routingWeight": 0.8,
         "importantRules": [
           "Every account has an explicitly chosen type and currency.",
           "New users begin with no accounts; there is no implied root account or base currency.",
-          "Only posted transaction line items contribute to displayed balances."
+          "Only posted transaction line items contribute to displayed balances.",
+          "Placeholder accounts organize the hierarchy and cannot receive transaction line items or balance assertions."
         ],
         "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
       },
@@ -389,7 +391,7 @@
           },
           "semantics": {
             "inheritsFrom": null,
-            "meaning": "Human-facing account name, which may include a description.",
+            "meaning": "Human-facing local account name within its parent.",
             "units": null,
             "format": null,
             "allowedValueMeanings": {},
@@ -401,11 +403,76 @@
             "sensitivity": "Private accounting data belonging to the authenticated user."
           }
         },
+        "description": {
+          "mechanics": {
+            "present": true,
+            "name": "description",
+            "ordinal": 3,
+            "type": "text",
+            "nullable": true,
+            "default": "NULL",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional human-facing explanation of the account's purpose.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [
+              "account description"
+            ],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "is_placeholder": {
+          "mechanics": {
+            "present": true,
+            "name": "is_placeholder",
+            "ordinal": 4,
+            "type": "tinyint(1)",
+            "nullable": false,
+            "default": "0",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Whether the account is an organizational placeholder that cannot receive postings.",
+            "units": null,
+            "format": "Boolean: 0 is postable and 1 is a placeholder.",
+            "allowedValueMeanings": {
+              "0": "Ordinary postable account.",
+              "1": "Non-postable placeholder account."
+            },
+            "synonyms": [
+              "placeholder account"
+            ],
+            "keywords": [
+              "non-postable"
+            ],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [
+              "Placeholder accounts cannot receive transaction line items or balance assertions."
+            ],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
         "parent_account_id": {
           "mechanics": {
             "present": true,
             "name": "parent_account_id",
-            "ordinal": 3,
+            "ordinal": 5,
             "type": "int(11)",
             "nullable": true,
             "default": "NULL",
@@ -432,7 +499,7 @@
           "mechanics": {
             "present": true,
             "name": "AccountType",
-            "ordinal": 4,
+            "ordinal": 6,
             "type": "enum('asset','liability','income','expense','equity')",
             "nullable": false,
             "default": null,
@@ -465,7 +532,7 @@
           "mechanics": {
             "present": true,
             "name": "account_currency_id",
-            "ordinal": 5,
+            "ordinal": 7,
             "type": "int(11)",
             "nullable": false,
             "default": null,
@@ -492,7 +559,7 @@
           "mechanics": {
             "present": true,
             "name": "archived_at",
-            "ordinal": 6,
+            "ordinal": 8,
             "type": "datetime",
             "nullable": true,
             "default": "NULL",
@@ -519,7 +586,7 @@
           "mechanics": {
             "present": true,
             "name": "source_system",
-            "ordinal": 7,
+            "ordinal": 9,
             "type": "varchar(32)",
             "nullable": true,
             "default": "NULL",
@@ -546,7 +613,7 @@
           "mechanics": {
             "present": true,
             "name": "source_id",
-            "ordinal": 8,
+            "ordinal": 10,
             "type": "varchar(128)",
             "nullable": true,
             "default": "NULL",

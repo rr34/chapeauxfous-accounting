@@ -12,11 +12,16 @@ const { createAccountingMcpServer } = await import("../src/mcp.js");
 
 test("the MCP exposes scoped tools with schema-semantic projections", async () => {
   const seen = [];
+  let imported;
   const services = {
     async listCurrencies() { return [{ id: 2, code: "BTC", scale: 8 }]; },
     async listAccounts(_pool, personId) {
       seen.push(personId);
       return [{ id: 10, name: "Wallet", balanceUnits: "123" }];
+    },
+    async importAccountTree(input) {
+      imported = input;
+      return { dryRun: input.dryRun, totalCount: input.accounts.length, plannedCount: input.accounts.length };
     },
   };
   const server = createAccountingMcpServer({ personId: 7, pool: {}, services });
@@ -30,6 +35,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
+  assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
 
   const result = await client.callTool({ name: "list_accounts", arguments: {} });
   assert.deepEqual(seen, [7]);
@@ -42,6 +48,28 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     Object.hasOwn(result.structuredContent.schemaProjection.schemaProjection.schemaObjects, "accounts"),
     true,
   );
+
+  const importResult = await client.callTool({
+    name: "import_account_tree",
+    arguments: {
+      accounts: [{
+        full_name: "Assets:Bank",
+        account_type: "asset",
+        currency_code: "USD",
+        description: "Primary bank grouping",
+        placeholder: true,
+      }],
+      dry_run: true,
+    },
+  });
+  assert.deepEqual(imported.accounts, [{
+    fullName: "Assets:Bank",
+    type: "asset",
+    currencyCode: "USD",
+    description: "Primary bank grouping",
+    placeholder: true,
+  }]);
+  assert.equal(importResult.structuredContent.import.plannedCount, 1);
 
   await client.close();
   await server.close();

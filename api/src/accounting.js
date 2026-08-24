@@ -20,7 +20,8 @@ export async function listCurrencies(pool) {
 
 export async function listAccounts(pool, personId) {
   const [rows] = await pool.query(
-    `SELECT a.account_id, a.AccountName, a.parent_account_id, a.AccountType,
+    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
+            a.parent_account_id, a.AccountType,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale,
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
             a.archived_at
@@ -29,20 +30,25 @@ export async function listAccounts(pool, personId) {
        LEFT JOIN line_items li ON li.account_id = a.account_id
        LEFT JOIN transactions t ON t.transaction_id = li.transaction_id AND t.owner_person_id = a.owner_person_id
       WHERE a.owner_person_id = ?
-      GROUP BY a.account_id, a.AccountName, a.parent_account_id, a.AccountType,
+      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder,
+               a.parent_account_id, a.AccountType,
                a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
       ORDER BY a.account_id`,
     [personId],
   );
   return rows.map((row) => ({
-    id: Number(row.account_id), name: row.AccountName, parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
+    id: Number(row.account_id), name: row.AccountName, description: row.description,
+    placeholder: Boolean(row.is_placeholder),
+    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
     type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
     scale: Number(row.scale), balanceUnits: String(row.balance_units), archivedAt: row.archived_at,
   }));
 }
 
-export async function createAccount({ personId, name, parentAccountId, type, currencyId }) {
+export async function createAccount({ personId, name, description, placeholder = false, parentAccountId, type, currencyId }) {
   const accountName = String(name ?? "").trim();
+  const accountDescription = String(description ?? "").trim() || null;
+  const isPlaceholder = placeholder === true;
   const resolvedCurrencyId = Number(currencyId);
   const allowedTypes = new Set(["asset", "liability", "equity", "income", "expense"]);
   if (!accountName) throw applicationError("Account name is required.");
@@ -60,9 +66,9 @@ export async function createAccount({ personId, name, parentAccountId, type, cur
     if (!currencyRows.length) throw applicationError("Currency not found.", 404, "CURRENCY_NOT_FOUND");
     const [result] = await connection.query(
       `INSERT INTO accounts
-        (owner_person_id, AccountName, parent_account_id, AccountType, account_currency_id)
-       VALUES (?, ?, ?, ?, ?)`,
-      [personId, accountName, parentAccountId ?? null, type, resolvedCurrencyId],
+        (owner_person_id, AccountName, description, is_placeholder, parent_account_id, AccountType, account_currency_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [personId, accountName, accountDescription, isPlaceholder, parentAccountId ?? null, type, resolvedCurrencyId],
     );
     return { id: Number(result.insertId) };
   });
@@ -98,7 +104,7 @@ export async function validateTransaction(connection, transactionId, personId, {
 
   const [lines] = await connection.query(
     `SELECT li.line_item_id, li.amount_units, li.account_id,
-            a.owner_person_id AS account_owner_person_id, a.account_currency_id
+            a.owner_person_id AS account_owner_person_id, a.account_currency_id, a.is_placeholder
        FROM line_items li
        JOIN accounts a ON a.account_id = li.account_id
       WHERE li.transaction_id = ?
@@ -108,6 +114,9 @@ export async function validateTransaction(connection, transactionId, personId, {
   if (lines.length < 2) throw applicationError("A transaction requires at least two line items.", 400, "TOO_FEW_LINE_ITEMS");
   if (lines.some((line) => Number(line.account_owner_person_id) !== Number(personId))) {
     throw applicationError("A transaction cannot use another user's account.", 403, "CROSS_USER_ACCOUNT");
+  }
+  if (lines.some((line) => Boolean(line.is_placeholder))) {
+    throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
   }
 
   const [rates] = await connection.query(
@@ -173,10 +182,13 @@ export async function createTransaction({ personId, description, transactionDate
       const accountId = Number(line.accountId);
       const amountUnits = integerString(line.amountUnits, "amountUnits");
       const [accountRows] = await connection.query(
-        "SELECT account_id FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
+        "SELECT account_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
         [accountId, personId],
       );
       if (!accountRows.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+      if (Boolean(accountRows[0].is_placeholder)) {
+        throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
+      }
       const [lineResult] = await connection.query(
         `INSERT INTO line_items (transaction_id, amount_units, memo, account_id, source_id)
          VALUES (?, ?, ?, ?, ?)`,

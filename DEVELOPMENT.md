@@ -93,10 +93,17 @@ small Schema Semantic Compiler projection for the tables and fields used by
 that operation. `describe_accounting_schema` accepts natural language and can
 retrieve a relevant projection before another tool is selected.
 
+`import_account_tree` accepts up to 1,000 accounts with colon-delimited full
+names, normalized account types, currency codes, descriptions, and placeholder
+flags. It validates without writing by default. After reviewing the dry-run,
+repeat the same call with `dry_run: false`; all new accounts are then created in
+one transaction, parents are ordered automatically, and exact matching paths
+make retries idempotent.
+
 ### Deployment order
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Create and verify a recoverable database backup.
-3. Apply migration 0006 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
+3. Apply all pending migrations through 0007 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:semantics:sync`, review the semantic-form diff, and fill any reported blanks.
 5. Run `npm run schema:verify`, then restart the API service.

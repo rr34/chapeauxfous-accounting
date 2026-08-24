@@ -82,10 +82,13 @@ export async function saveBalanceAssertion({ personId, accountId, balanceDate, k
 
   return withTransaction(async (connection) => {
     const [accounts] = await connection.query(
-      "SELECT account_id FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
+      "SELECT account_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
       [resolvedAccountId, personId],
     );
     if (!accounts.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+    if (Boolean(accounts[0].is_placeholder)) {
+      throw applicationError("A balance cannot be asserted for a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
+    }
 
     const [result] = await connection.query(
       `INSERT INTO account_balance_assertions
