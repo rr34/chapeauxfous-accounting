@@ -1,0 +1,333 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import * as z from "zod/v4";
+import { requireApiToken } from "./api-tokens.js";
+import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
+import {
+  createAccount,
+  createTransaction,
+  getTransaction,
+  listAccounts,
+  listCurrencies,
+  listTransactions,
+  verifyAllPostedTransactions,
+} from "./accounting.js";
+import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
+
+const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+
+const operations = Object.freeze({
+  listCurrencies: {
+    name: "list_currencies",
+    purpose: "List the supported currencies and their native minor-unit scale.",
+    schemaObjects: ["currencies"],
+    fields: { currencies: ["currency_id", "CurrencyAbbreviation", "scale"] },
+  },
+  listAccounts: {
+    name: "list_accounts",
+    purpose: "List this user's accounts and balances derived from posted line items.",
+    schemaObjects: ["accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      accounts: ["account_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "TransactionState"],
+      line_items: ["transaction_id", "amount_units", "account_id"],
+    },
+  },
+  createAccount: {
+    name: "create_account",
+    purpose: "Create one user-owned accounting account.",
+    schemaObjects: ["accounts", "currencies"],
+    fields: {
+      accounts: ["account_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+    },
+  },
+  listTransactions: {
+    name: "list_transactions",
+    purpose: "List this user's recent accounting transactions.",
+    schemaObjects: ["transactions", "currencies", "line_items"],
+    fields: {
+      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      line_items: ["line_item_id", "transaction_id"],
+    },
+  },
+  getTransaction: {
+    name: "get_transaction",
+    purpose: "Read one user-owned transaction with its line items, tags, and exchange rates.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id"],
+      accounts: ["account_id", "AccountName", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+    },
+  },
+  createTransaction: {
+    name: "create_transaction",
+    purpose: "Create a balanced double-entry transaction and optionally post it.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      accounts: ["account_id", "account_currency_id", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+      xrates: ["xrate_id", "xrate_type", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+    },
+  },
+  listBalanceAssertions: {
+    name: "list_balance_assertions",
+    purpose: "List known end-of-day account balances and compare them with the posted ledger.",
+    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
+      accounts: ["account_id", "AccountName", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "TransactionDate", "TransactionState"],
+      line_items: ["transaction_id", "amount_units", "account_id"],
+    },
+  },
+  saveBalanceAssertion: {
+    name: "save_balance_assertion",
+    purpose: "Create or replace a known end-of-day account balance.",
+    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
+      accounts: ["account_id", "AccountName", "account_currency_id", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "TransactionDate", "TransactionState"],
+      line_items: ["transaction_id", "amount_units", "account_id"],
+    },
+  },
+  verifyLedger: {
+    name: "verify_ledger",
+    purpose: "Re-run the accounting invariants for every posted transaction owned by this user.",
+    schemaObjects: ["transactions", "line_items", "accounts", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "owner_person_id", "valuation_currency_id", "TransactionState"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "account_id"],
+      accounts: ["account_id", "owner_person_id", "account_currency_id"],
+      xrates: ["transaction_id", "xrate_type", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+    },
+  },
+});
+
+function toolResult(value) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value) }],
+    structuredContent: value,
+  };
+}
+
+function positiveInteger(label) {
+  return z.number().int().positive().describe(label);
+}
+
+export function createAccountingMcpServer({ personId, pool, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
+  const accounting = {
+    listCurrencies: services.listCurrencies ?? listCurrencies,
+    listAccounts: services.listAccounts ?? listAccounts,
+    createAccount: services.createAccount ?? createAccount,
+    listTransactions: services.listTransactions ?? listTransactions,
+    getTransaction: services.getTransaction ?? getTransaction,
+    createTransaction: services.createTransaction ?? createTransaction,
+    listBalanceAssertions: services.listBalanceAssertions ?? listBalanceAssertions,
+    saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
+    verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
+  };
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.1.0" });
+
+  server.registerTool("describe_accounting_schema", {
+    title: "Describe accounting schema",
+    description: "Return a small Schema Semantic Compiler projection for the accounting concepts named in the request. Use this before choosing accounting tools when the relevant entities or field meanings are unclear.",
+    inputSchema: {
+      request: z.string().trim().min(1).max(2000).describe("Natural-language description of the accounting data or operation to understand."),
+    },
+    annotations: readOnly,
+  }, async ({ request }) => toolResult(schemaSemantics.route(request)));
+
+  server.registerTool("list_currencies", {
+    title: "List currencies",
+    description: "List currency ids, codes, and minor-unit scales. Monetary amounts elsewhere are integer native units, not decimal strings.",
+    inputSchema: {},
+    annotations: readOnly,
+  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
+    currencies: await accounting.listCurrencies(pool),
+  }, operations.listCurrencies)));
+
+  server.registerTool("list_accounts", {
+    title: "List accounts",
+    description: "List all accounts belonging to the API-token owner, including posted native-unit balances and archived state.",
+    inputSchema: {},
+    annotations: readOnly,
+  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
+    accounts: await accounting.listAccounts(pool, personId),
+  }, operations.listAccounts)));
+
+  server.registerTool("create_account", {
+    title: "Create account",
+    description: "Create an account for the API-token owner. No root account, account type, or currency is inferred.",
+    inputSchema: {
+      name: z.string().trim().min(1).describe("Human-facing account name."),
+      parent_account_id: positiveInteger("Optional parent account id owned by the same user.").nullable().optional(),
+      account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
+      currency_id: positiveInteger("Currency id returned by list_currencies."),
+    },
+    annotations: writesData,
+  }, async ({ name, parent_account_id, account_type, currency_id }) => {
+    const created = await accounting.createAccount({
+      personId,
+      name,
+      parentAccountId: parent_account_id,
+      type: account_type,
+      currencyId: currency_id,
+    });
+    return toolResult(withSchemaProjection(schemaSemantics, { account: created }, operations.createAccount));
+  });
+
+  server.registerTool("list_transactions", {
+    title: "List transactions",
+    description: "List recent transactions belonging to the API-token owner, newest first.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+    },
+    annotations: readOnly,
+  }, async ({ limit }) => toolResult(withSchemaProjection(schemaSemantics, {
+    transactions: await accounting.listTransactions(pool, personId, limit),
+  }, operations.listTransactions)));
+
+  server.registerTool("get_transaction", {
+    title: "Get transaction",
+    description: "Get one transaction belonging to the API-token owner, including its line items, tags, and transaction exchange rates.",
+    inputSchema: { transaction_id: positiveInteger("Transaction id.") },
+    annotations: readOnly,
+  }, async ({ transaction_id }) => toolResult(withSchemaProjection(schemaSemantics, {
+    transaction: await accounting.getTransaction(pool, personId, transaction_id),
+  }, operations.getTransaction)));
+
+  const lineItemSchema = z.object({
+    account_id: positiveInteger("Account id owned by the token owner."),
+    amount_units: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the account currency's native units."),
+    memo: z.string().trim().nullable().optional(),
+    source_id: z.string().trim().nullable().optional(),
+    tags: z.array(z.object({
+      key: z.string().trim().min(1).max(50),
+      value: z.string().trim().min(1),
+    })).optional(),
+  });
+  const rateSchema = z.object({
+    from_units: z.string().regex(/^\d+$/).describe("Positive integer units in the source currency."),
+    from_currency_id: positiveInteger("Source currency id."),
+    to_units: z.string().regex(/^\d+$/).describe("Positive integer units in the valuation currency."),
+    to_currency_id: positiveInteger("Must equal valuation_currency_id."),
+  });
+  server.registerTool("create_transaction", {
+    title: "Create transaction",
+    description: "Atomically create and validate a double-entry transaction. Values must balance in valuation_currency_id; provide a positive-unit exchange rate for each foreign account currency.",
+    inputSchema: {
+      description: z.string().trim().nullable().optional(),
+      transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
+      valuation_currency_id: positiveInteger("Currency in which transaction balance is evaluated."),
+      line_items: z.array(lineItemSchema).min(2),
+      rates: z.array(rateSchema).optional(),
+      post: z.boolean().default(true).describe("Post after validation; false leaves a validated draft."),
+      source_system: z.string().trim().max(32).nullable().optional(),
+      source_id: z.string().trim().max(128).nullable().optional(),
+    },
+    annotations: writesData,
+  }, async (input) => {
+    const created = await accounting.createTransaction({
+      personId,
+      description: input.description,
+      transactionDate: input.transaction_date,
+      valuationCurrencyId: input.valuation_currency_id,
+      lineItems: input.line_items.map((line) => ({
+        accountId: line.account_id,
+        amountUnits: line.amount_units,
+        memo: line.memo,
+        sourceId: line.source_id,
+        tags: line.tags,
+      })),
+      rates: input.rates?.map((rate) => ({
+        fromUnits: rate.from_units,
+        fromCurrencyId: rate.from_currency_id,
+        toUnits: rate.to_units,
+        toCurrencyId: rate.to_currency_id,
+      })),
+      post: input.post,
+      sourceSystem: input.source_system,
+      sourceId: input.source_id,
+    });
+    return toolResult(withSchemaProjection(schemaSemantics, { transaction: created }, operations.createTransaction));
+  });
+
+  server.registerTool("list_balance_assertions", {
+    title: "List balance assertions",
+    description: "List known end-of-day balances and their differences from the posted ledger for the API-token owner.",
+    inputSchema: {},
+    annotations: readOnly,
+  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
+    assertions: await accounting.listBalanceAssertions(pool, personId),
+  }, operations.listBalanceAssertions)));
+
+  server.registerTool("save_balance_assertion", {
+    title: "Save balance assertion",
+    description: "Create or replace the known end-of-day native-unit balance for one account and date.",
+    inputSchema: {
+      account_id: positiveInteger("Account id owned by the token owner."),
+      balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      known_balance_units: z.string().regex(/^-?\d+$/).describe("Signed integer native units in the account currency."),
+    },
+    annotations: { ...writesData, idempotentHint: true },
+  }, async ({ account_id, balance_date, known_balance_units }) => toolResult(withSchemaProjection(schemaSemantics, {
+    assertion: await accounting.saveBalanceAssertion({
+      personId,
+      accountId: account_id,
+      balanceDate: balance_date,
+      knownBalanceUnits: known_balance_units,
+    }),
+  }, operations.saveBalanceAssertion)));
+
+  server.registerTool("verify_ledger", {
+    title: "Verify ledger",
+    description: "Check every posted transaction belonging to the API-token owner against the central double-entry and exchange-rate invariants.",
+    inputSchema: {},
+    annotations: readOnly,
+  }, async () => toolResult(withSchemaProjection(schemaSemantics,
+    await accounting.verifyAllPostedTransactions(pool, personId), operations.verifyLedger)));
+
+  return server;
+}
+
+export function mountAccountingMcp(app, { pool }) {
+  const authenticate = requireApiToken(pool);
+  app.post("/mcp", authenticate, async (req, res) => {
+    const server = createAccountingMcpServer({ personId: req.auth.personId, pool });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("MCP request failed", error);
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+      }
+    } finally {
+      await transport.close().catch(() => {});
+      await server.close().catch(() => {});
+    }
+  });
+  app.get("/mcp", authenticate, (_req, res) => {
+    res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
+  });
+  app.delete("/mcp", authenticate, (_req, res) => {
+    res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
+  });
+}

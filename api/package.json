@@ -7,14 +7,18 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "schema:migrate": "node scripts/migrate-db.mjs",
+    "schema:semantics:sync": "node scripts/sync-schema-semantics.mjs",
     "schema:verify": "node scripts/verify-db.mjs",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "cors": "2.8.5",
     "dotenv": "16.4.7",
     "express": "5.2.1",
     "jsonwebtoken": "9.0.3",
-    "mysql2": "3.14.0"
+    "mysql2": "3.14.0",
+    "schema-semantic-compiler": "https://codeload.github.com/rr34/schema-semantic-compiler/tar.gz/32eddf41c26b31b3cab7706a4d6a4c13826e9063",
+    "zod": "4.4.3"
   }
 }

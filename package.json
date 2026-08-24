@@ -12,6 +12,7 @@
     "build": "npm run build --workspace client",
     "test": "npm test --workspace api",
     "schema:migrate": "npm run schema:migrate --workspace api",
+    "schema:semantics:sync": "npm run schema:semantics:sync --workspace api",
     "schema:verify": "npm run schema:verify --workspace api"
   }
 }

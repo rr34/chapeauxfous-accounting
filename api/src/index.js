@@ -3,6 +3,8 @@ import cors from "cors";
 import "./env.js";
 import { pool } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
+import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
@@ -51,6 +53,18 @@ app.get("/api/auth/me", requireAuth, async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+app.get("/api/auth/tokens", requireAuth, async (req, res, next) => {
+  try { res.json({ tokens: await listApiTokens(pool, req.auth.personId) }); } catch (error) { next(error); }
+});
+
+app.post("/api/auth/tokens", requireAuth, async (req, res, next) => {
+  try { res.status(201).json(await createApiToken(pool, req.auth.personId, req.body)); } catch (error) { next(error); }
+});
+
+app.delete("/api/auth/tokens/:tokenId", requireAuth, async (req, res, next) => {
+  try { res.json(await revokeApiToken(pool, req.auth.personId, req.params.tokenId)); } catch (error) { next(error); }
+});
+
 app.get("/api/accounts", requireAuth, async (req, res, next) => {
   try { res.json({ accounts: await listAccounts(pool, req.auth.personId) }); } catch (error) { next(error); }
 });
@@ -87,6 +101,8 @@ app.post("/api/ledger/verify", requireAuth, async (req, res, next) => {
     res.status(report.valid ? 200 : 409).json(report);
   } catch (error) { next(error); }
 });
+
+mountAccountingMcp(app, { pool });
 
 app.use((error, _req, res, _next) => {
   console.error(error);

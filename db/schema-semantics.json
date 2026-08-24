@@ -1,0 +1,2238 @@
+{
+  "kind": "schema-semantic-form",
+  "contractVersion": 2,
+  "compiler": {
+    "name": "schema-semantic-compiler",
+    "version": "0.2.1"
+  },
+  "database": {
+    "engine": "mariadb",
+    "name": "cfaccounting",
+    "schemaVersion": 6,
+    "schemaFingerprint": "ffaebe2df84b9c9e972b36963cf0cab1f0c726226dc2f9b87f84591f7884c400",
+    "extractedAt": "2026-08-24T00:00:00.000Z"
+  },
+  "instructions": {
+    "humanOwned": "Fill only semantics properties. Null, empty arrays, and empty objects are intentional blanks.",
+    "compilerOwned": "The compiler refreshes mechanics and database metadata and preserves semantics during synchronization.",
+    "authority": "The database is authoritative for mechanics. This file is the sole authority for human meaning."
+  },
+  "schemaObjects": {
+    "account_balance_assertions": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "account_balance_assertions_account_date_UQ",
+            "columns": [
+              "account_id",
+              "balance_date"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "account_balance_assertions_owner_date_IDX",
+            "columns": [
+              "owner_person_id",
+              "balance_date",
+              "account_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "account_balance_assertion_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store user-entered end-of-day balances used to reconcile the derived ledger.",
+        "rowMeaning": "One account's known balance at the end of one calendar date.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "balance check",
+          "known balance",
+          "reconciliation point"
+        ],
+        "keywords": [
+          "balance matches",
+          "reconcile account",
+          "statement balance",
+          "balance difference"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "The known balance is expressed in the account currency's smallest native units.",
+          "There is at most one assertion per account and balance date."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "account_balance_assertion_id": {
+          "mechanics": {
+            "present": true,
+            "name": "account_balance_assertion_id",
+            "ordinal": 0,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the balance assertion.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose ledger owns this balance assertion.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
+        "account_id": {
+          "mechanics": {
+            "present": true,
+            "name": "account_id",
+            "ordinal": 2,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Account whose balance is being asserted.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "balance_date": {
+          "mechanics": {
+            "present": true,
+            "name": "balance_date",
+            "ordinal": 3,
+            "type": "date",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Calendar date whose end-of-day balance is known.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "known_balance_units": {
+          "mechanics": {
+            "present": true,
+            "name": "known_balance_units",
+            "ordinal": 4,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Signed known balance in the account currency's smallest native units.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:account_balance_assertions_account_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:account_balance_assertions_account_FK",
+            "columns": [
+              "account_id"
+            ],
+            "targetObject": "accounts",
+            "targetColumns": [
+              "account_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this account_balance_assertions row to its referenced accounts row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    },
+    "accounts": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "accounts_accounts_FK",
+            "columns": [
+              "parent_account_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "accounts_currencies_FK",
+            "columns": [
+              "account_currency_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "accounts_owner_IDX",
+            "columns": [
+              "owner_person_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "accounts_owner_source_UQ",
+            "columns": [
+              "owner_person_id",
+              "source_system",
+              "source_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "account_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store the user-defined accounts that receive double-entry line items.",
+        "rowMeaning": "One account belonging to one person's ledger.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "ledger account",
+          "chart of accounts"
+        ],
+        "keywords": [
+          "account balance",
+          "asset",
+          "liability",
+          "income",
+          "expense",
+          "equity"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "Every account has an explicitly chosen type and currency.",
+          "New users begin with no accounts; there is no implied root account or base currency.",
+          "Only posted transaction line items contribute to displayed balances."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "account_id": {
+          "mechanics": {
+            "present": true,
+            "name": "account_id",
+            "ordinal": 0,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the account.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose ledger owns the account.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
+        "AccountName": {
+          "mechanics": {
+            "present": true,
+            "name": "AccountName",
+            "ordinal": 2,
+            "type": "text",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Human-facing account name, which may include a description.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "parent_account_id": {
+          "mechanics": {
+            "present": true,
+            "name": "parent_account_id",
+            "ordinal": 3,
+            "type": "int(11)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional parent account in the same user's account hierarchy.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "AccountType": {
+          "mechanics": {
+            "present": true,
+            "name": "AccountType",
+            "ordinal": 4,
+            "type": "enum('asset','liability','income','expense','equity')",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": [
+              "asset",
+              "liability",
+              "income",
+              "expense",
+              "equity"
+            ]
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Accounting classification controlling the account's role: asset, liability, income, expense, or equity.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "account_currency_id": {
+          "mechanics": {
+            "present": true,
+            "name": "account_currency_id",
+            "ordinal": 5,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Currency in whose native units every line item posted to this account is stored.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "archived_at": {
+          "mechanics": {
+            "present": true,
+            "name": "archived_at",
+            "ordinal": 6,
+            "type": "datetime",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Time the account was archived; null means active.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "source_system": {
+          "mechanics": {
+            "present": true,
+            "name": "source_system",
+            "ordinal": 7,
+            "type": "varchar(32)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional external system namespace used for idempotent imports.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "source_id": {
+          "mechanics": {
+            "present": true,
+            "name": "source_id",
+            "ordinal": 8,
+            "type": "varchar(128)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional identifier within source_system used for idempotent imports.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:accounts_accounts_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:accounts_accounts_FK",
+            "columns": [
+              "parent_account_id"
+            ],
+            "targetObject": "accounts",
+            "targetColumns": [
+              "account_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this accounts row to its referenced accounts row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:accounts_currencies_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:accounts_currencies_FK",
+            "columns": [
+              "account_currency_id"
+            ],
+            "targetObject": "currencies",
+            "targetColumns": [
+              "currency_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this accounts row to its referenced currencies row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    },
+    "currencies": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "currencies_unique",
+            "columns": [
+              "CurrencyAbbreviation"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "currency_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Define supported currencies and the scale used to interpret their integer native units.",
+        "rowMeaning": "One supported currency or monetary unit.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "currency code",
+          "money unit"
+        ],
+        "keywords": [
+          "USD",
+          "BTC",
+          "minor units",
+          "decimal places",
+          "scale"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "Amounts are stored as integers; divide by 10 raised to scale only for human display."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "currency_id": {
+          "mechanics": {
+            "present": true,
+            "name": "currency_id",
+            "ordinal": 0,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier referenced by accounts, transactions, and exchange rates.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "CurrencyAbbreviation": {
+          "mechanics": {
+            "present": true,
+            "name": "CurrencyAbbreviation",
+            "ordinal": 1,
+            "type": "varchar(50)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Human-facing currency code or unit abbreviation.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "scale": {
+          "mechanics": {
+            "present": true,
+            "name": "scale",
+            "ordinal": 2,
+            "type": "tinyint(3) unsigned",
+            "nullable": false,
+            "default": "2",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Count of decimal places used to display one integer native-unit amount.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {}
+    },
+    "line_items": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "line_items_accounts_FK",
+            "columns": [
+              "account_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "line_items_transaction_source_UQ",
+            "columns": [
+              "transaction_id",
+              "source_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "line_items_transactions_FK",
+            "columns": [
+              "transaction_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "line_item_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store the signed account postings that make up double-entry transactions.",
+        "rowMeaning": "One signed posting to one account within one transaction.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "posting",
+          "transaction line",
+          "entry"
+        ],
+        "keywords": [
+          "debit",
+          "credit",
+          "amount",
+          "split",
+          "balanced transaction"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "amount_units is a signed integer in the referenced account's currency.",
+          "Every transaction requires at least two line items.",
+          "The application centrally validates that transaction values sum exactly to zero in the valuation currency."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "line_item_id": {
+          "mechanics": {
+            "present": true,
+            "name": "line_item_id",
+            "ordinal": 0,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the posting.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "transaction_id": {
+          "mechanics": {
+            "present": true,
+            "name": "transaction_id",
+            "ordinal": 1,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Transaction containing this posting.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "amount_units": {
+          "mechanics": {
+            "present": true,
+            "name": "amount_units",
+            "ordinal": 2,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Signed integer amount in the referenced account's smallest native currency units.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "memo": {
+          "mechanics": {
+            "present": true,
+            "name": "memo",
+            "ordinal": 3,
+            "type": "text",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional explanation specific to this posting.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "account_id": {
+          "mechanics": {
+            "present": true,
+            "name": "account_id",
+            "ordinal": 4,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Account receiving this posting.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "reconciliation_state": {
+          "mechanics": {
+            "present": true,
+            "name": "reconciliation_state",
+            "ordinal": 5,
+            "type": "enum('unreconciled','cleared','reconciled')",
+            "nullable": false,
+            "default": "unreconciled",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": [
+              "unreconciled",
+              "cleared",
+              "reconciled"
+            ]
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Whether the posting is unreconciled, cleared, or reconciled.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "reconciled_at": {
+          "mechanics": {
+            "present": true,
+            "name": "reconciled_at",
+            "ordinal": 6,
+            "type": "date",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Calendar date on which the posting was reconciled, when applicable.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "source_id": {
+          "mechanics": {
+            "present": true,
+            "name": "source_id",
+            "ordinal": 7,
+            "type": "varchar(128)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional source identifier unique within the containing transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:line_items_accounts_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:line_items_accounts_FK",
+            "columns": [
+              "account_id"
+            ],
+            "targetObject": "accounts",
+            "targetColumns": [
+              "account_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this line_items row to its referenced accounts row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:line_items_transactions_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:line_items_transactions_FK",
+            "columns": [
+              "transaction_id"
+            ],
+            "targetObject": "transactions",
+            "targetColumns": [
+              "transaction_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this line_items row to its referenced transactions row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    },
+    "lineitems_tags_join": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "lineitems_tags_join_tagged_line_item_id_IDX",
+            "columns": [
+              "tagged_line_item_id",
+              "tag_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "tag_id",
+              "tagged_line_item_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Associate reusable user-owned tags with transaction line items.",
+        "rowMeaning": "One association between one line item and one tag.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "tag assignment"
+        ],
+        "keywords": [
+          "line item tags",
+          "categorized posting"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "Deleting a line item or tag deletes its associations."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "tagged_line_item_id": {
+          "mechanics": {
+            "present": true,
+            "name": "tagged_line_item_id",
+            "ordinal": 0,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 2,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Line item receiving the tag.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "tag_id": {
+          "mechanics": {
+            "present": true,
+            "name": "tag_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Tag assigned to the line item.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:lineitems_tags_join_line_items_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:lineitems_tags_join_line_items_FK",
+            "columns": [
+              "tagged_line_item_id"
+            ],
+            "targetObject": "line_items",
+            "targetColumns": [
+              "line_item_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "CASCADE"
+          },
+          "semantics": {
+            "meaning": "Connects this lineitems_tags_join row to its referenced line_items row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:lineitems_tags_join_tags_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:lineitems_tags_join_tags_FK",
+            "columns": [
+              "tag_id"
+            ],
+            "targetObject": "tags",
+            "targetColumns": [
+              "tag_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "CASCADE"
+          },
+          "semantics": {
+            "meaning": "Connects this lineitems_tags_join row to its referenced tags row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    },
+    "tags": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "tag_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "tags_owner_key_IDX",
+            "columns": [
+              "owner_person_id",
+              "tag_key"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "tags_owner_key_value_UQ",
+            "columns": [
+              "owner_person_id",
+              "tag_key",
+              "tag_value"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "HASH"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store reusable key-value labels owned by one user for classifying line items.",
+        "rowMeaning": "One unique tag key and value in one person's ledger.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "label",
+          "category"
+        ],
+        "keywords": [
+          "tagged",
+          "categorize",
+          "metadata"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "A key-value pair is unique within one person's ledger."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "tag_id": {
+          "mechanics": {
+            "present": true,
+            "name": "tag_id",
+            "ordinal": 0,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the tag.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose ledger owns the tag.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
+        "tag_key": {
+          "mechanics": {
+            "present": true,
+            "name": "tag_key",
+            "ordinal": 2,
+            "type": "varchar(50)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Normalized tag category key.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "tag_value": {
+          "mechanics": {
+            "present": true,
+            "name": "tag_value",
+            "ordinal": 3,
+            "type": "text",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Human-facing value within the tag key.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {}
+    },
+    "transactions": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "transaction_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "transactions_currencies_FK",
+            "columns": [
+              "valuation_currency_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "transactions_owner_date_IDX",
+            "columns": [
+              "owner_person_id",
+              "TransactionDate",
+              "transaction_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "transactions_owner_source_UQ",
+            "columns": [
+              "owner_person_id",
+              "source_system",
+              "source_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "transactions_reversal_IDX",
+            "columns": [
+              "reversal_of_transaction_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store double-entry accounting transaction headers and lifecycle state.",
+        "rowMeaning": "One dated accounting event composed of two or more signed line items.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "transaction",
+          "journal entry",
+          "accounting event"
+        ],
+        "keywords": [
+          "purchase",
+          "payment",
+          "transfer",
+          "income",
+          "expense",
+          "posted",
+          "draft",
+          "voided"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "Posted transactions must balance exactly to zero in valuation_currency_id.",
+          "A transaction and all accounts it uses must belong to the same person.",
+          "Draft, posted, and voided are explicit states; posted is never inferred from dates."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "transaction_id": {
+          "mechanics": {
+            "present": true,
+            "name": "transaction_id",
+            "ordinal": 0,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose ledger owns the transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
+        "EnteredAt": {
+          "mechanics": {
+            "present": true,
+            "name": "EnteredAt",
+            "ordinal": 2,
+            "type": "datetime",
+            "nullable": false,
+            "default": "current_timestamp()",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Time the transaction row was first recorded.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "UpdatedAt": {
+          "mechanics": {
+            "present": true,
+            "name": "UpdatedAt",
+            "ordinal": 3,
+            "type": "datetime",
+            "nullable": true,
+            "default": "current_timestamp()",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Time the transaction row was last changed.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "description": {
+          "mechanics": {
+            "present": true,
+            "name": "description",
+            "ordinal": 4,
+            "type": "text",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional human explanation of the complete transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "valuation_currency_id": {
+          "mechanics": {
+            "present": true,
+            "name": "valuation_currency_id",
+            "ordinal": 5,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Currency in which the signed line-item values must sum exactly to zero.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "TransactionState": {
+          "mechanics": {
+            "present": true,
+            "name": "TransactionState",
+            "ordinal": 6,
+            "type": "enum('draft','posted','voided')",
+            "nullable": false,
+            "default": "draft",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": [
+              "draft",
+              "posted",
+              "voided"
+            ]
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Lifecycle state: draft, posted, or voided.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "TransactionDate": {
+          "mechanics": {
+            "present": true,
+            "name": "TransactionDate",
+            "ordinal": 7,
+            "type": "date",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Accounting calendar date of the transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "reversal_of_transaction_id": {
+          "mechanics": {
+            "present": true,
+            "name": "reversal_of_transaction_id",
+            "ordinal": 8,
+            "type": "bigint(20)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional earlier transaction reversed by this transaction.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "source_system": {
+          "mechanics": {
+            "present": true,
+            "name": "source_system",
+            "ordinal": 9,
+            "type": "varchar(32)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional external system namespace used for idempotent imports.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "source_id": {
+          "mechanics": {
+            "present": true,
+            "name": "source_id",
+            "ordinal": 10,
+            "type": "varchar(128)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional identifier within source_system used for idempotent imports.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:transactions_currencies_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:transactions_currencies_FK",
+            "columns": [
+              "valuation_currency_id"
+            ],
+            "targetObject": "currencies",
+            "targetColumns": [
+              "currency_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this transactions row to its referenced currencies row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:transactions_reversal_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:transactions_reversal_FK",
+            "columns": [
+              "reversal_of_transaction_id"
+            ],
+            "targetObject": "transactions",
+            "targetColumns": [
+              "transaction_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this transactions row to its referenced transactions row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    },
+    "xrates": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "exchange_rates_unique",
+            "columns": [
+              "transaction_id",
+              "from_currency_id",
+              "to_currency_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": [
+              "xrate_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "xrates_owner_reference_lookup_IDX",
+            "columns": [
+              "owner_person_id",
+              "xrate_type",
+              "from_currency_id",
+              "to_currency_id",
+              "ValidAt"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "xrates_transactions_currencies_FK",
+            "columns": [
+              "from_currency_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "xrates_transactions_currencies_FK_1",
+            "columns": [
+              "to_currency_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "xrates_xrate_type_IDX",
+            "columns": [
+              "xrate_type",
+              "from_currency_id",
+              "to_currency_id",
+              "ValidAt"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store exact rational exchange rates for multi-currency transactions and optional reference rates.",
+        "rowMeaning": "One exact ratio converting positive source units to positive target units.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": [
+          "exchange rate",
+          "currency conversion",
+          "FX rate"
+        ],
+        "keywords": [
+          "foreign currency",
+          "convert",
+          "valuation currency",
+          "rate"
+        ],
+        "routingWeight": 0.8,
+        "importantRules": [
+          "Transaction rates use positive integer ratios rather than floating-point decimals.",
+          "Each foreign account currency used by a transaction needs exactly one rate into its valuation currency.",
+          "Reference rates never determine posted accounting values unless explicitly copied into a transaction rate."
+        ],
+        "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
+      },
+      "fields": {
+        "xrate_id": {
+          "mechanics": {
+            "present": true,
+            "name": "xrate_id",
+            "ordinal": 0,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 1,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable identifier for the exchange rate.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {
+            "present": true,
+            "name": "owner_person_id",
+            "ordinal": 1,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose ledger owns the rate.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private tenant identifier; use only for server-side isolation."
+          }
+        },
+        "xrate_type": {
+          "mechanics": {
+            "present": true,
+            "name": "xrate_type",
+            "ordinal": 2,
+            "type": "enum('transaction','reference')",
+            "nullable": false,
+            "default": "reference",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": [
+              "transaction",
+              "reference"
+            ]
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Whether the rate is attached to a transaction or is reference-only.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "ValidAt": {
+          "mechanics": {
+            "present": true,
+            "name": "ValidAt",
+            "ordinal": 3,
+            "type": "datetime",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "UTC time at which a reference rate applies; null for transaction rates.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "transaction_id": {
+          "mechanics": {
+            "present": true,
+            "name": "transaction_id",
+            "ordinal": 4,
+            "type": "bigint(20)",
+            "nullable": true,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Transaction using this exact rate; null for reference rates.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "from_units": {
+          "mechanics": {
+            "present": true,
+            "name": "from_units",
+            "ordinal": 5,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Positive integer source-currency units in the exact conversion ratio.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "from_currency_id": {
+          "mechanics": {
+            "present": true,
+            "name": "from_currency_id",
+            "ordinal": 6,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Source currency of the ratio.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "to_units": {
+          "mechanics": {
+            "present": true,
+            "name": "to_units",
+            "ordinal": 7,
+            "type": "bigint(20)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Positive integer target-currency units in the exact conversion ratio.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
+        "to_currency_id": {
+          "mechanics": {
+            "present": true,
+            "name": "to_currency_id",
+            "ordinal": 8,
+            "type": "int(11)",
+            "nullable": false,
+            "default": null,
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Target currency, which must be the transaction valuation currency for transaction rates.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        }
+      },
+      "relationships": {
+        "fk:xrates_transactions_currencies_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:xrates_transactions_currencies_FK",
+            "columns": [
+              "from_currency_id"
+            ],
+            "targetObject": "currencies",
+            "targetColumns": [
+              "currency_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this xrates row to its referenced currencies row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:xrates_transactions_currencies_FK_1": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:xrates_transactions_currencies_FK_1",
+            "columns": [
+              "to_currency_id"
+            ],
+            "targetObject": "currencies",
+            "targetColumns": [
+              "currency_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "RESTRICT"
+          },
+          "semantics": {
+            "meaning": "Connects this xrates row to its referenced currencies row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        },
+        "fk:xrates_transactions_transactions_FK": {
+          "mechanics": {
+            "present": true,
+            "id": "fk:xrates_transactions_transactions_FK",
+            "columns": [
+              "transaction_id"
+            ],
+            "targetObject": "transactions",
+            "targetColumns": [
+              "transaction_id"
+            ],
+            "onUpdate": "CASCADE",
+            "onDelete": "CASCADE"
+          },
+          "semantics": {
+            "meaning": "Connects this xrates row to its referenced transactions row.",
+            "cardinality": "Each source reference identifies at most one target row.",
+            "importantRules": []
+          }
+        }
+      }
+    }
+  }
+}
+

@@ -3,9 +3,41 @@
 -- Add new migrations directly below this header, newest first. The runner
 -- validates newest-first file order and applies pending migrations oldest first.
 -- Marker format:
---   -- migration 0005: short-description
+--   -- migration 0006: short-description
 --   <schema and data SQL>
---   -- end migration 0005
+--   -- end migration 0006
+
+-- migration 0006: add-user-api-tokens
+-- writer downtime: not required; this creates an independent table used only
+-- by the new MCP endpoint.
+-- deployment order: apply this migration before restarting the API with MCP
+-- enabled, because bearer-token authentication reads this table.
+-- locking: brief metadata locks occur while MariaDB creates the table and keys.
+-- recovery: revoke or drop API tokens if the MCP integration must be disabled;
+-- restoring the pre-migration backup is not required for ledger data.
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  api_token_id BIGINT NOT NULL AUTO_INCREMENT,
+  owner_person_id INT NOT NULL,
+  token_name VARCHAR(128) NOT NULL,
+  token_prefix VARCHAR(20) NOT NULL COMMENT 'Non-secret prefix shown when listing tokens',
+  token_hash BINARY(32) NOT NULL COMMENT 'SHA-256 of a 256-bit random bearer token',
+  expires_at DATETIME(6) NULL,
+  last_used_at DATETIME(6) NULL,
+  revoked_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (api_token_id),
+  UNIQUE KEY api_tokens_hash_UQ (token_hash),
+  KEY api_tokens_owner_created_IDX (owner_person_id, created_at, api_token_id),
+  CONSTRAINT api_tokens_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Revocable long-lived bearer credentials for MCP and API clients';
+
+-- end migration 0006
 
 -- migration 0005: remove-book-currency-default
 -- writer downtime: not required; the API does not need the profile table after

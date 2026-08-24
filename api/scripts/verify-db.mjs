@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { pool, databaseName } from "../src/db.js";
 import { verifyAllPostedTransactions } from "../src/accounting.js";
 import { readMigrationLedger } from "./migrations.mjs";
+import { assertAccountingSemanticFormMatches } from "./accounting-schema-semantics.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrations = readMigrationLedger(path.resolve(here, "../../db/migrations.sql"));
@@ -17,13 +18,14 @@ try {
     `SELECT TABLE_NAME FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN
         ('people2_people','accounts','transactions','line_items','tags','lineitems_tags_join','xrates',
-         'account_balance_assertions')`,
+         'account_balance_assertions','api_tokens')`,
     [databaseName],
   );
-  if (tables.length !== 8) throw new Error("Required accounting tables are missing");
+  if (tables.length !== 9) throw new Error("Required accounting tables are missing");
+  await assertAccountingSemanticFormMatches(pool, databaseName);
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);
-  console.log(`Schema version ${expectedVersion} verified; ${report.checked} posted transactions balance.`);
+  console.log(`Schema version ${expectedVersion} and schema semantics verified; ${report.checked} posted transactions balance.`);
 } finally {
   await pool.end();
 }
