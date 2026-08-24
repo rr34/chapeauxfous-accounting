@@ -6,13 +6,26 @@ import { requireEnv } from "./env.js";
 const scrypt = promisify(scryptCallback);
 const jwtSecret = requireEnv("JWT_SECRET");
 const tokenLifetime = "30d";
+const minimumPasswordLength = 4;
+const maximumPasswordLength = 4096;
+
+function passwordLength(password) {
+  return [...String(password ?? "")].length;
+}
 
 export async function hashPassword(password) {
   const normalized = String(password ?? "");
-  if (normalized.length < 10) {
-    const error = new Error("Password must contain at least 10 characters.");
+  const length = passwordLength(normalized);
+  if (length < minimumPasswordLength) {
+    const error = new Error("Password must contain at least 4 characters.");
     error.status = 400;
     error.code = "PASSWORD_TOO_SHORT";
+    throw error;
+  }
+  if (length > maximumPasswordLength) {
+    const error = new Error("Password must contain no more than 4096 characters.");
+    error.status = 400;
+    error.code = "PASSWORD_TOO_LONG";
     throw error;
   }
   const salt = randomBytes(16);
@@ -21,6 +34,8 @@ export async function hashPassword(password) {
 }
 
 export async function verifyPassword(password, encoded) {
+  const length = passwordLength(password);
+  if (length < minimumPasswordLength || length > maximumPasswordLength) return false;
   const [algorithm, saltHex, expectedHex] = String(encoded ?? "").split("$");
   if (algorithm !== "scrypt" || !saltHex || !expectedHex) return false;
   const expected = Buffer.from(expectedHex, "hex");
@@ -51,4 +66,3 @@ export function requireAuth(req, res, next) {
     return res.status(401).json({ error: error?.name === "TokenExpiredError" ? "TOKEN_EXPIRED" : "INVALID_TOKEN" });
   }
 }
-

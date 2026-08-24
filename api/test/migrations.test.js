@@ -17,6 +17,11 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
+  assert.match(migrations.at(-1).sql, /VARCHAR\(50\)/);
+  assert.match(migrations.at(-1).sql, /\('BTC satoshi', 0\)/);
+  const seededCodes = [...migrations.at(-1).sql.matchAll(/\('([^']+)', \d+\)/g)].map((match) => match[1]);
+  assert.equal(seededCodes.length, 167);
+  assert.equal(new Set(seededCodes).size, seededCodes.length);
 });

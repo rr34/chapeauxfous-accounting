@@ -46,7 +46,7 @@ DROP TABLE IF EXISTS `currencies`;
 /*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE `currencies` (
   `currency_id` int(11) NOT NULL AUTO_INCREMENT,
-  `CurrencyAbbreviation` char(5) NOT NULL,
+  `CurrencyAbbreviation` varchar(50) NOT NULL,
   `scale` tinyint(3) unsigned NOT NULL DEFAULT 2,
   PRIMARY KEY (`currency_id`),
   UNIQUE KEY `currencies_unique` (`CurrencyAbbreviation`)

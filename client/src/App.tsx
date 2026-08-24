@@ -46,7 +46,9 @@ function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
       <form onSubmit={submit}>
         {registering && <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" /></label>}
         <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></label>
-        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={registering ? "new-password" : "current-password"} /></label>
+        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}
+          minLength={registering ? 4 : undefined} maxLength={4096}
+          autoComplete={registering ? "new-password" : "current-password"} /></label>
         {registering && <label>Functional currency
           <select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
             {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}
@@ -248,4 +250,3 @@ export default function App() {
         <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)} onVerify={() => void verify()} verification={verification} /></div></main>
   </div>;
 }
-
