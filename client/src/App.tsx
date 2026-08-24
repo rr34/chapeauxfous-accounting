@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
-import type { Account, Currency, TransactionDetail, TransactionSummary, User } from "./types";
+import type { Account, BalanceAssertion, Currency, TransactionDetail, TransactionSummary, User } from "./types";
 
 const tokenKey = "cf-accounting-token";
 const today = () => new Date().toISOString().slice(0, 10);
@@ -64,15 +64,21 @@ function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
   </main>;
 }
 
-function AccountPanel({ accounts, currencies, token, onChanged }: {
-  accounts: Account[]; currencies: Currency[]; token: string; onChanged: () => Promise<void>;
+function AccountPanel({ accounts, assertions, currencies, defaultCurrencyId, token, onChanged }: {
+  accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[]; defaultCurrencyId: number;
+  token: string; onChanged: () => Promise<void>;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [type, setType] = useState<Account["type"]>("asset");
-  const [currencyId, setCurrencyId] = useState(currencies[0]?.id || 0);
+  const [currencyId, setCurrencyId] = useState(defaultCurrencyId);
   const [parentAccountId, setParentAccountId] = useState("");
   const [error, setError] = useState("");
+  const [assertionAccountId, setAssertionAccountId] = useState("");
+  const [assertionDate, setAssertionDate] = useState(today());
+  const [knownBalance, setKnownBalance] = useState("");
+  const [assertionError, setAssertionError] = useState("");
+  const [assertionBusy, setAssertionBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
@@ -80,6 +86,21 @@ function AccountPanel({ accounts, currencies, token, onChanged }: {
       await api("/accounts", { method: "POST", body: JSON.stringify({ name, type, currencyId, parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
       setName(""); setShowForm(false); await onChanged();
     } catch (nextError) { setError(errorMessage(nextError)); }
+  }
+
+  async function saveAssertion(event: FormEvent) {
+    event.preventDefault(); setAssertionBusy(true); setAssertionError("");
+    try {
+      const account = accounts.find((candidate) => candidate.id === Number(assertionAccountId));
+      if (!account) throw new Error("Choose an account.");
+      await api("/balance-assertions", { method: "POST", body: JSON.stringify({
+        accountId: account.id,
+        balanceDate: assertionDate,
+        knownBalanceUnits: decimalToUnits(knownBalance, account.scale),
+      }) }, token);
+      setKnownBalance(""); await onChanged();
+    } catch (nextError) { setAssertionError(errorMessage(nextError)); }
+    finally { setAssertionBusy(false); }
   }
 
   return <aside className="accounts-panel">
@@ -100,6 +121,31 @@ function AccountPanel({ accounts, currencies, token, onChanged }: {
       <div><strong>{account.name}</strong><span>{account.type} · {account.currencyCode}</span></div>
       <b>{unitsToDecimal(account.balanceUnits, account.scale)}</b>
     </div>)}</div>
+    <section className="assertions-panel">
+      <div><p className="eyebrow">Reconciliation</p><h3>Known balances</h3></div>
+      <form className="assertion-form" onSubmit={saveAssertion}>
+        <select aria-label="Account" required value={assertionAccountId} onChange={(event) => setAssertionAccountId(event.target.value)}>
+          <option value="">Choose account…</option>
+          {accounts.filter((account) => !account.archivedAt).map((account) =>
+            <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}
+        </select>
+        <div className="form-row"><input aria-label="End of date" type="date" required value={assertionDate}
+          onChange={(event) => setAssertionDate(event.target.value)} />
+          <input aria-label="Known ending balance" required placeholder="Known balance" value={knownBalance}
+            onChange={(event) => setKnownBalance(event.target.value)} /></div>
+        {assertionError && <p className="error">{assertionError}</p>}
+        <button className="secondary" disabled={assertionBusy}>{assertionBusy ? "Saving…" : "Save balance"}</button>
+      </form>
+      <div className="assertion-list">{assertions.map((assertion) =>
+        <div className={`assertion-row ${assertion.matches ? "matches" : "mismatch"}`} key={assertion.id}>
+          <div><strong>{assertion.accountName}</strong><span>{assertion.date} · {assertion.currencyCode}</span></div>
+          <div className="assertion-values"><span>Known {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)}</span>
+            <span>Ledger {unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</span>
+            <b>{assertion.matches ? "Matches" : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)}`}</b></div>
+        </div>)}
+        {!assertions.length && <p className="assertion-empty">No known balances recorded.</p>}
+      </div>
+    </section>
   </aside>;
 }
 
@@ -203,6 +249,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [assertions, setAssertions] = useState<BalanceAssertion[]>([]);
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
   const [selected, setSelected] = useState<TransactionDetail | null>(null);
   const [verification, setVerification] = useState("");
@@ -218,10 +265,12 @@ export default function App() {
 
   async function refresh() {
     if (!token) return;
-    const [accountResult, transactionResult] = await Promise.all([
-      api<{ accounts: Account[] }>("/accounts", {}, token), api<{ transactions: TransactionSummary[] }>("/transactions", {}, token),
+    const [accountResult, assertionResult, transactionResult] = await Promise.all([
+      api<{ accounts: Account[] }>("/accounts", {}, token),
+      api<{ assertions: BalanceAssertion[] }>("/balance-assertions", {}, token),
+      api<{ transactions: TransactionSummary[] }>("/transactions", {}, token),
     ]);
-    setAccounts(accountResult.accounts); setTransactions(transactionResult.transactions);
+    setAccounts(accountResult.accounts); setAssertions(assertionResult.assertions); setTransactions(transactionResult.transactions);
   }
   useEffect(() => { if (token && user) void refresh(); }, [token, user]);
 
@@ -245,7 +294,8 @@ export default function App() {
   if (loading) return <div className="loading">Loading accounting…</div>;
   if (!token || !user) return <AuthScreen currencies={currencies} onAuthenticated={authenticated} />;
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span><button className="link-button" onClick={logout}>Sign out</button></div></header>
-    <main className="workspace"><AccountPanel accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
+    <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
+      defaultCurrencyId={user.functionalCurrencyId} token={token} onChanged={refresh} />
       <div className="main-column"><TransactionComposer accounts={accounts} currencies={currencies} functionalCurrencyId={user.functionalCurrencyId} token={token} onCreated={refresh} />
         <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)} onVerify={() => void verify()} verification={verification} /></div></main>
   </div>;

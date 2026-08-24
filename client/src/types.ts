@@ -19,6 +19,20 @@ export type Account = {
   archivedAt: string | null;
 };
 
+export type BalanceAssertion = {
+  id: number;
+  accountId: number;
+  accountName: string;
+  date: string;
+  knownBalanceUnits: string;
+  calculatedBalanceUnits: string;
+  differenceUnits: string;
+  matches: boolean;
+  currencyId: number;
+  currencyCode: string;
+  scale: number;
+};
+
 export type TransactionSummary = {
   id: number;
   date: string;
@@ -49,4 +63,3 @@ export type TransactionDetail = {
   }>;
   rates: Array<{ id: number; fromUnits: string; fromCurrencyId: number; toUnits: string; toCurrencyId: number }>;
 };
-

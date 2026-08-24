@@ -4,6 +4,7 @@ import "./env.js";
 import { pool } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { getUser, loginUser, registerUser } from "./users.js";
+import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
   createAccount, createTransaction, getTransaction, listAccounts, listCurrencies,
   listTransactions, verifyAllPostedTransactions,
@@ -58,6 +59,16 @@ app.post("/api/accounts", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createAccount({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
 });
 
+app.get("/api/balance-assertions", requireAuth, async (req, res, next) => {
+  try { res.json({ assertions: await listBalanceAssertions(pool, req.auth.personId) }); } catch (error) { next(error); }
+});
+
+app.post("/api/balance-assertions", requireAuth, async (req, res, next) => {
+  try {
+    res.status(201).json({ assertion: await saveBalanceAssertion({ personId: req.auth.personId, ...req.body }) });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/transactions", requireAuth, async (req, res, next) => {
   try { res.json({ transactions: await listTransactions(pool, req.auth.personId, req.query.limit) }); } catch (error) { next(error); }
 });
@@ -100,4 +111,3 @@ async function shutdown(signal) {
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
-

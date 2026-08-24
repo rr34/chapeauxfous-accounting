@@ -3,9 +3,36 @@
 -- Add new migrations directly below this header, newest first. The runner
 -- validates newest-first file order and applies pending migrations oldest first.
 -- Marker format:
---   -- migration 0003: short-description
+--   -- migration 0004: short-description
 --   <schema and data SQL>
---   -- end migration 0003
+--   -- end migration 0004
+
+-- migration 0004: add-account-balance-assertions
+-- writer downtime: not required; this creates an independent empty table.
+-- locking: brief metadata locks occur while MariaDB creates the table and keys.
+-- recovery: the CREATE TABLE is idempotent and may be rerun after inspection.
+
+CREATE TABLE IF NOT EXISTS account_balance_assertions (
+  account_balance_assertion_id BIGINT NOT NULL AUTO_INCREMENT,
+  owner_person_id INT NOT NULL,
+  account_id INT NOT NULL,
+  balance_date DATE NOT NULL COMMENT 'Known balance at the end of this date',
+  known_balance_units BIGINT NOT NULL COMMENT 'Native smallest units of the account currency',
+  PRIMARY KEY (account_balance_assertion_id),
+  UNIQUE KEY account_balance_assertions_account_date_UQ (account_id, balance_date),
+  KEY account_balance_assertions_owner_date_IDX (owner_person_id, balance_date, account_id),
+  CONSTRAINT account_balance_assertions_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT account_balance_assertions_account_FK
+    FOREIGN KEY (account_id) REFERENCES accounts (account_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='User-entered end-of-day balances used to reconcile the derived ledger';
+
+-- end migration 0004
 
 -- migration 0003: expand-and-seed-currencies
 -- writer downtime: not required; the currencies table is small.
