@@ -7,6 +7,45 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0009: add-durable-import-plans
+-- writer downtime: not required; the transaction fingerprint is nullable for
+-- existing rows and the plan table is independent operational metadata.
+-- deployment order: apply this migration before restarting the API version
+-- that exposes transaction import dry runs and plan confirmation.
+-- locking: adding the nullable transaction column requires a metadata lock;
+-- creating the new table does not rewrite accounting rows.
+-- recovery: the new table and nullable column are non-destructive. Restore the
+-- verified pre-migration backup if this schema version must be rolled back.
+
+ALTER TABLE transactions
+  ADD COLUMN IF NOT EXISTS source_fingerprint CHAR(64) NULL AFTER source_id;
+
+CREATE TABLE IF NOT EXISTS accounting_import_plans (
+  import_plan_id CHAR(36) NOT NULL,
+  owner_person_id INT NOT NULL,
+  import_kind ENUM('account_tree','transactions') NOT NULL,
+  source_system VARCHAR(32) NULL,
+  payload_sha256 CHAR(64) NOT NULL,
+  payload_json LONGTEXT NOT NULL,
+  item_count INT UNSIGNED NOT NULL,
+  expires_at DATETIME(6) NOT NULL,
+  committed_at DATETIME(6) NULL,
+  result_json LONGTEXT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (import_plan_id),
+  KEY accounting_import_plans_owner_created_IDX
+    (owner_person_id, created_at, import_plan_id),
+  KEY accounting_import_plans_expires_IDX (expires_at),
+  CONSTRAINT accounting_import_plans_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Durable validated accounting imports awaiting explicit confirmation';
+
+-- end migration 0009
+
 -- migration 0008: add-user-owned-currencies
 -- writer downtime: required while the API changes currency reads from a
 -- global catalog to the authenticated user's global-plus-private catalog.

@@ -11,12 +11,14 @@ import {
   listTransactions,
   verifyAllPostedTransactions,
 } from "./accounting.js";
-import { importAccountTree } from "./account-tree.js";
+import { commitAccountTreeImport, previewAccountTreeImport } from "./account-tree.js";
 import { createCurrency, listCurrencies, userCurrencyTypes } from "./currencies.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
+import { commitTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+const idempotentWrite = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 
 const operations = Object.freeze({
   listCurrencies: {
@@ -60,6 +62,15 @@ const operations = Object.freeze({
       currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
     },
   },
+  commitAccountTreeImport: {
+    name: "commit_account_tree_import",
+    purpose: "Commit one previously validated account-tree import plan.",
+    schemaObjects: ["accounts", "currencies"],
+    fields: {
+      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "source_system", "source_id"],
+      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
+    },
+  },
   listTransactions: {
     name: "list_transactions",
     purpose: "List this user's recent accounting transactions.",
@@ -96,6 +107,30 @@ const operations = Object.freeze({
       tags: ["tag_id", "tag_key", "tag_value"],
       lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
       xrates: ["xrate_id", "xrate_type", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+    },
+  },
+  importTransactions: {
+    name: "import_transactions",
+    purpose: "Validate complete source-neutral transactions with nested line items and save a durable import plan.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+    },
+  },
+  commitTransactionImport: {
+    name: "commit_transaction_import",
+    purpose: "Commit one previously validated transaction import plan.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
   },
   listBalanceAssertions: {
@@ -152,15 +187,18 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     createCurrency: services.createCurrency ?? createCurrency,
     listAccounts: services.listAccounts ?? listAccounts,
     createAccount: services.createAccount ?? createAccount,
-    importAccountTree: services.importAccountTree ?? importAccountTree,
+    previewAccountTreeImport: services.previewAccountTreeImport ?? services.importAccountTree ?? previewAccountTreeImport,
+    commitAccountTreeImport: services.commitAccountTreeImport ?? commitAccountTreeImport,
     listTransactions: services.listTransactions ?? listTransactions,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
+    previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
+    commitTransactionImportPlan: services.commitTransactionImportPlan ?? commitTransactionImportPlan,
     listBalanceAssertions: services.listBalanceAssertions ?? listBalanceAssertions,
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.3.0" });
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.4.0" });
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
@@ -249,19 +287,18 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
   });
   server.registerTool("import_account_tree", {
-    title: "Import account tree",
-    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. For a file import, every dry-run retry must contain the entire intended file batch; testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. If an account references a unit that is not already listed and the source data does not specify its exact scale, stop and ask the user for the scale of each such unit; never guess or offer an arbitrary default. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. A successful dry run is a change preview: report what would be created, reused, skipped, or rejected, including the numerical summaries and planned rows, before noting that no writes occurred. After reviewing a successful complete-batch dry run, repeat the same complete input with dry_run=false to import.",
+    title: "Preview account tree import",
+    description: "Run a complete account-tree dry run and save its exact normalized input as a durable, owner-scoped import plan. Accepts optional user-owned currency definitions plus up to 1,000 colon-delimited account paths. For a file import, the dry run must contain the entire intended file batch; testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. If the source does not specify an exact scale for a new unit, stop and ask the user for the scale of each such unit; never guess. A successful dry run is a change preview: report what would be created, reused, skipped, or rejected, including the numerical summaries and planned rows. A successful result has readyToCommit=true and importPlanId; then explicitly tell the user they may approve the import. Do not replay this large input after approval and do not write ledger data with this tool; call commit_account_tree_import with only that plan ID.",
     inputSchema: {
       currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),
-      dry_run: z.boolean().default(true).describe("Validate the entire intended batch and report its complete change plan without writing. Never reduce a file retry to only previously blocked rows. Set false only after reviewing a successful complete-batch dry run."),
+      dry_run: z.literal(true).default(true).describe("Run the entire intended batch as a dry run and save a durable confirmation plan without changing ledger data. Never reduce a file retry to only previously blocked rows."),
     },
-    annotations: { ...writesData, idempotentHint: true },
-  }, async ({ currencies, accounts, dry_run }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: await accounting.importAccountTree({
+    annotations: idempotentWrite,
+  }, async ({ currencies, accounts }) => toolResult(withSchemaProjection(schemaSemantics, {
+    import: await accounting.previewAccountTreeImport({
       pool,
       personId,
-      dryRun: dry_run,
       currencies: currencies.map((currency) => ({
         code: currency.code,
         displayName: currency.display_name,
@@ -277,6 +314,17 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       })),
     }),
   }, operations.importAccountTree)));
+
+  server.registerTool("commit_account_tree_import", {
+    title: "Commit account tree import",
+    description: "After the user explicitly approves a successful account-tree dry run, commit that exact durable plan using only import_plan_id. The server revalidates current database state, imports all currencies and accounts atomically, scopes the plan to its owner, rejects expired plans, and returns the original stored result on repeated confirmation calls.",
+    inputSchema: {
+      import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_account_tree."),
+    },
+    annotations: idempotentWrite,
+  }, async ({ import_plan_id }) => toolResult(withSchemaProjection(schemaSemantics, {
+    import: await accounting.commitAccountTreeImport({ pool, personId, importPlanId: import_plan_id }),
+  }, operations.commitAccountTreeImport)));
 
   server.registerTool("list_transactions", {
     title: "List transactions",
@@ -353,6 +401,68 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     });
     return toolResult(withSchemaProjection(schemaSemantics, { transaction: created }, operations.createTransaction));
   });
+
+  const importedLineItemSchema = z.object({
+    external_id: z.string().trim().min(1).max(128).nullable().optional()
+      .describe("Optional stable line identifier within the source transaction; this is source-neutral."),
+    account_full_name: z.string().trim().min(1).max(4096)
+      .describe("Exact colon-delimited path of an existing account."),
+    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
+      .describe("Signed decimal amount in the matched account's native currency. The server converts it using that currency's established scale."),
+    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
+      .describe("Signed value in the transaction valuation currency. Optional only when the account uses the valuation currency; required for foreign-currency lines."),
+    memo: z.string().trim().max(16000).nullable().optional(),
+  });
+  const importedTransactionSchema = z.object({
+    external_id: z.string().trim().min(1).max(128)
+      .describe("Stable transaction identifier within source_system. Group flat source rows by this generic identifier before submitting one nested transaction."),
+    transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    description: z.string().trim().max(16000).nullable().optional(),
+    valuation_currency_code: z.string().trim().min(1).max(50),
+    line_items: z.array(importedLineItemSchema).min(2).max(1000),
+  });
+  server.registerTool("import_transactions", {
+    title: "Preview transaction import",
+    description: "Validate and preview an atomic source-neutral batch of up to 250 complete transactions and 5,000 nested line items. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Report that preview before noting that ledger data was unchanged, then ask for approval. After approval call commit_transaction_import with only the plan ID; never replay the batch.",
+    inputSchema: {
+      source_system: z.string().trim().min(1).max(32)
+        .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
+      transactions: z.array(importedTransactionSchema).min(1).max(250),
+      dry_run: z.literal(true).default(true)
+        .describe("Validate the complete batch and save a durable confirmation plan without changing ledger data."),
+    },
+    annotations: idempotentWrite,
+  }, async ({ source_system, transactions }) => toolResult(withSchemaProjection(schemaSemantics, {
+    import: await accounting.previewTransactionImport({
+      pool,
+      personId,
+      sourceSystem: source_system,
+      transactions: transactions.map((transaction) => ({
+        externalId: transaction.external_id,
+        transactionDate: transaction.transaction_date,
+        description: transaction.description,
+        valuationCurrencyCode: transaction.valuation_currency_code,
+        lineItems: transaction.line_items.map((line) => ({
+          externalId: line.external_id,
+          accountFullName: line.account_full_name,
+          amountDecimal: line.amount_decimal,
+          valueDecimal: line.value_decimal,
+          memo: line.memo,
+        })),
+      })),
+    }),
+  }, operations.importTransactions)));
+
+  server.registerTool("commit_transaction_import", {
+    title: "Commit transaction import",
+    description: "After the user explicitly approves a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, balance, exchange rates, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated confirmation is idempotent.",
+    inputSchema: {
+      import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_transactions."),
+    },
+    annotations: idempotentWrite,
+  }, async ({ import_plan_id }) => toolResult(withSchemaProjection(schemaSemantics, {
+    import: await accounting.commitTransactionImportPlan({ pool, personId, importPlanId: import_plan_id }),
+  }, operations.commitTransactionImport)));
 
   server.registerTool("list_balance_assertions", {
     title: "List balance assertions",

@@ -106,15 +106,30 @@ unit's scale rather than guessing or proposing a default.
 
 `import_account_tree` accepts optional user-owned currency definitions followed
 by up to 1,000 accounts with colon-delimited full names, normalized account
-types, currency codes, descriptions, and placeholder flags. It validates
-without writing by default. File dry-run retries must always contain the entire
-intended batch, not only rows that previously failed. The dry-run result reports
-explicit would-create and would-reuse counts, detailed planned rows, and account
-summaries by type, currency, placeholder status, and top-level branch. After
-reviewing the complete plan, repeat the same call with `dry_run: false`;
-currencies and accounts are created in one transaction, parents are ordered
-automatically, and exact matching definitions and paths make retries
-idempotent.
+types, currency codes, descriptions, and placeholder flags. It always runs the
+complete batch as a dry run. File retries must contain the entire intended
+batch, not only rows that previously failed. The result reports explicit
+would-create and would-reuse counts, detailed planned rows, summaries by type,
+currency, placeholder status, and top-level branch, plus a durable owner-scoped
+`importPlanId`. After the user approves that exact preview,
+`commit_account_tree_import` accepts only the plan ID, revalidates current
+database state, and atomically creates the currencies and accounts. Plans
+expire after 24 hours, and repeated commit calls return the stored result
+without duplicating ledger data.
+
+`import_transactions` is the source-neutral transaction batch dry run. A batch
+contains up to 250 complete transactions and 5,000 nested line items. A stable
+`source_system` namespace plus each transaction's generic external ID provides
+grouping, deduplication, conflict detection, and retry safety. Line items use
+exact colon-delimited account paths and decimal amounts; the server resolves
+the accounts, converts amounts through their established currency scales,
+validates foreign values and exchange rates, and requires every transaction to
+balance in its valuation currency. The dry-run result lists all unknown or
+ambiguous paths, numerical create/reuse/reject counts, useful summaries, and—if
+there are no rejections—a durable `importPlanId`. After explicit approval,
+`commit_transaction_import` accepts only that ID, revalidates the batch, and
+atomically creates all planned transactions. Identical confirmation retries
+return the stored commit result.
 
 New registrations create only the user identity and begin with an empty chart
 of accounts. Clicking an account in the web client opens its editor; the
@@ -132,7 +147,7 @@ to use only the exact `transaction` rate copied into each transaction.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Create and verify a recoverable database backup.
-3. Stop API writers and apply all pending migrations through 0008 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
+3. Stop API writers and apply all pending migrations through 0009 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:verify`, then restart the API service.
 
 `schema:semantics:sync` is a development command that rewrites the tracked

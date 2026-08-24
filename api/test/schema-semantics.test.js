@@ -9,6 +9,9 @@ test("the tracked accounting semantic form is complete", () => {
   assert.equal(report.activeSchemaObjectCount, 8);
   assert.equal(report.retiredSchemaObjectCount, 0);
   assert.equal(report.unresolvedCount, 0);
+  assert.equal(semantics.form.database.schemaVersion, 9);
+  assert.equal(semantics.form.schemaObjects.transactions.fields.source_fingerprint.mechanics.generated, false);
+  assert.match(semantics.form.schemaObjects.transactions.fields.source_fingerprint.semantics.meaning, /conflicting retries/);
 });
 
 test("request routing returns a small inspectable compiler projection", () => {

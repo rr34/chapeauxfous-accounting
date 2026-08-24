@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -44,4 +44,9 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.doesNotMatch(ownedCurrenciesMigration.sql, /GENERATED ALWAYS/);
   assert.match(ownedCurrenciesMigration.sql, /UNIQUE KEY currencies_scope_code_UQ/);
   assert.match(ownedCurrenciesMigration.sql, /FOREIGN KEY \(owner_person_id\) REFERENCES people2_people \(person_id\)/);
+  const transactionImportMigration = migrations.find((migration) => migration.version === 9);
+  assert.match(transactionImportMigration.sql, /source_fingerprint CHAR\(64\)/);
+  assert.match(transactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_import_plans/);
+  assert.match(transactionImportMigration.sql, /ENUM\('account_tree','transactions'\)/);
+  assert.doesNotMatch(transactionImportMigration.sql, /GENERATED ALWAYS/i);
 });

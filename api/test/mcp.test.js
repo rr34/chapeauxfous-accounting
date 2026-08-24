@@ -14,6 +14,9 @@ const { createAccountingMcpHandler, createAccountingMcpServer } = await import("
 test("the MCP exposes scoped tools with schema-semantic projections", async () => {
   const seen = [];
   let imported;
+  let committedAccountPlan;
+  let importedTransactions;
+  let committedTransactionPlan;
   let createdCurrency;
   const services = {
     async listCurrencies(_pool, personId) {
@@ -29,6 +32,19 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       imported = input;
       return { dryRun: input.dryRun, totalCount: input.accounts.length, plannedCount: input.accounts.length };
     },
+    async commitAccountTreeImport(input) {
+      committedAccountPlan = input;
+      return { committed: true, createdCount: 1 };
+    },
+    async previewTransactionImport(input) {
+      importedTransactions = input;
+      return { readyToCommit: true, importPlanId: "11111111-1111-4111-8111-111111111111",
+        wouldCreateTransactionCount: input.transactions.length };
+    },
+    async commitTransactionImportPlan(input) {
+      committedTransactionPlan = input;
+      return { committed: true, createdTransactionCount: 1 };
+    },
   };
   const server = createAccountingMcpServer({ personId: 7, pool: {}, services });
   assert.equal(server.server.getCapabilities().tools.listChanged, true);
@@ -40,6 +56,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const tools = await client.listTools();
   assert.equal(tools.tools.some((tool) => tool.name === "describe_accounting_schema"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_account_tree_import"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "import_transactions"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import"), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
@@ -49,6 +68,11 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended file batch/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /successful dry run is a change preview/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /created, reused, skipped, or rejected/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /importPlanId/);
+  assert.match(tools.tools.find((tool) => tool.name === "commit_account_tree_import").description, /only import_plan_id/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /source-neutral/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /unknown or ambiguous paths/);
+  assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,
@@ -122,6 +146,45 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   }]);
   assert.equal(importResult.structuredContent.import.plannedCount, 1);
 
+  await client.callTool({
+    name: "commit_account_tree_import",
+    arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
+  });
+  assert.deepEqual(committedAccountPlan, {
+    pool: {}, personId: 7, importPlanId: "11111111-1111-4111-8111-111111111111",
+  });
+
+  const transactionPreview = await client.callTool({
+    name: "import_transactions",
+    arguments: {
+      source_system: "source_app",
+      transactions: [{
+        external_id: "tx-1",
+        transaction_date: "2026-01-01",
+        description: "Test",
+        valuation_currency_code: "USD",
+        line_items: [
+          { external_id: "1", account_full_name: "Assets:Cash", amount_decimal: "-1.00" },
+          { external_id: "2", account_full_name: "Expenses:Food", amount_decimal: "1.00" },
+        ],
+      }],
+      dry_run: true,
+    },
+  });
+  assert.equal(transactionPreview.structuredContent.import.wouldCreateTransactionCount, 1);
+  assert.deepEqual(importedTransactions.transactions[0].lineItems[0], {
+    externalId: "1", accountFullName: "Assets:Cash", amountDecimal: "-1.00",
+    valueDecimal: undefined, memo: undefined,
+  });
+
+  await client.callTool({
+    name: "commit_transaction_import",
+    arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
+  });
+  assert.deepEqual(committedTransactionPlan, {
+    pool: {}, personId: 7, importPlanId: "11111111-1111-4111-8111-111111111111",
+  });
+
   await client.close();
   await server.close();
 });
@@ -163,7 +226,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.3.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.4.0");
 
   await handler.close();
 });

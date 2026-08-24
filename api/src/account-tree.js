@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { createOrMatchUserCurrencies, currencyKey } from "./currencies.js";
 
@@ -180,97 +180,163 @@ function summarizeAccounts(results) {
   };
 }
 
-export async function importAccountTree({ pool, personId, accounts, currencies: currencyDefinitions = [], dryRun = true }) {
+export async function importAccountTreeWithConnection({ connection, personId, accounts, currencies: currencyDefinitions = [], dryRun = true }) {
   const inputs = normalizeImportRows(accounts);
+  const { currenciesByCode: currencies, results: currencyResults } = await createOrMatchUserCurrencies(
+    connection,
+    personId,
+    currencyDefinitions,
+    { dryRun },
+  );
+  for (const input of inputs) {
+    const currency = currencies.get(currencyKey(input.currencyCode));
+    if (!currency) {
+      throw importError(`Currency "${input.currencyCode}" for account "${input.path}" is not supported.`, "CURRENCY_NOT_FOUND", {
+        fullName: input.path,
+        currencyCode: input.currencyCode,
+      });
+    }
+    input.currencyId = currency.id;
+    input.currencyCode = currency.code;
+  }
+
+  const [existingRows] = await connection.query(
+    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
+            a.parent_account_id, a.AccountType, a.account_currency_id,
+            a.archived_at, c.CurrencyAbbreviation
+       FROM accounts a
+       JOIN currencies c ON c.currency_id = a.account_currency_id
+      WHERE a.owner_person_id = ?
+      ORDER BY a.account_id
+      FOR UPDATE`,
+    [personId],
+  );
+  const existingByPath = buildExistingPathMap(existingRows);
+  const results = [];
+
+  for (const input of inputs) {
+    const existing = existingByPath.get(input.path);
+    if (existing) {
+      assertExistingMatches(input, existing);
+      results.push(accountResult(input, "existing", existing.id));
+      continue;
+    }
+    const parent = input.parentPath == null ? null : existingByPath.get(input.parentPath);
+    if (input.parentPath != null && !parent) {
+      throw importError(`Parent account "${input.parentPath}" is missing for "${input.path}".`, "MISSING_PARENT_ACCOUNT", {
+        fullName: input.path,
+        parentFullName: input.parentPath,
+      });
+    }
+
+    if (dryRun) {
+      const planned = { id: null, path: input.path };
+      existingByPath.set(input.path, planned);
+      results.push(accountResult(input, "planned", null));
+      continue;
+    }
+
+    const [insert] = await connection.query(
+      `INSERT INTO accounts
+        (owner_person_id, AccountName, description, is_placeholder, parent_account_id,
+         AccountType, account_currency_id, source_system, source_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [personId, input.name, input.description, input.placeholder, parent?.id ?? null,
+        input.type, input.currencyId, importSourceSystem, sourceId(input.path)],
+    );
+    const created = { id: Number(insert.insertId), path: input.path };
+    existingByPath.set(input.path, created);
+    results.push(accountResult(input, "created", created.id));
+  }
+
+  const plannedCount = results.filter((result) => result.status === "planned").length;
+  const existingCount = results.filter((result) => result.status === "existing").length;
+  const currencyPlannedCount = currencyResults.filter((result) => result.status === "planned").length;
+  const currencyExistingCount = currencyResults.filter((result) => result.status === "existing").length;
+
+  return {
+    dryRun: Boolean(dryRun),
+    ledgerChanged: !dryRun,
+    totalCount: results.length,
+    createdCount: results.filter((result) => result.status === "created").length,
+    existingCount,
+    plannedCount,
+    currencyCreatedCount: currencyResults.filter((result) => result.status === "created").length,
+    currencyExistingCount,
+    currencyPlannedCount,
+    wouldCreateAccountCount: dryRun ? plannedCount : 0,
+    wouldReuseAccountCount: dryRun ? existingCount : 0,
+    wouldCreateCurrencyCount: dryRun ? currencyPlannedCount : 0,
+    wouldReuseCurrencyCount: dryRun ? currencyExistingCount : 0,
+    accountSummary: summarizeAccounts(results),
+    currencies: currencyResults,
+    accounts: results,
+  };
+}
+
+export async function importAccountTree({ pool, ...input }) {
+  return withPoolTransaction(pool, (connection) => importAccountTreeWithConnection({ connection, ...input }));
+}
+
+function hashPayload(payloadJson) {
+  return createHash("sha256").update(payloadJson, "utf8").digest("hex");
+}
+
+function expiresAtTimestamp(date) {
+  return date.toISOString().replace("T", " ").replace("Z", "");
+}
+
+export async function previewAccountTreeImport({ pool, personId, accounts, currencies = [] }) {
   return withPoolTransaction(pool, async (connection) => {
-    const { currenciesByCode: currencies, results: currencyResults } = await createOrMatchUserCurrencies(
-      connection,
-      personId,
-      currencyDefinitions,
-      { dryRun },
+    const result = await importAccountTreeWithConnection({ connection, personId, accounts, currencies, dryRun: true });
+    const payloadJson = JSON.stringify({ accounts, currencies });
+    const importPlanId = randomUUID();
+    const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await connection.query(
+      `INSERT INTO accounting_import_plans
+        (import_plan_id, owner_person_id, import_kind, source_system, payload_sha256,
+         payload_json, item_count, expires_at)
+       VALUES (?, ?, 'account_tree', NULL, ?, ?, ?, ?)`,
+      [importPlanId, personId, hashPayload(payloadJson), payloadJson, accounts.length, expiresAtTimestamp(expiresAtDate)],
     );
-    for (const input of inputs) {
-      const currency = currencies.get(currencyKey(input.currencyCode));
-      if (!currency) {
-        throw importError(`Currency "${input.currencyCode}" for account "${input.path}" is not supported.`, "CURRENCY_NOT_FOUND", {
-          fullName: input.path,
-          currencyCode: input.currencyCode,
-        });
-      }
-      input.currencyId = currency.id;
-      input.currencyCode = currency.code;
-    }
+    return { ...result, readyToCommit: true, importPlanId, importPlanExpiresAt: expiresAtDate.toISOString() };
+  });
+}
 
-    const [existingRows] = await connection.query(
-      `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
-              a.parent_account_id, a.AccountType, a.account_currency_id,
-              a.archived_at, c.CurrencyAbbreviation
-         FROM accounts a
-         JOIN currencies c ON c.currency_id = a.account_currency_id
-        WHERE a.owner_person_id = ?
-        ORDER BY a.account_id
+export async function commitAccountTreeImport({ pool, personId, importPlanId }) {
+  const resolvedPlanId = String(importPlanId ?? "").trim();
+  if (!resolvedPlanId || [...resolvedPlanId].length > 36) {
+    throw importError("A valid account-tree import plan ID is required.", "IMPORT_PLAN_ID_REQUIRED");
+  }
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT payload_sha256, payload_json, committed_at, result_json,
+              expires_at <= UTC_TIMESTAMP(6) AS is_expired
+         FROM accounting_import_plans
+        WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'account_tree'
         FOR UPDATE`,
-      [personId],
+      [resolvedPlanId, personId],
     );
-    const existingByPath = buildExistingPathMap(existingRows);
-    const results = [];
-
-    for (const input of inputs) {
-      const existing = existingByPath.get(input.path);
-      if (existing) {
-        assertExistingMatches(input, existing);
-        results.push(accountResult(input, "existing", existing.id));
-        continue;
-      }
-      const parent = input.parentPath == null ? null : existingByPath.get(input.parentPath);
-      if (input.parentPath != null && !parent) {
-        throw importError(`Parent account "${input.parentPath}" is missing for "${input.path}".`, "MISSING_PARENT_ACCOUNT", {
-          fullName: input.path,
-          parentFullName: input.parentPath,
-        });
-      }
-
-      if (dryRun) {
-        const planned = { id: null, path: input.path };
-        existingByPath.set(input.path, planned);
-        results.push(accountResult(input, "planned", null));
-        continue;
-      }
-
-      const [insert] = await connection.query(
-        `INSERT INTO accounts
-          (owner_person_id, AccountName, description, is_placeholder, parent_account_id,
-           AccountType, account_currency_id, source_system, source_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [personId, input.name, input.description, input.placeholder, parent?.id ?? null,
-          input.type, input.currencyId, importSourceSystem, sourceId(input.path)],
-      );
-      const created = { id: Number(insert.insertId), path: input.path };
-      existingByPath.set(input.path, created);
-      results.push(accountResult(input, "created", created.id));
+    const plan = rows[0];
+    if (!plan) throw importError("Account-tree import plan not found.", "IMPORT_PLAN_NOT_FOUND");
+    if (plan.committed_at != null) {
+      if (!plan.result_json) throw importError("The committed import plan has no stored result.", "IMPORT_PLAN_RESULT_MISSING");
+      return { ...JSON.parse(plan.result_json), alreadyCommitted: true };
     }
-
-    const plannedCount = results.filter((result) => result.status === "planned").length;
-    const existingCount = results.filter((result) => result.status === "existing").length;
-    const currencyPlannedCount = currencyResults.filter((result) => result.status === "planned").length;
-    const currencyExistingCount = currencyResults.filter((result) => result.status === "existing").length;
-
-    return {
-      dryRun: Boolean(dryRun),
-      totalCount: results.length,
-      createdCount: results.filter((result) => result.status === "created").length,
-      existingCount,
-      plannedCount,
-      currencyCreatedCount: currencyResults.filter((result) => result.status === "created").length,
-      currencyExistingCount,
-      currencyPlannedCount,
-      wouldCreateAccountCount: dryRun ? plannedCount : 0,
-      wouldReuseAccountCount: dryRun ? existingCount : 0,
-      wouldCreateCurrencyCount: dryRun ? currencyPlannedCount : 0,
-      wouldReuseCurrencyCount: dryRun ? currencyExistingCount : 0,
-      accountSummary: summarizeAccounts(results),
-      currencies: currencyResults,
-      accounts: results,
-    };
+    if (Boolean(plan.is_expired)) throw importError("Account-tree import plan has expired; run a new dry run.", "IMPORT_PLAN_EXPIRED");
+    if (hashPayload(plan.payload_json) !== String(plan.payload_sha256)) {
+      throw importError("Stored account-tree import plan failed its integrity check.", "IMPORT_PLAN_INTEGRITY_FAILURE");
+    }
+    const payload = JSON.parse(plan.payload_json);
+    const imported = await importAccountTreeWithConnection({ connection, personId, ...payload, dryRun: false });
+    const result = { ...imported, readyToCommit: false, importPlanId: resolvedPlanId,
+      committed: true, alreadyCommitted: false };
+    await connection.query(
+      `UPDATE accounting_import_plans
+          SET committed_at = UTC_TIMESTAMP(6), result_json = ?
+        WHERE import_plan_id = ? AND owner_person_id = ?`,
+      [JSON.stringify(result), resolvedPlanId, personId],
+    );
+    return result;
   });
 }

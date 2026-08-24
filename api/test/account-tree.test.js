@@ -6,7 +6,7 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { importAccountTree } = await import("../src/account-tree.js");
+const { commitAccountTreeImport, importAccountTree, previewAccountTreeImport } = await import("../src/account-tree.js");
 
 function memoryPool(initialAccounts = []) {
   const state = {
@@ -18,6 +18,7 @@ function memoryPool(initialAccounts = []) {
     nextId: Math.max(0, ...initialAccounts.map((account) => Number(account.account_id))) + 1,
     nextCurrencyId: 2,
     inserts: [],
+    plans: new Map(),
     commits: 0,
     rollbacks: 0,
   };
@@ -36,6 +37,27 @@ function memoryPool(initialAccounts = []) {
         },
         release() {},
         async query(sql, params = []) {
+          if (sql.includes("INSERT INTO accounting_import_plans")) {
+            const [planId, ownerPersonId, payloadSha256, payloadJson, itemCount, expiresAt] = params;
+            state.plans.set(planId, { import_plan_id: planId, owner_person_id: ownerPersonId,
+              import_kind: "account_tree", payload_sha256: payloadSha256, payload_json: payloadJson,
+              item_count: itemCount, expires_at: expiresAt, committed_at: null, result_json: null, is_expired: 0 });
+            return [{ insertId: 0 }];
+          }
+          if (sql.includes("FROM accounting_import_plans")) {
+            const [planId, ownerPersonId] = params;
+            const plan = state.plans.get(planId);
+            return [[plan && Number(plan.owner_person_id) === Number(ownerPersonId) ? plan : undefined].filter(Boolean)];
+          }
+          if (sql.includes("UPDATE accounting_import_plans")) {
+            const [resultJson, planId, ownerPersonId] = params;
+            const plan = state.plans.get(planId);
+            if (plan && Number(plan.owner_person_id) === Number(ownerPersonId)) {
+              plan.committed_at = "now";
+              plan.result_json = resultJson;
+            }
+            return [{ affectedRows: plan ? 1 : 0 }];
+          }
           if (sql.includes("FROM currencies")) {
             return [state.currencies.filter((currency) =>
               currency.owner_person_id == null || Number(currency.owner_person_id) === 7)];
@@ -137,6 +159,30 @@ test("dry-run validates the complete tree without inserting", async () => {
     accountId: null,
   });
   assert.equal(pool.state.inserts.length, 0);
+});
+
+test("account-tree preview returns a durable plan and repeated commit is idempotent", async () => {
+  const pool = memoryPool();
+  const preview = await previewAccountTreeImport({ pool, personId: 7, accounts: tree });
+  assert.equal(preview.readyToCommit, true);
+  assert.match(preview.importPlanId, /^[0-9a-f-]{36}$/);
+  assert.equal(preview.wouldCreateAccountCount, 3);
+  assert.equal(pool.state.inserts.length, 0);
+
+  await assert.rejects(
+    commitAccountTreeImport({ pool, personId: 8, importPlanId: preview.importPlanId }),
+    (error) => error.code === "IMPORT_PLAN_NOT_FOUND",
+  );
+
+  const committed = await commitAccountTreeImport({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(committed.createdCount, 3);
+  assert.equal(committed.alreadyCommitted, false);
+  assert.equal(pool.state.inserts.length, 3);
+
+  const repeated = await commitAccountTreeImport({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(repeated.createdCount, 3);
+  assert.equal(repeated.alreadyCommitted, true);
+  assert.equal(pool.state.inserts.length, 3);
 });
 
 test("account-tree import atomically creates explicit user-owned securities", async () => {
