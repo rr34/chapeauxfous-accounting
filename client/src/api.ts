@@ -1,5 +1,15 @@
 const apiBase = String(import.meta.env.VITE_API_BASE || "/api").replace(/\/$/, "");
 
+export function mcpEndpointUrl() {
+  const configured = String(import.meta.env.VITE_MCP_URL || "").trim();
+  if (configured) return configured;
+  const url = new URL(apiBase, window.location.origin);
+  url.pathname = `${url.pathname.replace(/\/api$/, "").replace(/\/$/, "")}/mcp`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -26,4 +36,3 @@ export async function api<T>(path: string, options: RequestInit = {}, token?: st
   if (!response.ok) throw new ApiError(response.status, payload);
   return payload as T;
 }
-

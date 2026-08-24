@@ -1,7 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
-import type { Account, BalanceAssertion, Currency, TransactionDetail, TransactionSummary, User } from "./types";
+import type {
+  Account, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
+  TransactionDetail, TransactionSummary, User,
+} from "./types";
 
 const tokenKey = "cf-accounting-token";
 const today = () => new Date().toISOString().slice(0, 10);
@@ -244,6 +247,105 @@ function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
   </section>;
 }
 
+function displayDate(value: string | null) {
+  if (!value) return "Never";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function AgentAccessDialog({ loginToken, onClose }: { loginToken: string; onClose: () => void }) {
+  const [credentials, setCredentials] = useState<ApiTokenCredential[]>([]);
+  const [name, setName] = useState("My accounting agent");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [createdToken, setCreatedToken] = useState("");
+  const [copied, setCopied] = useState<"url" | "token" | "">("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const endpoint = mcpEndpointUrl();
+
+  async function loadCredentials() {
+    const result = await api<{ tokens: ApiTokenCredential[] }>("/auth/tokens", {}, loginToken);
+    setCredentials(result.tokens);
+  }
+
+  useEffect(() => {
+    void loadCredentials().catch((nextError) => setError(errorMessage(nextError)));
+  }, []);
+
+  async function createCredential(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError(""); setCreatedToken("");
+    try {
+      const result = await api<CreatedApiToken>("/auth/tokens", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        }),
+      }, loginToken);
+      setCreatedToken(result.token);
+      setCredentials((current) => [result.credential, ...current]);
+      setName("My accounting agent"); setExpiresAt("");
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(false); }
+  }
+
+  async function revokeCredential(credential: ApiTokenCredential) {
+    if (!window.confirm(`Revoke “${credential.name}”? Any agent using it will immediately lose access.`)) return;
+    setError("");
+    try {
+      await api(`/auth/tokens/${credential.id}`, { method: "DELETE" }, loginToken);
+      await loadCredentials();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+  }
+
+  async function copy(value: string, target: "url" | "token") {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(target);
+      window.setTimeout(() => setCopied(""), 1800);
+    } catch {
+      setError("Clipboard access was blocked. Select the value and copy it manually.");
+    }
+  }
+
+  return <div className="dialog-backdrop" role="presentation">
+    <section className="agent-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-access-title">
+      <div className="dialog-heading"><div><p className="eyebrow">Integrations</p><h2 id="agent-access-title">Agent access</h2></div>
+        <button className="dialog-close" aria-label="Close agent access" onClick={onClose}>×</button></div>
+      <p className="muted">Generate a private bearer token here, then enter this MCP URL and token in your agent's Add MCP dialog.</p>
+
+      <div className="connection-field"><label>MCP URL</label><div><input readOnly value={endpoint} onFocus={(event) => event.currentTarget.select()} />
+        <button className="secondary" onClick={() => void copy(endpoint, "url")}>{copied === "url" ? "Copied" : "Copy"}</button></div></div>
+
+      {createdToken && <section className="new-token-notice" aria-live="polite">
+        <strong>Copy this API token now.</strong>
+        <p>For security, Accounting cannot show it again after you close this dialog.</p>
+        <div><input aria-label="New API token" readOnly value={createdToken} onFocus={(event) => event.currentTarget.select()} />
+          <button className="primary" onClick={() => void copy(createdToken, "token")}>{copied === "token" ? "Copied" : "Copy token"}</button></div>
+      </section>}
+
+      <form className="token-form" onSubmit={createCredential}>
+        <label>Token name<input required maxLength={128} value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>Expires <span>(optional)</span><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label>
+        <button className="primary" disabled={busy}>{busy ? "Generating…" : "Generate API token"}</button>
+      </form>
+      {error && <p className="error">{error}</p>}
+
+      <div className="token-list-heading"><h3>Generated tokens</h3><span>{credentials.length}</span></div>
+      <div className="token-list">{credentials.map((credential) => {
+        const expired = credential.expiresAt != null && new Date(credential.expiresAt).getTime() <= Date.now();
+        const status = credential.revokedAt ? "Revoked" : expired ? "Expired" : "Active";
+        return <div className="token-row" key={credential.id}><div><strong>{credential.name}</strong>
+          <code>{credential.prefix}…</code><small>Created {displayDate(credential.createdAt)} · Last used {displayDate(credential.lastUsedAt)}</small></div>
+          <div><span className={`token-status ${status.toLowerCase()}`}>{status}</span>
+            {!credential.revokedAt && !expired && <button className="danger-link" onClick={() => void revokeCredential(credential)}>Revoke</button>}</div></div>;
+      })}
+        {!credentials.length && <p className="empty-token-list">No API tokens yet.</p>}
+      </div>
+    </section>
+  </div>;
+}
+
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(tokenKey));
   const [user, setUser] = useState<User | null>(null);
@@ -253,6 +355,7 @@ export default function App() {
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
   const [selected, setSelected] = useState<TransactionDetail | null>(null);
   const [verification, setVerification] = useState("");
+  const [showAgentAccess, setShowAgentAccess] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => { api<{ currencies: Currency[] }>("/currencies").then((result) => setCurrencies(result.currencies)).finally(() => setLoading(false)); }, []);
@@ -293,10 +396,13 @@ export default function App() {
 
   if (loading) return <div className="loading">Loading accounting…</div>;
   if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
-  return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span><button className="link-button" onClick={logout}>Sign out</button></div></header>
+  return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
+    <button className="header-action" onClick={() => setShowAgentAccess(true)}>Agent access</button>
+    <button className="link-button" onClick={logout}>Sign out</button></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
       token={token} onChanged={refresh} />
       <div className="main-column"><TransactionComposer accounts={accounts} currencies={currencies} token={token} onCreated={refresh} />
         <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)} onVerify={() => void verify()} verification={verification} /></div></main>
+    {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
   </div>;
 }

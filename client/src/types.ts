@@ -6,6 +6,21 @@ export type User = {
   email: string;
 };
 
+export type ApiTokenCredential = {
+  id: number;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+};
+
+export type CreatedApiToken = {
+  token: string;
+  credential: ApiTokenCredential;
+};
+
 export type Account = {
   id: number;
   name: string;
