@@ -62,7 +62,11 @@ reruns the same central accounting invariants used when posting transactions.
 
 ## MCP access
 
-The remote Streamable HTTP MCP endpoint is `POST /mcp`. It uses a long-lived,
+The remote MCP endpoint is `/mcp`. It uses the MCP 2.0 per-request handler,
+including modern tool-list discovery and change subscriptions, with stateless
+Streamable HTTP compatibility for 2025-era clients. Development clients can
+therefore rediscover tools when the API restarts or the app is refreshed; the
+MCP connection does not need to be deleted and recreated. It uses a long-lived,
 revocable API token instead of OAuth. A token belongs to exactly one accounting
 user, and MCP tools can access only that user's ledger.
 

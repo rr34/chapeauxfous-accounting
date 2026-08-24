@@ -1,5 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
@@ -153,7 +153,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.1.0" });
+  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.2.0" });
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
@@ -353,26 +353,42 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
 export function mountAccountingMcp(app, { pool }) {
   const authenticate = requireApiToken(pool);
-  app.post("/mcp", authenticate, async (req, res) => {
-    const server = createAccountingMcpServer({ personId: req.auth.personId, pool });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (error) {
-      console.error("MCP request failed", error);
-      if (!res.headersSent) {
-        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
-      }
-    } finally {
-      await transport.close().catch(() => {});
-      await server.close().catch(() => {});
+  const handler = createAccountingMcpHandler({ pool });
+  const nodeHandler = toNodeHandler(handler, {
+    onerror: (error) => console.error("Accounting MCP HTTP adapter error:", error),
+  });
+
+  app.all("/mcp", authenticate, async (req, res) => {
+    const accountingAuth = req.auth ?? {};
+    const personId = Number(accountingAuth.personId);
+    if (!Number.isInteger(personId) || personId <= 0) {
+      return res.status(403).json({ error: "ACCOUNTING_AUTH_REQUIRED" });
     }
+
+    req.auth = {
+      token: `cfacct-token-${accountingAuth.tokenId}`,
+      clientId: "chapeaux-fous-accounting",
+      scopes: ["accounting"],
+      extra: { accountingAuth },
+    };
+
+    await nodeHandler(req, res, req.body);
   });
-  app.get("/mcp", authenticate, (_req, res) => {
-    res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
-  });
-  app.delete("/mcp", authenticate, (_req, res) => {
-    res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
-  });
+}
+
+export function createAccountingMcpHandler({ pool }) {
+  return createMcpHandler(
+    (requestContext) => {
+      const accountingAuth = requestContext.authInfo?.extra?.accountingAuth ?? {};
+      const personId = Number(accountingAuth.personId);
+      if (!Number.isInteger(personId) || personId <= 0) {
+        throw new Error("Authenticated accounting user is required.");
+      }
+      return createAccountingMcpServer({ personId, pool });
+    },
+    {
+      legacy: "stateless",
+      onerror: (error) => console.error("Accounting MCP protocol error:", error),
+    },
+  );
 }
