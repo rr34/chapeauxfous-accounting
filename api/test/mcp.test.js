@@ -46,6 +46,13 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
   assert.match(tools.tools.find((tool) => tool.name === "create_currency").description, /Never guess or choose a default scale/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /ask the user for the scale of each such unit/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended file batch/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /successful dry run is a change preview/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /created, reused, skipped, or rejected/);
+  assert.match(
+    tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
+    /Never reduce a file retry/,
+  );
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.currencies.items.properties.scale.description,
     /explicitly confirmed by the user/,

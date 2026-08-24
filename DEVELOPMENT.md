@@ -107,10 +107,14 @@ unit's scale rather than guessing or proposing a default.
 `import_account_tree` accepts optional user-owned currency definitions followed
 by up to 1,000 accounts with colon-delimited full names, normalized account
 types, currency codes, descriptions, and placeholder flags. It validates
-without writing by default. After reviewing the dry-run, repeat the same call
-with `dry_run: false`; currencies and accounts are created in one transaction,
-parents are ordered automatically, and exact matching definitions and paths
-make retries idempotent.
+without writing by default. File dry-run retries must always contain the entire
+intended batch, not only rows that previously failed. The dry-run result reports
+explicit would-create and would-reuse counts, detailed planned rows, and account
+summaries by type, currency, placeholder status, and top-level branch. After
+reviewing the complete plan, repeat the same call with `dry_run: false`;
+currencies and accounts are created in one transaction, parents are ordered
+automatically, and exact matching definitions and paths make retries
+idempotent.
 
 Timestamped security, mutual-fund, commodity, and FX price history belongs in
 owned `xrates` rows with `xrate_type = 'reference'`. Posted accounting continues

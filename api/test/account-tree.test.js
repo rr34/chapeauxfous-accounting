@@ -103,6 +103,11 @@ test("account-tree import sorts parents, preserves metadata, and is retry-safe",
   assert.equal(second.createdCount, 0);
   assert.equal(second.existingCount, 3);
   assert.equal(pool.state.inserts.length, 3);
+
+  const retryPreview = await importAccountTree({ pool, personId: 7, accounts: tree, dryRun: true });
+  assert.equal(retryPreview.wouldCreateAccountCount, 0);
+  assert.equal(retryPreview.wouldReuseAccountCount, 3);
+  assert.deepEqual(retryPreview.accountSummary.byStatus, { planned: 0, existing: 3, created: 0 });
 });
 
 test("dry-run validates the complete tree without inserting", async () => {
@@ -110,6 +115,27 @@ test("dry-run validates the complete tree without inserting", async () => {
   const result = await importAccountTree({ pool, personId: 7, accounts: tree, dryRun: true });
   assert.equal(result.plannedCount, 3);
   assert.equal(result.createdCount, 0);
+  assert.equal(result.wouldCreateAccountCount, 3);
+  assert.equal(result.wouldReuseAccountCount, 0);
+  assert.equal(result.wouldCreateCurrencyCount, 0);
+  assert.deepEqual(result.accountSummary, {
+    byStatus: { planned: 3, existing: 0, created: 0 },
+    byAccountType: { asset: 3 },
+    byCurrencyCode: { USD: 3 },
+    byPlaceholderStatus: { placeholder: 2, postable: 1 },
+    byTopLevelBranch: { Assets: 3 },
+  });
+  assert.deepEqual(result.accounts[2], {
+    fullName: "Assets:Bank:Checking",
+    accountType: "asset",
+    currencyCode: "USD",
+    description: "Daily account",
+    placeholder: false,
+    parentFullName: "Assets:Bank",
+    topLevelBranch: "Assets",
+    status: "planned",
+    accountId: null,
+  });
   assert.equal(pool.state.inserts.length, 0);
 });
 
@@ -126,12 +152,21 @@ test("account-tree import atomically creates explicit user-owned securities", as
     ],
     dryRun: false,
   };
+  const preview = await importAccountTree({ ...input, dryRun: true });
+  assert.equal(preview.wouldCreateCurrencyCount, 1);
+  assert.equal(preview.wouldCreateAccountCount, 3);
+  assert.equal(preview.currencies[0].status, "planned");
+
   const result = await importAccountTree(input);
   assert.equal(result.currencyCreatedCount, 1);
   assert.equal(result.createdCount, 3);
   assert.equal(pool.state.currencies[1].CurrencyAbbreviation, "VTSAX");
   assert.equal(pool.state.currencies[1].currency_type, "security");
   assert.equal(pool.state.inserts[2].account_currency_id, pool.state.currencies[1].currency_id);
+
+  const retryPreview = await importAccountTree({ ...input, dryRun: true });
+  assert.equal(retryPreview.wouldReuseCurrencyCount, 1);
+  assert.equal(retryPreview.wouldReuseAccountCount, 3);
 
   const retry = await importAccountTree(input);
   assert.equal(retry.currencyExistingCount, 1);

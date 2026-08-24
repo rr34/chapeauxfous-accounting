@@ -140,6 +140,46 @@ function sourceId(path) {
   return createHash("sha256").update(path, "utf8").digest("hex");
 }
 
+function accountResult(input, status, accountId) {
+  return {
+    fullName: input.path,
+    accountType: input.type,
+    currencyCode: input.currencyCode,
+    description: input.description,
+    placeholder: input.placeholder,
+    parentFullName: input.parentPath,
+    topLevelBranch: input.parts[0],
+    status,
+    accountId,
+  };
+}
+
+function countBy(items, key) {
+  const counts = new Map();
+  for (const item of items) {
+    const value = key(item);
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Object.fromEntries([...counts].sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function summarizeAccounts(results) {
+  return {
+    byStatus: {
+      planned: results.filter((result) => result.status === "planned").length,
+      existing: results.filter((result) => result.status === "existing").length,
+      created: results.filter((result) => result.status === "created").length,
+    },
+    byAccountType: countBy(results, (result) => result.accountType),
+    byCurrencyCode: countBy(results, (result) => result.currencyCode),
+    byPlaceholderStatus: {
+      placeholder: results.filter((result) => result.placeholder).length,
+      postable: results.filter((result) => !result.placeholder).length,
+    },
+    byTopLevelBranch: countBy(results, (result) => result.topLevelBranch),
+  };
+}
+
 export async function importAccountTree({ pool, personId, accounts, currencies: currencyDefinitions = [], dryRun = true }) {
   const inputs = normalizeImportRows(accounts);
   return withPoolTransaction(pool, async (connection) => {
@@ -179,7 +219,7 @@ export async function importAccountTree({ pool, personId, accounts, currencies: 
       const existing = existingByPath.get(input.path);
       if (existing) {
         assertExistingMatches(input, existing);
-        results.push({ fullName: input.path, status: "existing", accountId: existing.id });
+        results.push(accountResult(input, "existing", existing.id));
         continue;
       }
       const parent = input.parentPath == null ? null : existingByPath.get(input.parentPath);
@@ -193,7 +233,7 @@ export async function importAccountTree({ pool, personId, accounts, currencies: 
       if (dryRun) {
         const planned = { id: null, path: input.path };
         existingByPath.set(input.path, planned);
-        results.push({ fullName: input.path, status: "planned", accountId: null });
+        results.push(accountResult(input, "planned", null));
         continue;
       }
 
@@ -207,18 +247,28 @@ export async function importAccountTree({ pool, personId, accounts, currencies: 
       );
       const created = { id: Number(insert.insertId), path: input.path };
       existingByPath.set(input.path, created);
-      results.push({ fullName: input.path, status: "created", accountId: created.id });
+      results.push(accountResult(input, "created", created.id));
     }
+
+    const plannedCount = results.filter((result) => result.status === "planned").length;
+    const existingCount = results.filter((result) => result.status === "existing").length;
+    const currencyPlannedCount = currencyResults.filter((result) => result.status === "planned").length;
+    const currencyExistingCount = currencyResults.filter((result) => result.status === "existing").length;
 
     return {
       dryRun: Boolean(dryRun),
       totalCount: results.length,
       createdCount: results.filter((result) => result.status === "created").length,
-      existingCount: results.filter((result) => result.status === "existing").length,
-      plannedCount: results.filter((result) => result.status === "planned").length,
+      existingCount,
+      plannedCount,
       currencyCreatedCount: currencyResults.filter((result) => result.status === "created").length,
-      currencyExistingCount: currencyResults.filter((result) => result.status === "existing").length,
-      currencyPlannedCount: currencyResults.filter((result) => result.status === "planned").length,
+      currencyExistingCount,
+      currencyPlannedCount,
+      wouldCreateAccountCount: dryRun ? plannedCount : 0,
+      wouldReuseAccountCount: dryRun ? existingCount : 0,
+      wouldCreateCurrencyCount: dryRun ? currencyPlannedCount : 0,
+      wouldReuseCurrencyCount: dryRun ? currencyExistingCount : 0,
+      accountSummary: summarizeAccounts(results),
       currencies: currencyResults,
       accounts: results,
     };

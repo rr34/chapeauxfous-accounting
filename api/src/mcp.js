@@ -250,11 +250,11 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   });
   server.registerTool("import_account_tree", {
     title: "Import account tree",
-    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. Use currency_type=security for mutual funds and stocks. If an account references a unit that is not already listed and the source data does not specify its exact scale, stop and ask the user for the scale of each such unit; never guess or offer an arbitrary default. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. Call with dry_run=true first, then repeat the same input with dry_run=false to import.",
+    description: "Validate and atomically import optional user-owned currency definitions plus up to 1,000 accounts from colon-delimited full names. For a file import, every dry-run retry must contain the entire intended file batch; testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. If an account references a unit that is not already listed and the source data does not specify its exact scale, stop and ask the user for the scale of each such unit; never guess or offer an arbitrary default. Input order does not matter, every non-root parent must be present in this batch or already exist, and matching currencies and account paths make retries safe. A successful dry run is a change preview: report what would be created, reused, skipped, or rejected, including the numerical summaries and planned rows, before noting that no writes occurred. After reviewing a successful complete-batch dry run, repeat the same complete input with dry_run=false to import.",
     inputSchema: {
       currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),
-      dry_run: z.boolean().default(true).describe("Validate and report the complete plan without writing. Set false only after reviewing a successful dry run."),
+      dry_run: z.boolean().default(true).describe("Validate the entire intended batch and report its complete change plan without writing. Never reduce a file retry to only previously blocked rows. Set false only after reviewing a successful complete-batch dry run."),
     },
     annotations: { ...writesData, idempotentHint: true },
   }, async ({ currencies, accounts, dry_run }) => toolResult(withSchemaProjection(schemaSemantics, {
