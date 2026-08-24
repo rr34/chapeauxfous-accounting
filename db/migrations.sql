@@ -3,9 +3,26 @@
 -- Add new migrations directly below this header, newest first. The runner
 -- validates newest-first file order and applies pending migrations oldest first.
 -- Marker format:
---   -- migration 0004: short-description
+--   -- migration 0005: short-description
 --   <schema and data SQL>
---   -- end migration 0004
+--   -- end migration 0005
+
+-- migration 0005: remove-book-currency-default
+-- writer downtime: not required; the API does not need the profile table after
+-- this release, and no ledger entries or accounts depend on it.
+-- deployment order: restart the version-5 API before applying this migration;
+-- the new API works before and after the table is removed.
+-- locking: brief metadata locks while the account default is removed and the
+-- obsolete profile table is dropped.
+-- recovery: restore the pre-migration backup only if the old currency preference
+-- is needed; no accounting entries or account currencies are changed.
+
+ALTER TABLE accounts
+  MODIFY AccountType ENUM('asset','liability','income','expense','equity') NOT NULL;
+
+DROP TABLE IF EXISTS accounting_profiles;
+
+-- end migration 0005
 
 -- migration 0004: add-account-balance-assertions
 -- writer downtime: not required; this creates an independent empty table.

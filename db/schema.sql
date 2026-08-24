@@ -27,7 +27,7 @@ CREATE TABLE `accounts` (
   `account_id` int(11) NOT NULL AUTO_INCREMENT,
   `AccountName` text NOT NULL COMMENT 'Can include the description.',
   `parent_account_id` int(11) DEFAULT NULL,
-  `AccountType` enum('asset','liability','income','expense','equity') NOT NULL DEFAULT 'asset',
+  `AccountType` enum('asset','liability','income','expense','equity') NOT NULL,
   `account_currency_id` int(11) NOT NULL,
   PRIMARY KEY (`account_id`),
   KEY `accounts_currencies_FK` (`account_currency_id`),

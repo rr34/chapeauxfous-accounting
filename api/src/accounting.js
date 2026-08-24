@@ -31,7 +31,7 @@ export async function listAccounts(pool, personId) {
       WHERE a.owner_person_id = ?
       GROUP BY a.account_id, a.AccountName, a.parent_account_id, a.AccountType,
                a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
-      ORDER BY a.AccountType, a.AccountName, a.account_id`,
+      ORDER BY a.account_id`,
     [personId],
   );
   return rows.map((row) => ({
@@ -43,9 +43,11 @@ export async function listAccounts(pool, personId) {
 
 export async function createAccount({ personId, name, parentAccountId, type, currencyId }) {
   const accountName = String(name ?? "").trim();
+  const resolvedCurrencyId = Number(currencyId);
   const allowedTypes = new Set(["asset", "liability", "equity", "income", "expense"]);
   if (!accountName) throw applicationError("Account name is required.");
   if (!allowedTypes.has(type)) throw applicationError("Invalid account type.");
+  if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) throw applicationError("Currency is required.");
   return withTransaction(async (connection) => {
     if (parentAccountId != null) {
       const [parentRows] = await connection.query(
@@ -54,13 +56,13 @@ export async function createAccount({ personId, name, parentAccountId, type, cur
       );
       if (!parentRows.length) throw applicationError("Parent account not found.", 404, "PARENT_ACCOUNT_NOT_FOUND");
     }
-    const [currencyRows] = await connection.query("SELECT currency_id FROM currencies WHERE currency_id = ?", [currencyId]);
+    const [currencyRows] = await connection.query("SELECT currency_id FROM currencies WHERE currency_id = ?", [resolvedCurrencyId]);
     if (!currencyRows.length) throw applicationError("Currency not found.", 404, "CURRENCY_NOT_FOUND");
     const [result] = await connection.query(
       `INSERT INTO accounts
         (owner_person_id, AccountName, parent_account_id, AccountType, account_currency_id)
        VALUES (?, ?, ?, ?, ?)`,
-      [personId, accountName, parentAccountId ?? null, type, currencyId],
+      [personId, accountName, parentAccountId ?? null, type, resolvedCurrencyId],
     );
     return { id: Number(result.insertId) };
   });
@@ -291,4 +293,3 @@ export async function verifyAllPostedTransactions(pool, personId = null) {
   }
   return { valid: failures.length === 0, checked: rows.length, failures };
 }
-

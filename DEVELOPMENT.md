@@ -38,8 +38,9 @@ npm run dev:api
 npm run dev:client
 ```
 
-Open `http://localhost:5173`. Registration creates the person's accounting
-profile and five root accounts in the selected functional currency.
+Open `http://localhost:5173`. Registration creates only the person's identity.
+The ledger begins with zero accounts; each account's type, currency, and place
+in the optional parent hierarchy are explicit user choices.
 
 ## Verification
 

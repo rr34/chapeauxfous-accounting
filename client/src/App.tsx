@@ -11,14 +11,13 @@ function errorMessage(error: unknown) {
   return "Something went wrong.";
 }
 
-type AuthProps = { currencies: Currency[]; onAuthenticated: (token: string, user: User) => void };
+type AuthProps = { onAuthenticated: (token: string, user: User) => void };
 
-function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
+function AuthScreen({ onAuthenticated }: AuthProps) {
   const [registering, setRegistering] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [currencyId, setCurrencyId] = useState<number>(currencies.find((currency) => currency.code === "USD")?.id || 0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -28,7 +27,7 @@ function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
     try {
       const result = registering
         ? await api<{ token: string; user: User }>("/auth/register", {
-            method: "POST", body: JSON.stringify({ name, email, password, functionalCurrencyId: currencyId }),
+            method: "POST", body: JSON.stringify({ name, email, password }),
           })
         : await api<{ token: string; user: User }>("/auth/login", {
             method: "POST", body: JSON.stringify({ email, password }),
@@ -49,11 +48,6 @@ function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}
           minLength={registering ? 4 : undefined} maxLength={4096}
           autoComplete={registering ? "new-password" : "current-password"} /></label>
-        {registering && <label>Functional currency
-          <select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
-            {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}
-          </select>
-        </label>}
         {error && <p className="error">{error}</p>}
         <button className="primary" disabled={busy}>{busy ? "Working…" : registering ? "Create ledger" : "Sign in"}</button>
       </form>
@@ -64,14 +58,14 @@ function AuthScreen({ currencies, onAuthenticated }: AuthProps) {
   </main>;
 }
 
-function AccountPanel({ accounts, assertions, currencies, defaultCurrencyId, token, onChanged }: {
-  accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[]; defaultCurrencyId: number;
+function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
+  accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[];
   token: string; onChanged: () => Promise<void>;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
-  const [type, setType] = useState<Account["type"]>("asset");
-  const [currencyId, setCurrencyId] = useState(defaultCurrencyId);
+  const [type, setType] = useState<Account["type"] | "">("");
+  const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
   const [error, setError] = useState("");
   const [assertionAccountId, setAssertionAccountId] = useState("");
@@ -83,7 +77,8 @@ function AccountPanel({ accounts, assertions, currencies, defaultCurrencyId, tok
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
     try {
-      await api("/accounts", { method: "POST", body: JSON.stringify({ name, type, currencyId, parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
+      await api("/accounts", { method: "POST", body: JSON.stringify({ name, type, currencyId: Number(currencyId),
+        parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
       setName(""); setShowForm(false); await onChanged();
     } catch (nextError) { setError(errorMessage(nextError)); }
   }
@@ -107,9 +102,11 @@ function AccountPanel({ accounts, assertions, currencies, defaultCurrencyId, tok
     <div className="section-heading"><div><p className="eyebrow">Chart</p><h2>Accounts</h2></div><button onClick={() => setShowForm(!showForm)}>＋</button></div>
     {showForm && <form className="compact-form" onSubmit={submit}>
       <input placeholder="Account name" value={name} onChange={(event) => setName(event.target.value)} />
-      <div className="form-row"><select value={type} onChange={(event) => setType(event.target.value as Account["type"])}>
+      <div className="form-row"><select required value={type} onChange={(event) => setType(event.target.value as Account["type"] | "")}>
+        <option value="">Choose type…</option>
         {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
-      </select><select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
+      </select><select required value={currencyId} onChange={(event) => setCurrencyId(event.target.value ? Number(event.target.value) : "")}>
+        <option value="">Choose currency…</option>
         {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}
       </select></div>
       <select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
@@ -152,12 +149,12 @@ function AccountPanel({ accounts, assertions, currencies, defaultCurrencyId, tok
 type EditableLine = { accountId: string; amount: string; memo: string; tags: string };
 type EditableRate = { fromAmount: string; toAmount: string };
 
-function TransactionComposer({ accounts, currencies, functionalCurrencyId, token, onCreated }: {
-  accounts: Account[]; currencies: Currency[]; functionalCurrencyId: number; token: string; onCreated: () => Promise<void>;
+function TransactionComposer({ accounts, currencies, token, onCreated }: {
+  accounts: Account[]; currencies: Currency[]; token: string; onCreated: () => Promise<void>;
 }) {
   const [description, setDescription] = useState("");
   const [date, setDate] = useState(today());
-  const [valuationCurrencyId, setValuationCurrencyId] = useState(functionalCurrencyId);
+  const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">("");
   const [lines, setLines] = useState<EditableLine[]>([
     { accountId: "", amount: "", memo: "", tags: "" }, { accountId: "", amount: "", memo: "", tags: "" },
   ]);
@@ -166,8 +163,9 @@ function TransactionComposer({ accounts, currencies, functionalCurrencyId, token
   const [busy, setBusy] = useState(false);
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
+  const resolvedValuationCurrencyId = Number(valuationCurrencyId);
   const foreignCurrencyIds = [...new Set(lines.map((line) => accountMap.get(Number(line.accountId))?.currencyId)
-    .filter((currencyId): currencyId is number => Boolean(currencyId) && currencyId !== valuationCurrencyId))];
+    .filter((currencyId): currencyId is number => Boolean(currencyId) && currencyId !== resolvedValuationCurrencyId))];
 
   function updateLine(index: number, patch: Partial<EditableLine>) {
     setLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line));
@@ -183,14 +181,14 @@ function TransactionComposer({ accounts, currencies, functionalCurrencyId, token
       });
       const payloadRates = foreignCurrencyIds.map((fromCurrencyId) => {
         const fromCurrency = currencyMap.get(fromCurrencyId);
-        const toCurrency = currencyMap.get(valuationCurrencyId);
+        const toCurrency = currencyMap.get(resolvedValuationCurrencyId);
         const rate = rates[fromCurrencyId];
         if (!fromCurrency || !toCurrency || !rate) throw new Error(`Enter a ${fromCurrency?.code || "foreign"} conversion rate.`);
-        return { fromCurrencyId, toCurrencyId: valuationCurrencyId,
+        return { fromCurrencyId, toCurrencyId: resolvedValuationCurrencyId,
           fromUnits: decimalToUnits(rate.fromAmount, fromCurrency.scale), toUnits: decimalToUnits(rate.toAmount, toCurrency.scale) };
       });
       await api("/transactions", { method: "POST", body: JSON.stringify({ description, transactionDate: date,
-        valuationCurrencyId, lineItems: payloadLines, rates: payloadRates, post: true }) }, token);
+        valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: payloadRates, post: true }) }, token);
       setDescription(""); setDate(today()); setLines([{ accountId: "", amount: "", memo: "", tags: "" }, { accountId: "", amount: "", memo: "", tags: "" }]);
       setRates({}); await onCreated();
     } catch (nextError) { setError(errorMessage(nextError)); }
@@ -202,7 +200,9 @@ function TransactionComposer({ accounts, currencies, functionalCurrencyId, token
     <form onSubmit={submit}>
       <div className="transaction-meta"><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
         <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What happened?" /></label>
-        <label>Value currency<select value={valuationCurrencyId} onChange={(event) => setValuationCurrencyId(Number(event.target.value))}>
+        <label>Value currency<select required value={valuationCurrencyId}
+          onChange={(event) => setValuationCurrencyId(event.target.value ? Number(event.target.value) : "")}>
+          <option value="">Choose currency…</option>
           {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currency.code}</option>)}</select></label></div>
       <div className="line-editor"><div className="line-head"><span>Account</span><span>Native amount</span><span>Memo</span><span>Tags</span><span /></div>
         {lines.map((line, index) => <div className="line-grid" key={index}>
@@ -215,7 +215,7 @@ function TransactionComposer({ accounts, currencies, functionalCurrencyId, token
         </div>)}</div>
       <button type="button" className="secondary" onClick={() => setLines((current) => [...current, { accountId: "", amount: "", memo: "", tags: "" }])}>Add split</button>
       {foreignCurrencyIds.length > 0 && <div className="rates"><h3>Transaction exchange rates</h3>{foreignCurrencyIds.map((currencyId) => {
-        const foreign = currencyMap.get(currencyId)!; const valuation = currencyMap.get(valuationCurrencyId)!; const rate = rates[currencyId] || { fromAmount: "", toAmount: "" };
+        const foreign = currencyMap.get(currencyId)!; const valuation = currencyMap.get(resolvedValuationCurrencyId)!; const rate = rates[currencyId] || { fromAmount: "", toAmount: "" };
         return <div className="rate-row" key={currencyId}><span>When</span><input placeholder={`1 ${foreign.code}`} value={rate.fromAmount}
           onChange={(event) => setRates((current) => ({ ...current, [currencyId]: { ...rate, fromAmount: event.target.value } }))} />
           <span>{foreign.code} equals</span><input placeholder={valuation.code} value={rate.toAmount}
@@ -292,11 +292,11 @@ export default function App() {
   }
 
   if (loading) return <div className="loading">Loading accounting…</div>;
-  if (!token || !user) return <AuthScreen currencies={currencies} onAuthenticated={authenticated} />;
+  if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span><button className="link-button" onClick={logout}>Sign out</button></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
-      defaultCurrencyId={user.functionalCurrencyId} token={token} onChanged={refresh} />
-      <div className="main-column"><TransactionComposer accounts={accounts} currencies={currencies} functionalCurrencyId={user.functionalCurrencyId} token={token} onCreated={refresh} />
+      token={token} onChanged={refresh} />
+      <div className="main-column"><TransactionComposer accounts={accounts} currencies={currencies} token={token} onCreated={refresh} />
         <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)} onVerify={() => void verify()} verification={verification} /></div></main>
   </div>;
 }

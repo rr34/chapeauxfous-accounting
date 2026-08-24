@@ -4,7 +4,6 @@ export type User = {
   personId: number;
   name: string;
   email: string;
-  functionalCurrencyId: number;
 };
 
 export type Account = {

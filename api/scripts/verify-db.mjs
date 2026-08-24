@@ -16,11 +16,11 @@ try {
   const [tables] = await pool.query(
     `SELECT TABLE_NAME FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN
-        ('people2_people','accounting_profiles','accounts','transactions','line_items','tags','lineitems_tags_join','xrates',
+        ('people2_people','accounts','transactions','line_items','tags','lineitems_tags_join','xrates',
          'account_balance_assertions')`,
     [databaseName],
   );
-  if (tables.length !== 9) throw new Error("Required accounting tables are missing");
+  if (tables.length !== 8) throw new Error("Required accounting tables are missing");
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);
   console.log(`Schema version ${expectedVersion} verified; ${report.checked} posted transactions balance.`);
