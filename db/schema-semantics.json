@@ -8,8 +8,8 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 12,
-    "schemaFingerprint": "dbd5c674305b98fb4a81d119fb8aa9fe8564be385f23c7ca4e135e8326242b3b",
+    "schemaVersion": 13,
+    "schemaFingerprint": "b2f9f6545c989ac144bf49eeb673f81b850a09b2ac62aeebb8ea6da7cc5cb6ae",
     "extractedAt": "2026-08-27T20:59:50.879Z"
   },
   "instructions": {
@@ -269,7 +269,7 @@
         ]
       },
       "semantics": {
-        "purpose": "Store durable owner-scoped provider plans that bind an approved preview to one exact account-tree import, transaction import, or account deletion commit.",
+        "purpose": "Store durable owner-scoped provider plans that bind an approved preview to one exact account-tree import, transaction import, account deletion, or transaction-deletion commit.",
         "rowMeaning": "One temporary authoritative workflow plan that records the exact validated input, preview binding, lifecycle state, and optional commit result.",
         "sourceOfTruth": true,
         "derivedFrom": [],
@@ -319,7 +319,7 @@
           }
         },
         "import_kind": {
-          "mechanics": {"present": true, "name": "import_kind", "ordinal": 2, "type": "enum('account_tree','transactions','account_delete')", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": ["account_tree", "transactions", "account_delete"]},
+          "mechanics": {"present": true, "name": "import_kind", "ordinal": 2, "type": "enum('account_tree','transactions','account_delete','transaction_delete')", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": ["account_tree", "transactions", "account_delete", "transaction_delete"]},
           "semantics": {
             "inheritsFrom": null,
             "meaning": "Closed provider workflow family whose exact preview and commit contract owns this plan.",
@@ -328,7 +328,8 @@
             "allowedValueMeanings": {
               "account_tree": "A complete account-tree import plan.",
               "transactions": "A complete transaction-batch import plan.",
-              "account_delete": "A verified single-account permanent-deletion plan."
+              "account_delete": "A verified single-account permanent-deletion plan.",
+              "transaction_delete": "A verified permanent-deletion plan bound to an exact transaction set."
             },
             "synonyms": ["plan kind", "workflow kind"],
             "keywords": [],

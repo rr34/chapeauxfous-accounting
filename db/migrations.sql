@@ -7,6 +7,25 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0013: add-transaction-deletion-plans
+-- writer downtime: not required; transaction deletion must remain unavailable
+-- until this migration completes.
+-- deployment order: apply before exposing preview_delete_transactions or
+-- commit_delete_transactions.
+-- locking: both enum changes require brief metadata locks on operational
+-- workflow tables; ledger tables are not rewritten.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE accounting_import_plans
+  MODIFY import_kind
+    ENUM('account_tree','transactions','account_delete','transaction_delete') NOT NULL;
+
+ALTER TABLE accounting_transaction_import_items
+  MODIFY item_status
+    ENUM('staged','reused','exception','committed','deleted') NOT NULL;
+
+-- end migration 0013
+
 -- migration 0012: add-resumable-transaction-import-jobs
 -- writer downtime: not required; these are independent operational staging
 -- tables and do not change existing ledger rows.

@@ -18,6 +18,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let readAccountPlan;
   let importedTransactions;
   let committedTransactionPlan;
+  let previewedTransactionDeletion;
+  let committedTransactionDeletion;
   let createdCurrency;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
@@ -171,6 +173,31 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
         alreadyCommitted: true,
       };
     },
+    async previewTransactionDeletion(input) {
+      previewedTransactionDeletion = input;
+      const summary = { scope: input.scope, transactionCount: 13, lineItemCount: 31,
+        exchangeRateCount: 0, tagAssignmentCount: 0, affectedAccountCount: 9,
+        transactionStates: { draft: 0, posted: 13, voided: 0 },
+        dateRange: { first: "2025-04-11", last: "2026-07-29" } };
+      return { readyToCommit: true, deletionPlanId: "55555555-5555-4555-8555-555555555555",
+        status: "ready", expiresAt: "2026-08-27T23:35:00.000Z", previewDigest: `sha256:${"c".repeat(64)}`,
+        summary, preview: { ...summary, transactionIds: Array.from({ length: 13 }, (_, index) => index + 1),
+          effect: "permanently_delete_exact_transactions_and_dependent_postings",
+          accountsPreserved: true, accountTreeChanged: false } };
+    },
+    async commitTransactionDeletion(input) {
+      committedTransactionDeletion = input;
+      return { readyToCommit: false, deletionPlanId: input.deletionPlanId, status: "committed",
+        expiresAt: "2026-08-27T23:35:00.000Z", previewDigest: input.previewDigest,
+        summary: { scope: "all", transactionCount: 13, lineItemCount: 31,
+          exchangeRateCount: 0, tagAssignmentCount: 0, affectedAccountCount: 9,
+          transactionStates: { draft: 0, posted: 13, voided: 0 },
+          dateRange: { first: "2025-04-11", last: "2026-07-29" } },
+        deleted: { transactionCount: 13, lineItemCount: 31, exchangeRateCount: 0, tagAssignmentCount: 0 },
+        importReferences: { deletedAuditReferences: 0, reopenedImportJobs: 0 },
+        verification: { targetTransactionsAbsent: true, accountTreeUnchanged: true, accountCount: 273 },
+        alreadyCommitted: false };
+    },
   };
   const server = createAccountingMcpServer({ personId: 7, pool: {}, services });
   assert.equal(server.server.getCapabilities().tools.listChanged, true);
@@ -195,6 +222,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_exceptions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_transaction_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_transactions"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_delete_plan"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_delete_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "update_account"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_account"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_account_delete_plan"), true);
@@ -232,6 +262,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     /expected_source_records = newly_staged_records \+ previously_staged_or_reused_records \+ exception_records \+ remaining_records/);
   assert.equal(tools.tools.find((tool) => tool.name === "import_transactions").annotations.idempotentHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_account").annotations.destructiveHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_transactions").annotations.destructiveHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_transactions").annotations.idempotentHint, true);
+  assert.match(tools.tools.find((tool) => tool.name === "preview_delete_transactions").description,
+    /freezes the exact current owner-scoped transaction IDs/);
+  assert.match(tools.tools.find((tool) => tool.name === "commit_delete_transactions").description,
+    /verifies absence and account-tree identity/);
 
   const resources = await client.listResources();
   assert.equal(resources.resources.some((resource) => resource.uri === "accounting://manifest/capabilities/v1"), true);
@@ -241,6 +277,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const resourceTemplates = await client.listResourceTemplates();
   assert.equal(resourceTemplates.resourceTemplates.some((template) =>
     template.uriTemplate === "accounting://currencies/{currencyId}"), true);
+  assert.equal(resourceTemplates.resourceTemplates.some((template) =>
+    template.uriTemplate === "accounting://transaction-delete-plans/{planId}"), true);
   const manifestResource = await client.readResource({ uri: "accounting://manifest/capabilities/v1" });
   const manifest = JSON.parse(manifestResource.contents[0].text);
   assert.equal(manifest.contractVersion, 1);
@@ -444,6 +482,23 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   });
   assert.equal(transactionPlanStatus.structuredContent.status, "committed");
   assert.equal(transactionPlanStatus.structuredContent.commitResult.alreadyCommitted, true);
+
+  const deletionPreview = await client.callTool({
+    name: "preview_delete_transactions", arguments: { scope: "all" },
+  });
+  assert.equal(deletionPreview.structuredContent.requiredAction, "REQUEST_USER_CONFIRMATION");
+  assert.equal(deletionPreview.structuredContent.preview.transactionIds.length, 13);
+  assert.equal(deletionPreview.structuredContent.nextAction.onApproval.tool, "commit_delete_transactions");
+  assert.deepEqual(previewedTransactionDeletion, { pool: {}, personId: 7, scope: "all", transactionIds: [] });
+
+  const deletionCommit = await client.callTool({
+    name: "commit_delete_transactions",
+    arguments: { deletion_plan_id: "55555555-5555-4555-8555-555555555555",
+      preview_digest: `sha256:${"c".repeat(64)}` },
+  });
+  assert.equal(deletionCommit.structuredContent.verification.accountTreeUnchanged, true);
+  assert.deepEqual(committedTransactionDeletion, { pool: {}, personId: 7,
+    deletionPlanId: "55555555-5555-4555-8555-555555555555", previewDigest: `sha256:${"c".repeat(64)}` });
 
   await client.close();
   await server.close();

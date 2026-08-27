@@ -26,6 +26,12 @@ import {
   previewAccountDeletion,
 } from "./account-delete.js";
 import {
+  commitTransactionDeletion,
+  getTransactionDeletionPlan,
+  previewTransactionDeletion,
+  transactionDeletePlanFailure,
+} from "./transaction-delete.js";
+import {
   accountTreeImportPlanFailure,
   commitAccountTreeImport,
   getAccountTreeImportPlan,
@@ -247,6 +253,19 @@ const operations = Object.freeze({
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
   },
+  deleteTransactions: {
+    name: "delete_transactions",
+    purpose: "Preview, commit, and verify permanent deletion of an exact owner-scoped transaction set.",
+    schemaObjects: ["transactions", "line_items", "lineitems_tags_join", "xrates", "accounts", "accounting_import_plans"],
+    fields: {
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "valuation_currency_id", "TransactionState", "reversal_of_transaction_id", "source_system", "source_id", "source_fingerprint"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+      xrates: ["xrate_id", "owner_person_id", "transaction_id", "xrate_type", "ValidAt", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
+      accounting_import_plans: planCommitFields,
+    },
+  },
   listBalanceAssertions: {
     name: "list_balance_assertions",
     purpose: "List known end-of-day account balances and compare them with the posted ledger.",
@@ -320,6 +339,7 @@ const entityCollections = Object.freeze({
   balance_assertion: "balance-assertions",
   currency: "currencies",
   transaction: "transactions",
+  transaction_delete_plan: "transaction-delete-plans",
   transaction_import_plan: "transaction-import-plans",
 });
 
@@ -500,6 +520,9 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
+    previewTransactionDeletion: services.previewTransactionDeletion ?? previewTransactionDeletion,
+    getTransactionDeletionPlan: services.getTransactionDeletionPlan ?? getTransactionDeletionPlan,
+    commitTransactionDeletion: services.commitTransactionDeletion ?? commitTransactionDeletion,
     listBalanceAssertions: services.listBalanceAssertions ?? listBalanceAssertions,
     listBalanceAssertionsPage: services.listBalanceAssertionsPage ?? (services.listBalanceAssertions ? injectedPage(services.listBalanceAssertions, "assertions") : listBalanceAssertionsPage),
     getBalanceAssertion: services.getBalanceAssertion ?? getBalanceAssertion,
@@ -653,6 +676,16 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       ...await accounting.getTransactionImportJob({ pool, personId, importJobId: jobId }),
     }, operations.transactionImportJob)));
 
+  server.registerResource("accounting-transaction-delete-plan",
+    resourceTemplate("accounting://transaction-delete-plans/{planId}"), {
+      title: "Transaction-deletion plan",
+      description: "Current owner-scoped provider status for one exact permanent transaction-deletion plan.",
+      mimeType: "application/json",
+    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+      contractVersion: MCP_CONTRACT_VERSION,
+      ...await accounting.getTransactionDeletionPlan({ pool, personId, deletionPlanId: planId }),
+    }, operations.deleteTransactions)));
+
   const schemaDescriptionOutput = successOutputSchema({ projection: schemaProjectionSchema });
   const currencyListOutput = successOutputSchema({
     currencies: z.array(currencySchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
@@ -794,6 +827,55 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       deleted: z.object({ deleted: z.literal(true), accountId: z.number().int().positive(), name: z.string().min(1) }),
       verifiedAbsent: z.literal(true), alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(),
       schemaProjection: schemaProjectionSchema,
+    }),
+    structuredErrorSchema,
+  ]);
+  const transactionDeletionSummarySchema = z.object({
+    scope: z.enum(["all", "selected"]),
+    transactionCount: z.number().int().positive(),
+    lineItemCount: z.number().int().nonnegative(),
+    exchangeRateCount: z.number().int().nonnegative(),
+    tagAssignmentCount: z.number().int().nonnegative(),
+    affectedAccountCount: z.number().int().nonnegative(),
+    transactionStates: z.object({ draft: z.number().int().nonnegative(), posted: z.number().int().nonnegative(),
+      voided: z.number().int().nonnegative() }),
+    dateRange: z.object({ first: z.string().nullable(), last: z.string().nullable() }),
+  });
+  const transactionDeletionIdentityShape = {
+    deletionPlanId: z.string().uuid(), expiresAt: z.string().datetime(),
+    previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), summary: transactionDeletionSummarySchema,
+  };
+  const transactionDeletionWorkflowOutput = z.union([
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("ready"), readyToCommit: z.literal(true),
+      ...transactionDeletionIdentityShape,
+      preview: transactionDeletionSummarySchema.extend({
+        transactionIds: z.array(z.number().int().positive()).min(1),
+        effect: z.literal("permanently_delete_exact_transactions_and_dependent_postings"),
+        accountsPreserved: z.literal(true), accountTreeChanged: z.literal(false),
+      }),
+      requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
+      nextAction: z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
+        onApproval: z.object({ tool: z.literal("commit_delete_transactions"),
+          arguments: z.object({ deletion_plan_id: z.string().uuid(),
+            preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/) }) }) }),
+      schemaProjection: schemaProjectionSchema,
+    }),
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["ready", "expired", "invalidated"]),
+      readyToCommit: z.boolean(), ...transactionDeletionIdentityShape,
+      invalidationCode: z.string().min(1).optional(), schemaProjection: schemaProjectionSchema,
+    }),
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("committed"), readyToCommit: z.literal(false),
+      ...transactionDeletionIdentityShape,
+      deleted: z.object({ transactionCount: z.number().int().positive(), lineItemCount: z.number().int().nonnegative(),
+        exchangeRateCount: z.number().int().nonnegative(), tagAssignmentCount: z.number().int().nonnegative() }),
+      importReferences: z.object({ deletedAuditReferences: z.number().int().nonnegative(),
+        reopenedImportJobs: z.number().int().nonnegative() }),
+      verification: z.object({ targetTransactionsAbsent: z.literal(true), accountTreeUnchanged: z.literal(true),
+        accountCount: z.number().int().nonnegative() }),
+      alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(), schemaProjection: schemaProjectionSchema,
     }),
     structuredErrorSchema,
   ]);
@@ -1228,6 +1310,68 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
         ]),
     }, operations.deleteAccount);
   }, { defaultStatus: "committed", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
+
+  server.registerTool("preview_delete_transactions", {
+    title: "Preview permanent transaction deletion",
+    description: "Required before permanently deleting transactions. scope=all freezes the exact current owner-scoped transaction IDs; it is never reinterpreted dynamically during commit. selected deletes only the supplied IDs. The durable 15-minute preview reports transaction, line-item, exchange-rate, tag-assignment, affected-account, state, and date totals, proves the account tree is outside the deletion scope, and requests explicit user confirmation. No ledger data is deleted by this tool.",
+    inputSchema: {
+      scope: z.enum(["all", "selected"]),
+      transaction_ids: z.array(z.number().int().positive()).min(1).max(1000).optional()
+        .describe("Required only for selected scope. Omit for all; the provider freezes the current exact ID set."),
+    },
+    outputSchema: transactionDeletionWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["list_transactions"] }),
+  }, async ({ scope, transaction_ids }) => safeWorkflowResult(async () => {
+    const result = await accounting.previewTransactionDeletion({ pool, personId, scope,
+      transactionIds: transaction_ids ?? [] });
+    return withSchemaProjection(schemaSemantics, {
+      ...result,
+      requiredAction: "REQUEST_USER_CONFIRMATION",
+      nextAction: {
+        type: "request_user_confirmation",
+        instruction: `Ask for explicit confirmation to permanently delete exactly ${result.summary.transactionCount} transactions and ${result.summary.lineItemCount} line items. The account tree will remain unchanged.`,
+        onApproval: { tool: "commit_delete_transactions",
+          arguments: { deletion_plan_id: result.deletionPlanId, preview_digest: result.previewDigest } },
+      },
+    }, operations.deleteTransactions);
+  }, { defaultStatus: "ready", retryTool: "preview_delete_transactions",
+    failureMapper: transactionDeletePlanFailure }));
+
+  server.registerTool("get_transaction_delete_plan", {
+    title: "Get transaction-deletion plan",
+    description: "Recover a durable owner-scoped transaction-deletion preview across turns or connections. Returns its exact digest and frozen numerical scope, plus the original verified result after commit.",
+    inputSchema: { deletion_plan_id: z.string().trim().uuid() },
+    outputSchema: transactionDeletionWorkflowOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ deletion_plan_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics,
+    await accounting.getTransactionDeletionPlan({ pool, personId, deletionPlanId: deletion_plan_id }),
+    operations.deleteTransactions),
+  { retryTool: "preview_delete_transactions", failureMapper: transactionDeletePlanFailure }));
+
+  server.registerTool("commit_delete_transactions", {
+    title: "Commit permanent transaction deletion",
+    description: "Use only after explicit user approval of the exact preview. Accepts the opaque plan ID and matching preview digest, revalidates the frozen transaction contents and—for scope=all—the complete owner transaction set, blocks unplanned reversal references, deletes dependent tag assignments, line items, transaction rates, and exact transactions atomically, preserves accounts, updates resumable-import audit references, verifies absence and account-tree identity, and returns the stored result idempotently on retry.",
+    inputSchema: {
+      deletion_plan_id: z.string().trim().uuid(),
+      preview_digest: z.string().trim().regex(/^sha256:[0-9a-f]{64}$/),
+    },
+    outputSchema: transactionDeletionWorkflowOutput,
+    annotations: destructiveWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["preview_delete_transactions"] }),
+  }, async ({ deletion_plan_id, preview_digest }) => safeWorkflowResult(async () => {
+    const result = await accounting.commitTransactionDeletion({ pool, personId,
+      deletionPlanId: deletion_plan_id, previewDigest: preview_digest });
+    return withSchemaProjection(schemaSemantics, {
+      ...result,
+      effectReceipt: effectReceipt("commit_delete_transactions", { deletion_plan_id, preview_digest },
+        result.alreadyCommitted ? "unchanged" : "deleted", [
+          { type: "transaction_delete_plan", id: deletion_plan_id },
+        ]),
+    }, operations.deleteTransactions);
+  }, { defaultStatus: "committed", retryTool: "preview_delete_transactions",
+    failureMapper: transactionDeletePlanFailure }));
 
   server.registerTool("list_transactions", {
     title: "List transactions",

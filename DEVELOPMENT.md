@@ -270,7 +270,7 @@ only exact provider workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Complete **Back up and prove the backup restores** above and retain both backup files.
-3. Stop API writers and apply all pending migrations through 0012 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
+3. Stop API writers and apply all pending migrations through 0013 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:verify`, then restart the API service.
 
 `schema:semantics:sync` is a development command that rewrites the tracked
