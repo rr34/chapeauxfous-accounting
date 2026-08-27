@@ -7,6 +7,87 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0012: add-resumable-transaction-import-jobs
+-- writer downtime: not required; these are independent operational staging
+-- tables and do not change existing ledger rows.
+-- deployment order: apply before exposing the resumable transaction-import
+-- MCP tools.
+-- locking: creation takes brief metadata locks only.
+-- recovery: restore the verified pre-migration backup if rollback is required;
+-- staged jobs may otherwise be dropped without changing committed ledger data.
+
+CREATE TABLE IF NOT EXISTS accounting_transaction_import_jobs (
+  import_job_id CHAR(36) NOT NULL,
+  owner_person_id INT NOT NULL,
+  client_request_id VARCHAR(128) NOT NULL,
+  source_system VARCHAR(32) NOT NULL,
+  source_file_sha256 CHAR(64) NOT NULL,
+  source_file_name VARCHAR(1024) NULL,
+  expected_record_count BIGINT UNSIGNED NOT NULL,
+  job_status ENUM('receiving','review_ready','committed') NOT NULL DEFAULT 'receiving',
+  preview_sha256 CHAR(64) NULL,
+  result_json LONGTEXT NULL,
+  committed_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (import_job_id),
+  UNIQUE KEY accounting_transaction_import_jobs_owner_request_UQ
+    (owner_person_id, client_request_id),
+  KEY accounting_transaction_import_jobs_owner_status_IDX
+    (owner_person_id, job_status, updated_at),
+  CONSTRAINT accounting_transaction_import_jobs_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='One durable source-file transaction import across idempotent chunks';
+
+CREATE TABLE IF NOT EXISTS accounting_transaction_import_items (
+  import_job_id CHAR(36) NOT NULL,
+  transaction_external_id VARCHAR(128) NOT NULL,
+  canonical_sha256 CHAR(64) NOT NULL,
+  canonical_json LONGTEXT NOT NULL,
+  resolved_json LONGTEXT NULL,
+  source_record_count INT UNSIGNED NOT NULL,
+  item_status ENUM('staged','reused','exception','committed') NOT NULL,
+  ledger_transaction_id BIGINT NULL,
+  errors_json LONGTEXT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (import_job_id, transaction_external_id),
+  KEY accounting_transaction_import_items_ledger_IDX (ledger_transaction_id),
+  KEY accounting_transaction_import_items_job_status_IDX
+    (import_job_id, item_status, transaction_external_id),
+  CONSTRAINT accounting_transaction_import_items_job_FK
+    FOREIGN KEY (import_job_id) REFERENCES accounting_transaction_import_jobs (import_job_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE,
+  CONSTRAINT accounting_transaction_import_items_transaction_FK
+    FOREIGN KEY (ledger_transaction_id) REFERENCES transactions (transaction_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Canonical transaction groups staged, reused, or retained as exceptions';
+
+CREATE TABLE IF NOT EXISTS accounting_transaction_import_requests (
+  import_job_id CHAR(36) NOT NULL,
+  request_kind ENUM('chunk','exception_retry') NOT NULL,
+  request_id VARCHAR(128) NOT NULL,
+  payload_sha256 CHAR(64) NOT NULL,
+  record_count INT UNSIGNED NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (import_job_id, request_kind, request_id),
+  CONSTRAINT accounting_transaction_import_requests_job_FK
+    FOREIGN KEY (import_job_id) REFERENCES accounting_transaction_import_jobs (import_job_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Idempotency receipts for import chunks and corrected exception retries';
+
+-- end migration 0012
+
 -- migration 0011: add-account-deletion-plans
 -- writer downtime: not required; this extends the closed workflow-kind set used
 -- by short-lived confirmation plans.

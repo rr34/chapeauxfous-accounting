@@ -187,6 +187,14 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "import_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_plan"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_schema"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "create_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "stage_transaction_import_chunk"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "retry_transaction_import_exception"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_exceptions"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "preview_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "update_account"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_account"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_account_delete_plan"), true);
@@ -218,12 +226,18 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     1000,
   );
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").annotations.idempotentHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").annotations.idempotentHint, true);
+  assert.match(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").description,
+    /expected_source_records = newly_staged_records \+ previously_staged_or_reused_records \+ exception_records \+ remaining_records/);
   assert.equal(tools.tools.find((tool) => tool.name === "import_transactions").annotations.idempotentHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_account").annotations.destructiveHint, true);
 
   const resources = await client.listResources();
   assert.equal(resources.resources.some((resource) => resource.uri === "accounting://manifest/capabilities/v1"), true);
   assert.equal(resources.resources.some((resource) => resource.uri === "accounting://context/currencies/active"), true);
+  assert.equal(resources.resources.some((resource) =>
+    resource.uri === "accounting://schemas/transaction-import-record/v1"), true);
   const resourceTemplates = await client.listResourceTemplates();
   assert.equal(resourceTemplates.resourceTemplates.some((template) =>
     template.uriTemplate === "accounting://currencies/{currencyId}"), true);
@@ -231,6 +245,13 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const manifest = JSON.parse(manifestResource.contents[0].text);
   assert.equal(manifest.contractVersion, 1);
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
+  const canonicalSchemaResource = await client.readResource({
+    uri: "accounting://schemas/transaction-import-record/v1",
+  });
+  const canonicalSchema = JSON.parse(canonicalSchemaResource.contents[0].text);
+  assert.equal(canonicalSchema.additionalProperties, false);
+  assert.equal(canonicalSchema.properties.transaction_external_id.type, "string");
+  assert.equal(canonicalSchema.required.includes("value_decimal"), true);
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,

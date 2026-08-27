@@ -495,7 +495,7 @@ async function loadExistingTransactions(connection, personId, sourceSystem, exte
   }]));
 }
 
-async function analyze(connection, personId, normalized, lock) {
+export async function analyzeTransactionImport(connection, personId, normalized, lock = false) {
   const context = await loadContext(connection, personId, lock);
   const existingByExternalId = await loadExistingTransactions(connection, personId, normalized.sourceSystem,
     normalized.transactions.map((transaction) => transaction.externalId), lock);
@@ -564,7 +564,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
-    const entries = await analyze(connection, personId, normalized, false);
+    const entries = await analyzeTransactionImport(connection, personId, normalized, false);
     if (entries.some((entry) => entry.status === "rejected")) return summarize(normalized, entries);
 
     const importPlanId = randomUUID();
@@ -633,7 +633,7 @@ export async function getTransactionImportPlan({ pool, personId, importPlanId })
   });
 }
 
-async function insertTransaction(connection, personId, sourceSystem, resolved) {
+export async function insertImportedTransaction(connection, personId, sourceSystem, resolved) {
   const [insert] = await connection.query(
     `INSERT INTO transactions
       (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate,
@@ -703,7 +703,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     }
 
     const normalized = JSON.parse(plan.payload_json);
-    const entries = await analyze(connection, personId, normalized, true);
+    const entries = await analyzeTransactionImport(connection, personId, normalized, true);
     if (entries.some((entry) => entry.status === "rejected")) {
       const details = summarize(normalized, entries);
       await connection.query(
@@ -719,7 +719,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
 
     for (const entry of entries) {
       if (entry.status !== "planned") continue;
-      entry.transactionId = await insertTransaction(connection, personId, normalized.sourceSystem, entry.resolved);
+      entry.transactionId = await insertImportedTransaction(connection, personId, normalized.sourceSystem, entry.resolved);
       entry.status = "created";
     }
     const result = { ...summarize(normalized, entries, { ledgerChanged: true }),

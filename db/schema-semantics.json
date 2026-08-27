@@ -8,8 +8,8 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 11,
-    "schemaFingerprint": "101f4850c6a8e474d28c63810f9464d09d92cfea2b128ee8435db29f22547e83",
+    "schemaVersion": 12,
+    "schemaFingerprint": "dbd5c674305b98fb4a81d119fb8aa9fe8564be385f23c7ca4e135e8326242b3b",
     "extractedAt": "2026-08-27T20:59:50.879Z"
   },
   "instructions": {

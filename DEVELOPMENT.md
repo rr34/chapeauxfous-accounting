@@ -95,11 +95,13 @@ npm run schema:semantics:sync
 npm run schema:verify
 ```
 
-The semantic sync extracts the eight public accounting tables from MariaDB,
+The semantic sync extracts the nine public accounting tables from MariaDB,
 preserves the human-written meanings in `db/schema-semantics.json`, and refreshes
 compiler-owned mechanics. Review that file and fill any new semantic blanks
-before verification. Identity and API-token tables are deliberately excluded
-from the agent-facing schema projection.
+before verification. Identity, API-token, and resumable import staging tables
+are deliberately excluded from generic agent-facing schema projection. The
+import-job MCP tools expose bounded progress, exception, preview, and commit
+contracts instead.
 
 Migration `0002` expects the new accounting tables to contain no real ledger
 data because it establishes required user ownership. If ledger data is added
@@ -268,7 +270,7 @@ only exact provider workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Complete **Back up and prove the backup restores** above and retain both backup files.
-3. Stop API writers and apply all pending migrations through 0011 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
+3. Stop API writers and apply all pending migrations through 0012 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:verify`, then restart the API service.
 
 `schema:semantics:sync` is a development command that rewrites the tracked

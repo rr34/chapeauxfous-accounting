@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -63,4 +63,12 @@ test("the repository migration ledger is valid and contiguous", () => {
   const accountDeletionPlanMigration = migrations.find((migration) => migration.version === 11);
   assert.match(accountDeletionPlanMigration.sql, /account_delete/);
   assert.doesNotMatch(accountDeletionPlanMigration.sql, /GENERATED ALWAYS/i);
+  const resumableTransactionImportMigration = migrations.find((migration) => migration.version === 12);
+  assert.match(resumableTransactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_transaction_import_jobs/);
+  assert.match(resumableTransactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_transaction_import_items/);
+  assert.match(resumableTransactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_transaction_import_requests/);
+  assert.match(resumableTransactionImportMigration.sql, /expected_record_count BIGINT UNSIGNED NOT NULL/);
+  assert.match(resumableTransactionImportMigration.sql, /ENUM\('staged','reused','exception','committed'\)/);
+  assert.match(resumableTransactionImportMigration.sql, /ENUM\('chunk','exception_retry'\)/);
+  assert.doesNotMatch(resumableTransactionImportMigration.sql, /GENERATED ALWAYS/i);
 });

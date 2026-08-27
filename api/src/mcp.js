@@ -67,6 +67,17 @@ import {
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 import {
+  commitTransactionImportJob,
+  createTransactionImportJob,
+  getTransactionImportJob,
+  listTransactionImportExceptions,
+  previewTransactionImportJob,
+  retryTransactionImportException,
+  stageTransactionImportChunk,
+  TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
+  transactionImportCanonicalJsonSchema,
+} from "./transaction-import-job.js";
+import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
@@ -222,6 +233,18 @@ const operations = Object.freeze({
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
       accounting_import_plans: planCommitFields,
+    },
+  },
+  transactionImportJob: {
+    name: "transaction_import_job",
+    purpose: "Receive, validate, stage, preview, and commit one resumable source-file transaction import job.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates"],
+    fields: {
+      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id", "source_fingerprint"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
   },
   listBalanceAssertions: {
@@ -470,6 +493,13 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
     getTransactionImportPlan: services.getTransactionImportPlan ?? getTransactionImportPlan,
     commitTransactionImportPlan: services.commitTransactionImportPlan ?? commitTransactionImportPlan,
+    createTransactionImportJob: services.createTransactionImportJob ?? createTransactionImportJob,
+    stageTransactionImportChunk: services.stageTransactionImportChunk ?? stageTransactionImportChunk,
+    retryTransactionImportException: services.retryTransactionImportException ?? retryTransactionImportException,
+    getTransactionImportJob: services.getTransactionImportJob ?? getTransactionImportJob,
+    listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
+    previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
+    commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
     listBalanceAssertions: services.listBalanceAssertions ?? listBalanceAssertions,
     listBalanceAssertionsPage: services.listBalanceAssertionsPage ?? (services.listBalanceAssertions ? injectedPage(services.listBalanceAssertions, "assertions") : listBalanceAssertionsPage),
     getBalanceAssertion: services.getBalanceAssertion ?? getBalanceAssertion,
@@ -494,6 +524,13 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     description: "Versioned capabilities, dependencies, attachment guidance, and bounded context views for this accounting provider.",
     mimeType: "application/json",
   }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(accountingCapabilityManifest) }] }));
+
+  server.registerResource("accounting-transaction-import-canonical-schema", TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI, {
+    title: "Canonical transaction import line-record JSON Schema",
+    description: "The exact authoritative JSON Schema accepted by resumable transaction-import chunk and exception-retry tools.",
+    mimeType: "application/schema+json",
+  }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
+    text: JSON.stringify(transactionImportCanonicalJsonSchema) }] }));
 
   server.registerResource("accounting-currencies-active", "accounting://context/currencies/active", {
     title: "Accessible accounting units",
@@ -605,6 +642,16 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       contractVersion: MCP_CONTRACT_VERSION,
       ...await accounting.getTransactionImportPlan({ pool, personId, importPlanId: planId }),
     }, operations.commitTransactionImport)));
+
+  server.registerResource("accounting-transaction-import-job",
+    resourceTemplate("accounting://transaction-import-jobs/{jobId}"), {
+      title: "Resumable transaction import job",
+      description: "Current owner-scoped progress and lifecycle state for one logical source-file import.",
+      mimeType: "application/json",
+    }, async (uri, { jobId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+      contractVersion: MCP_CONTRACT_VERSION,
+      ...await accounting.getTransactionImportJob({ pool, personId, importJobId: jobId }),
+    }, operations.transactionImportJob)));
 
   const schemaDescriptionOutput = successOutputSchema({ projection: schemaProjectionSchema });
   const currencyListOutput = successOutputSchema({
@@ -1273,6 +1320,144 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       ]),
     }, operations.createTransaction);
   }));
+
+  const canonicalImportRecordSchema = z.object({
+    transaction_external_id: z.string().trim().min(1).max(128),
+    line_external_id: z.string().trim().min(1).max(128).nullable().optional(),
+    transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    description: z.string().max(16000).nullable().optional(),
+    valuation_currency_code: z.string().trim().min(1).max(50),
+    account_full_name: z.string().trim().min(1).max(4096),
+    amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
+    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
+    memo: z.string().max(16000).nullable().optional(),
+  }).describe(`One record conforming exactly to ${TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI}.`);
+  const transactionImportJobOutput = successOutputSchema({
+    job: z.json(),
+    schemaProjection: schemaProjectionSchema,
+  }, ["success", "receiving", "review_ready", "committed"]);
+  const transactionImportSchemaOutput = successOutputSchema({
+    schema_uri: z.literal(TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI),
+    canonical_schema: z.json(),
+  });
+
+  server.registerTool("get_transaction_import_schema", {
+    title: "Get canonical transaction import schema",
+    description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record accepted by the resumable import workflow. Fetch this before creating a declarative CSV-to-canonical mapping; do not infer fields from examples.",
+    inputSchema: {},
+    outputSchema: transactionImportSchemaOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async () => safeToolResult(async () => ({
+    schema_uri: TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
+    canonical_schema: transactionImportCanonicalJsonSchema,
+  })));
+
+  server.registerTool("create_transaction_import_job", {
+    title: "Create resumable transaction import job",
+    description: "Create one durable logical import job for one exact source file and final expected canonical record count. client_request_id makes retries idempotent. All later chunks retain the returned import_job_id, source_system, source-file SHA-256 identity, and expected count.",
+    inputSchema: {
+      source_system: z.string().trim().min(1).max(32),
+      source_file_sha256: z.string().trim().regex(/^(?:sha256:)?[0-9a-fA-F]{64}$/),
+      source_file_name: z.string().trim().min(1).max(1024).nullable().optional(),
+      expected_record_count: z.number().int().positive(),
+      client_request_id: z.string().trim().min(1).max(128),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["get_transaction_import_schema"] }),
+  }, async (input) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.createTransactionImportJob({ pool, personId,
+      sourceSystem: input.source_system, sourceFileSha256: input.source_file_sha256,
+      sourceFileName: input.source_file_name, expectedRecordCount: input.expected_record_count,
+      clientRequestId: input.client_request_id }),
+  }, operations.transactionImportJob), { retryTool: "create_transaction_import_job" }));
+
+  server.registerTool("stage_transaction_import_chunk", {
+    title: "Stage canonical transaction records",
+    description: `Transfer a deterministic parser's canonical output without asking the LLM to reproduce it. Each chunk may contain any number of complete transaction groups up to ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} records; the MCP groups flat records by transaction_external_id, performs all account, currency, decimal, exchange-rate, balance, and source-ID validation, stages valid groups, reuses matching ledger transactions, and returns invalid groups as structured exceptions without failing other groups. Keep every transaction's records in one chunk. A stable chunk_id makes an exact retry idempotent. Progress always reconciles expected_source_records = newly_staged_records + previously_staged_or_reused_records + exception_records + remaining_records.`,
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      chunk_id: z.string().trim().min(1).max(128),
+      records: z.array(canonicalImportRecordSchema).min(1).max(TRANSACTION_IMPORT_MAX_LINE_ITEMS),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["create_transaction_import_job"] }),
+  }, async ({ import_job_id, chunk_id, records }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.stageTransactionImportChunk({ pool, personId, importJobId: import_job_id, chunkId: chunk_id, records }),
+  }, operations.transactionImportJob), { retryTool: "stage_transaction_import_chunk" }));
+
+  server.registerTool("retry_transaction_import_exception", {
+    title: "Retry one corrected import exception",
+    description: "Replace and revalidate one current exception transaction using corrected canonical records. Successful staged or reused transactions are not resubmitted or changed. The stable retry_id makes exact retries idempotent; transaction identity and the job's final source-record count must remain unchanged.",
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      retry_id: z.string().trim().min(1).max(128),
+      transaction_external_id: z.string().trim().min(1).max(128),
+      records: z.array(canonicalImportRecordSchema).min(1).max(1000),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["stage_transaction_import_chunk"] }),
+  }, async ({ import_job_id, retry_id, transaction_external_id, records }) => safeWorkflowResult(async () =>
+    withSchemaProjection(schemaSemantics, {
+      job: await accounting.retryTransactionImportException({ pool, personId, importJobId: import_job_id,
+        retryId: retry_id, transactionExternalId: transaction_external_id, records }),
+    }, operations.transactionImportJob), { retryTool: "retry_transaction_import_exception" }));
+
+  server.registerTool("get_transaction_import_job", {
+    title: "Get transaction import job",
+    description: "Read the durable owner-scoped state and reconcilable progress of one logical import job across connections, chunks, and retries.",
+    inputSchema: { import_job_id: z.string().trim().uuid() },
+    outputSchema: transactionImportJobOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ import_job_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.getTransactionImportJob({ pool, personId, importJobId: import_job_id }),
+  }, operations.transactionImportJob)));
+
+  server.registerTool("list_transaction_import_exceptions", {
+    title: "List transaction import exceptions",
+    description: "Page through current invalid transactions. Every exception includes error codes, complete source identity, the canonical records, and complete transaction context so only exceptions need to return to the LLM for correction.",
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().max(128).nullable().optional(),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ import_job_id, limit, cursor }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.listTransactionImportExceptions({ pool, personId, importJobId: import_job_id,
+      limit, afterExternalId: cursor }),
+  }, operations.transactionImportJob)));
+
+  server.registerTool("preview_transaction_import_job", {
+    title: "Create final transaction import preview",
+    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview explicitly reports unresolved exceptions and the exact commit scope; present it to the user for approval.",
+    inputSchema: { import_job_id: z.string().trim().uuid() },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["stage_transaction_import_chunk"] }),
+  }, async ({ import_job_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.previewTransactionImportJob({ pool, personId, importJobId: import_job_id }),
+  }, operations.transactionImportJob), { retryTool: "preview_transaction_import_job" }));
+
+  server.registerTool("commit_transaction_import_job", {
+    title: "Commit final transaction import preview",
+    description: "Explicitly commit the exact final job preview after user approval. The server revalidates staged accounting transactions, atomically creates only valid new transactions, reuses stable source-ID matches, leaves structured exceptions uncommitted, and returns one idempotent final job summary with transaction and line-item created/reused/exception totals.",
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      preview_digest: z.string().trim().regex(/^sha256:[0-9a-f]{64}$/),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["preview_transaction_import_job"] }),
+  }, async ({ import_job_id, preview_digest }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.commitTransactionImportJob({ pool, personId, importJobId: import_job_id,
+      previewDigest: preview_digest }),
+  }, operations.transactionImportJob), { defaultStatus: "committed", retryTool: "get_transaction_import_job" }));
 
   const importedLineItemSchema = z.object({
     external_id: z.string().trim().min(1).max(128).nullable().optional()

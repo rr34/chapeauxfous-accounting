@@ -1,7 +1,6 @@
 import * as z from "zod/v4";
 import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
-  TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
 
 export const MCP_CONTRACT_VERSION = 1;
@@ -218,11 +217,16 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Read, create, import, and verify owner-scoped double-entry transactions.",
       aliases: ["transactions", "journal entries", "ledger entries"],
       guidance: "Every posted transaction must balance in its valuation currency.",
-      tools: ["list_transactions", "get_transaction", "create_transaction", "import_transactions", "get_transaction_import_plan", "commit_transaction_import", "verify_ledger"],
+      tools: ["list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
+        "create_transaction_import_job", "stage_transaction_import_chunk", "retry_transaction_import_exception",
+        "get_transaction_import_job", "list_transaction_import_exceptions", "preview_transaction_import_job",
+        "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
+        "commit_transaction_import", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [
-        `Transaction files must be converted to complete nested transactions in batches of at most ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
-        "For larger datasets, split only between complete transactions, keep one stable source_system, commit each approved plan before continuing, and preserve the complete current batch on retry.",
+        "Fetch the authoritative canonical line-record JSON Schema before mapping a source file.",
+        `Transfer canonical records in idempotent chunks of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items while preserving one import_job_id and source-file identity.`,
+        "Retry only structured exceptions; successful transaction groups remain staged and must not be resubmitted.",
       ],
       contextViews: ["accounting.accounts.active_paths", "accounting.currencies.active"],
     },

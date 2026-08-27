@@ -9,7 +9,7 @@ test("the tracked accounting semantic form is complete", () => {
   assert.equal(report.activeSchemaObjectCount, 9);
   assert.equal(report.retiredSchemaObjectCount, 0);
   assert.equal(report.unresolvedCount, 0);
-  assert.equal(semantics.form.database.schemaVersion, 11);
+  assert.equal(semantics.form.database.schemaVersion, 12);
   assert.match(
     semantics.form.schemaObjects.accounting_import_plans.fields.payload_json.semantics.sensitivity,
     /Server-only private financial data/,
