@@ -4,9 +4,11 @@ import { currencyKey } from "./currencies.js";
 import { decimalToUnits, greatestCommonDivisor } from "./money.js";
 import { validateTransaction } from "./accounting.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
+import {
+  TRANSACTION_IMPORT_MAX_LINE_ITEMS,
+  TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+} from "./transaction-import-limits.js";
 
-const maxTransactions = 250;
-const maxLineItems = 5000;
 const signedBigIntMinimum = -(2n ** 63n);
 const signedBigIntMaximum = (2n ** 63n) - 1n;
 
@@ -97,8 +99,8 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
   if (!Array.isArray(transactions) || transactions.length === 0) {
     throw importError("At least one complete transaction is required.", "TRANSACTIONS_REQUIRED");
   }
-  if (transactions.length > maxTransactions) {
-    throw importError(`At most ${maxTransactions} transactions can be imported in one atomic batch.`, "TOO_MANY_TRANSACTIONS");
+  if (transactions.length > TRANSACTION_IMPORT_MAX_TRANSACTIONS) {
+    throw importError(`At most ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} transactions can be imported in one atomic batch.`, "TOO_MANY_TRANSACTIONS");
   }
 
   const byExternalId = new Map();
@@ -117,8 +119,8 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
       conflictingExternalIds.add(normalized.externalId);
     }
   }
-  if (submittedLineItemCount > maxLineItems) {
-    throw importError(`At most ${maxLineItems} line items can be imported in one atomic batch.`, "TOO_MANY_LINE_ITEMS");
+  if (submittedLineItemCount > TRANSACTION_IMPORT_MAX_LINE_ITEMS) {
+    throw importError(`At most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items can be imported in one atomic batch.`, "TOO_MANY_LINE_ITEMS");
   }
   return {
     sourceSystem: normalizedSourceSystem,

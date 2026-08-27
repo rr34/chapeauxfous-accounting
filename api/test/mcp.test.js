@@ -211,6 +211,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.match(JSON.stringify(accountTreeOutputSchema), /expiresAt/);
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /source-neutral/);
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /unknown or ambiguous paths/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /does not parse CSV/);
+  assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /confirm each plan sequentially/);
+  assert.equal(
+    tools.tools.find((tool) => tool.name === "import_transactions").inputSchema.properties.transactions.maxItems,
+    1000,
+  );
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "import_transactions").annotations.idempotentHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_account").annotations.destructiveHint, true);

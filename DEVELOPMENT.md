@@ -159,6 +159,17 @@ preview digest, expiration, compact summary, and stored commit result. Expired,
 committed, and invalidated plans become eligible for owner-scoped cleanup 48
 hours after their expiration or terminal timestamp.
 
+The MCP accepts structured batches of at most 1,000 complete transactions and
+10,000 nested line items; it does not parse CSV. The calling LLM converts source
+rows into complete nested transactions. Larger datasets are split only between
+transactions and use the same stable `source_system` and stable external IDs in
+every batch. Each batch is previewed and explicitly confirmed in sequence, and
+an approved plan is committed before the next batch is submitted. A retry or a
+resumed dataset may safely repeat committed source IDs because matching content
+is reused and conflicting content is rejected. The MCP route has a 16 MB JSON
+body allowance for ordinary 1,000-transaction statement imports; other API
+routes retain their 2 MB limit.
+
 New registrations create only the user identity and begin with an empty chart
 of accounts. Clicking an account in the web client opens its editor; the
 permanent-delete action is kept inside that modal. Only an empty leaf account

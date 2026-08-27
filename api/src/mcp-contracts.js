@@ -1,4 +1,8 @@
 import * as z from "zod/v4";
+import {
+  TRANSACTION_IMPORT_MAX_LINE_ITEMS,
+  TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+} from "./transaction-import-limits.js";
 
 export const MCP_CONTRACT_VERSION = 1;
 export const MCP_SERVER_VERSION = "0.1.0";
@@ -216,7 +220,10 @@ export const accountingCapabilityManifest = Object.freeze({
       guidance: "Every posted transaction must balance in its valuation currency.",
       tools: ["list_transactions", "get_transaction", "create_transaction", "import_transactions", "get_transaction_import_plan", "commit_transaction_import", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
-      attachmentHints: ["Transaction files must be converted to complete nested transactions; preserve the complete batch on retry."],
+      attachmentHints: [
+        `Transaction files must be converted to complete nested transactions in batches of at most ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
+        "For larger datasets, split only between complete transactions, keep one stable source_system, commit each approved plan before continuing, and preserve the complete current batch on retry.",
+      ],
       contextViews: ["accounting.accounts.active_paths", "accounting.currencies.active"],
     },
     {

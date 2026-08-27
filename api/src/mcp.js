@@ -66,6 +66,10 @@ import {
 } from "./mcp-contracts.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
+import {
+  TRANSACTION_IMPORT_MAX_LINE_ITEMS,
+  TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+} from "./transaction-import-limits.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -1291,11 +1295,11 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   });
   server.registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: "Validate and preview an atomic source-neutral batch of up to 250 complete transactions and 5,000 nested line items. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Report that preview before noting that ledger data was unchanged, then ask for approval. After approval call commit_transaction_import with only the plan ID; never replay the batch.",
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this provider does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and explicitly confirm each plan sequentially. Commit an approved plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Report that preview before noting that ledger data was unchanged, then ask for approval. After approval call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
-      transactions: z.array(importedTransactionSchema).min(1).max(250),
+      transactions: z.array(importedTransactionSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
       dry_run: z.literal(true).default(true)
         .describe("Validate the complete batch and save a durable confirmation plan without changing ledger data."),
     },
@@ -1431,14 +1435,14 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   return server;
 }
 
-export function mountAccountingMcp(app, { pool }) {
+export function mountAccountingMcp(app, { pool, jsonBodyParser }) {
   const authenticate = requireApiToken(pool);
   const handler = createAccountingMcpHandler({ pool });
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => console.error("Accounting MCP HTTP adapter error:", error),
   });
 
-  app.all("/mcp", authenticate, async (req, res) => {
+  app.all("/mcp", authenticate, jsonBodyParser, async (req, res) => {
     const accountingAuth = req.auth ?? {};
     const personId = Number(accountingAuth.personId);
     if (!Number.isInteger(personId) || personId <= 0) {

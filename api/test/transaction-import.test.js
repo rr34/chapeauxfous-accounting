@@ -6,7 +6,16 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } = await import("../src/transaction-import.js");
+const {
+  commitTransactionImportPlan,
+  getTransactionImportPlan,
+  normalizeTransactionImport,
+  previewTransactionImport,
+} = await import("../src/transaction-import.js");
+const {
+  TRANSACTION_IMPORT_MAX_LINE_ITEMS,
+  TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+} = await import("../src/transaction-import-limits.js");
 
 function memoryPool() {
   const state = {
@@ -191,6 +200,77 @@ function importedTransactions() {
     },
   ];
 }
+
+function generatedTransaction(index, lineItemCount = 2) {
+  return {
+    externalId: `generated-${index}`,
+    transactionDate: "2026-01-01",
+    valuationCurrencyCode: "USD",
+    lineItems: Array.from({ length: lineItemCount }, (_, lineIndex) => ({
+      externalId: `${index}-${lineIndex}`,
+      accountFullName: lineIndex % 2 === 0 ? "Assets:Checking" : "Expenses:Food",
+      amountDecimal: lineIndex % 2 === 0 ? "-1.00" : "1.00",
+    })),
+  };
+}
+
+test("transaction normalization accepts 1,000-transaction statement batches and rejects larger batches", () => {
+  assert.equal(TRANSACTION_IMPORT_MAX_TRANSACTIONS, 1000);
+  assert.equal(TRANSACTION_IMPORT_MAX_LINE_ITEMS, 10000);
+  const transactions = Array.from(
+    { length: TRANSACTION_IMPORT_MAX_TRANSACTIONS },
+    (_, index) => generatedTransaction(index),
+  );
+  const normalized = normalizeTransactionImport({ sourceSystem: "large_statement", transactions });
+  assert.equal(normalized.transactions.length, 1000);
+  assert.equal(normalized.submittedLineItemCount, 2000);
+
+  assert.throws(
+    () => normalizeTransactionImport({
+      sourceSystem: "too_large",
+      transactions: [...transactions, generatedTransaction(1000)],
+    }),
+    (error) => error.code === "TOO_MANY_TRANSACTIONS" && /At most 1000 transactions/.test(error.message),
+  );
+});
+
+test("transaction normalization enforces the aggregate line-item limit", () => {
+  const transactions = Array.from({ length: 1000 }, (_, index) => generatedTransaction(index, 11));
+  assert.throws(
+    () => normalizeTransactionImport({ sourceSystem: "too_many_lines", transactions }),
+    (error) => error.code === "TOO_MANY_LINE_ITEMS" && /At most 10000 line items/.test(error.message),
+  );
+});
+
+test("a 1,000-transaction statement is preserved as one durable atomic plan", async () => {
+  const pool = memoryPool();
+  const transactions = Array.from(
+    { length: TRANSACTION_IMPORT_MAX_TRANSACTIONS },
+    (_, index) => generatedTransaction(index),
+  );
+  const preview = await previewTransactionImport({
+    pool,
+    personId: 7,
+    sourceSystem: "large_statement",
+    transactions,
+  });
+  assert.equal(preview.readyToCommit, true);
+  assert.equal(preview.wouldCreateTransactionCount, 1000);
+  assert.equal(preview.wouldCreateLineItemCount, 2000);
+  assert.equal(preview.transactions.length, 1000);
+  assert.equal(pool.state.transactions.length, 0);
+
+  const committed = await commitTransactionImportPlan({
+    pool,
+    personId: 7,
+    importPlanId: preview.importPlanId,
+  });
+  assert.equal(committed.createdTransactionCount, 1000);
+  assert.equal(committed.createdLineItemCount, 2000);
+  assert.equal(pool.state.transactions.length, 1000);
+  assert.equal(pool.state.lineItems.length, 2000);
+  assert.equal(pool.state.transactions.every((transaction) => transaction.TransactionState === "posted"), true);
+});
 
 test("transaction preview plans complete nested transactions and commit is repeat-safe", async () => {
   const pool = memoryPool();

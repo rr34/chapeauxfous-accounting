@@ -12,6 +12,7 @@ import {
   listTransactions, updateAccount, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
+import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 5004);
@@ -20,6 +21,10 @@ const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
 app.disable("x-powered-by");
 app.use(cors({ origin: clientOrigin }));
+mountAccountingMcp(app, {
+  pool,
+  jsonBodyParser: express.json({ limit: TRANSACTION_IMPORT_HTTP_BODY_LIMIT }),
+});
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/health", async (_req, res, next) => {
@@ -125,8 +130,6 @@ app.post("/api/ledger/verify", requireAuth, async (req, res, next) => {
     res.status(report.valid ? 200 : 409).json(report);
   } catch (error) { next(error); }
 });
-
-mountAccountingMcp(app, { pool });
 
 app.use((error, _req, res, _next) => {
   console.error(error);
