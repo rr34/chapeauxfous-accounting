@@ -108,6 +108,88 @@ export async function getAccount(pool, personId, accountId) {
   return account;
 }
 
+export async function listAccountLedger(pool, personId, accountId) {
+  const account = await getAccount(pool, personId, accountId);
+  const [rows] = await pool.query(
+    `SELECT li.line_item_id, li.amount_units, li.memo,
+            t.transaction_id, t.TransactionDate, t.description,
+            split_line.line_item_id AS split_line_item_id,
+            split_line.amount_units AS split_amount_units,
+            split_line.memo AS split_memo,
+            split_account.account_id AS split_account_id,
+            split_account.AccountName AS split_account_name,
+            split_account.account_currency_id AS split_currency_id,
+            split_currency.CurrencyAbbreviation AS split_currency_code,
+            split_currency.scale AS split_scale
+       FROM line_items li
+       JOIN transactions t ON t.transaction_id = li.transaction_id
+       LEFT JOIN line_items split_line
+         ON split_line.transaction_id = t.transaction_id
+       LEFT JOIN accounts split_account ON split_account.account_id = split_line.account_id
+       LEFT JOIN currencies split_currency ON split_currency.currency_id = split_account.account_currency_id
+      WHERE li.account_id = ?
+        AND t.owner_person_id = ?
+        AND t.TransactionState = 'posted'
+      ORDER BY t.TransactionDate, t.transaction_id, li.line_item_id, split_line.line_item_id`,
+    [account.id, personId],
+  );
+
+  const entriesByLineItemId = new Map();
+  for (const row of rows) {
+    const lineItemId = Number(row.line_item_id);
+    let entry = entriesByLineItemId.get(lineItemId);
+    if (!entry) {
+      entry = {
+        lineItemId,
+        transactionId: Number(row.transaction_id),
+        date: row.TransactionDate,
+        description: row.description,
+        memo: row.memo,
+        amountUnits: String(row.amount_units),
+        splitAccounts: new Map(),
+        splits: new Map(),
+      };
+      entriesByLineItemId.set(lineItemId, entry);
+    }
+    if (row.split_account_id != null) {
+      const splitLineItemId = Number(row.split_line_item_id);
+      if (splitLineItemId !== lineItemId) {
+        entry.splitAccounts.set(Number(row.split_account_id), row.split_account_name);
+      }
+      entry.splits.set(splitLineItemId, {
+        lineItemId: splitLineItemId,
+        accountId: Number(row.split_account_id),
+        accountName: row.split_account_name,
+        memo: row.split_memo,
+        amountUnits: String(row.split_amount_units),
+        currencyId: Number(row.split_currency_id),
+        currencyCode: row.split_currency_code.trim(),
+        scale: Number(row.split_scale),
+      });
+    }
+  }
+
+  let runningBalance = 0n;
+  const entries = [...entriesByLineItemId.values()].map((entry) => {
+    const amount = BigInt(entry.amountUnits);
+    runningBalance += amount;
+    return {
+      lineItemId: entry.lineItemId,
+      transactionId: entry.transactionId,
+      date: entry.date,
+      description: entry.description,
+      memo: entry.memo,
+      splitAccountNames: [...entry.splitAccounts.values()],
+      splits: [...entry.splits.values()],
+      debitUnits: amount > 0n ? amount.toString() : null,
+      creditUnits: amount < 0n ? (-amount).toString() : null,
+      runningBalanceUnits: runningBalance.toString(),
+    };
+  });
+
+  return { account, entries };
+}
+
 export async function createAccount({ personId, name, description, placeholder = false, parentAccountId, type, currencyId }) {
   const accountName = String(name ?? "").trim();
   const accountDescription = String(description ?? "").trim() || null;

@@ -6,7 +6,64 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { createTransaction, deleteAccount, updateAccount, validateTransaction } = await import("../src/accounting.js");
+const { createTransaction, deleteAccount, listAccountLedger, updateAccount, validateTransaction } = await import("../src/accounting.js");
+
+test("an account ledger groups split accounts and calculates its running balance", async () => {
+  const pool = {
+    async query(sql, params) {
+      if (sql.includes("FROM accounts a")) {
+        assert.deepEqual(params, [7, 2, 2]);
+        return [[{
+          account_id: 3, AccountName: "Checking", description: null, is_placeholder: 0,
+          parent_account_id: 1, AccountType: "asset", account_currency_id: 1,
+          CurrencyAbbreviation: "USD", scale: 2, balance_units: "200", archived_at: null,
+        }]];
+      }
+      if (sql.includes("FROM line_items li")) {
+        assert.deepEqual(params, [3, 7]);
+        const split = (lineItemId, amountUnits, accountId, accountName, memo = null) => ({
+          split_line_item_id: lineItemId, split_amount_units: amountUnits, split_memo: memo,
+          split_account_id: accountId, split_account_name: accountName,
+          split_currency_id: 1, split_currency_code: "USD", split_scale: 2,
+        });
+        return [[
+          { line_item_id: 20, amount_units: "320", memo: null, transaction_id: 10,
+            TransactionDate: "2026-08-01", description: "Deposit", ...split(20, "320", 3, "Checking") },
+          { line_item_id: 20, amount_units: "320", memo: null, transaction_id: 10,
+            TransactionDate: "2026-08-01", description: "Deposit", ...split(22, "-320", 8, "Income") },
+          { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            TransactionDate: "2026-08-02", description: "Card purchase", ...split(21, "-120", 3, "Checking", "Lunch") },
+          { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            TransactionDate: "2026-08-02", description: "Card purchase", ...split(23, "100", 9, "Food") },
+          { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            TransactionDate: "2026-08-02", description: "Card purchase", ...split(24, "20", 10, "Tax") },
+        ]];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  const result = await listAccountLedger(pool, 7, 3);
+  assert.equal(result.account.name, "Checking");
+  assert.deepEqual(result.entries, [
+    { lineItemId: 20, transactionId: 10, date: "2026-08-01", description: "Deposit", memo: null,
+      splitAccountNames: ["Income"], splits: [
+        { lineItemId: 20, accountId: 3, accountName: "Checking", memo: null, amountUnits: "320",
+          currencyId: 1, currencyCode: "USD", scale: 2 },
+        { lineItemId: 22, accountId: 8, accountName: "Income", memo: null, amountUnits: "-320",
+          currencyId: 1, currencyCode: "USD", scale: 2 },
+      ], debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
+    { lineItemId: 21, transactionId: 11, date: "2026-08-02", description: "Card purchase", memo: "Lunch",
+      splitAccountNames: ["Food", "Tax"], splits: [
+        { lineItemId: 21, accountId: 3, accountName: "Checking", memo: "Lunch", amountUnits: "-120",
+          currencyId: 1, currencyCode: "USD", scale: 2 },
+        { lineItemId: 23, accountId: 9, accountName: "Food", memo: null, amountUnits: "100",
+          currencyId: 1, currencyCode: "USD", scale: 2 },
+        { lineItemId: 24, accountId: 10, accountName: "Tax", memo: null, amountUnits: "20",
+          currencyId: 1, currencyCode: "USD", scale: 2 },
+      ], debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
+  ]);
+});
 
 test("transaction creation rejects impossible dates before opening a transaction", async () => {
   let opened = false;

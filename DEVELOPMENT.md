@@ -155,7 +155,9 @@ there are no rejections—a durable `importPlanId`. After explicit approval,
 atomically creates all planned transactions. Identical confirmation retries
 return the stored commit result. `get_transaction_import_plan` reports ready,
 expired, invalidated, or committed state across MCP connections, including the
-preview digest, expiration, compact summary, and stored commit result.
+preview digest, expiration, compact summary, and stored commit result. Expired,
+committed, and invalidated plans become eligible for owner-scoped cleanup 48
+hours after their expiration or terminal timestamp.
 
 New registrations create only the user identity and begin with an empty chart
 of accounts. Clicking an account in the web client opens its editor; the
@@ -178,12 +180,10 @@ to use only the exact `transaction` rate copied into each transaction.
 
 ### Deployment order
 
-Migration 0011 is prepared, but the tracked semantic form has intentionally not
-been regenerated. Decide first whether the operational
-`accounting_import_plans` table belongs in the compiler's exposed accounting
-schema and supply its human-owned meanings if it does. Refresh and review the
-tracked semantic form against a migrated development database before deploying
-the corresponding application code; do not generate it from production.
+The tracked semantic form includes `accounting_import_plans` as authoritative,
+temporary, owner-scoped workflow state. Its raw payload, result, and hash fields
+are private financial data excluded from generic search and ordinary context;
+only exact provider workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Create and verify a recoverable database backup.

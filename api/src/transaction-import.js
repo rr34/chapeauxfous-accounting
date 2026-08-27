@@ -3,6 +3,7 @@ import { withPoolTransaction } from "./db.js";
 import { currencyKey } from "./currencies.js";
 import { decimalToUnits, greatestCommonDivisor } from "./money.js";
 import { validateTransaction } from "./accounting.js";
+import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
 
 const maxTransactions = 250;
 const maxLineItems = 5000;
@@ -560,6 +561,7 @@ function transactionPlanIdentity(plan) {
 export async function previewTransactionImport({ pool, personId, sourceSystem, transactions }) {
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
   return withPoolTransaction(pool, async (connection) => {
+    await pruneOwnerAccountingImportPlans(connection, personId);
     const entries = await analyze(connection, personId, normalized, false);
     if (entries.some((entry) => entry.status === "rejected")) return summarize(normalized, entries);
 

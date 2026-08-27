@@ -71,6 +71,15 @@ const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, ide
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
 const idempotentWrite = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const destructiveWrite = Object.freeze({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
+const planPreviewFields = Object.freeze([
+  "import_plan_id", "owner_person_id", "import_kind", "plan_status", "preview_sha256",
+  "summary_json", "expires_at", "created_at",
+]);
+const planCommitFields = Object.freeze([
+  "import_plan_id", "owner_person_id", "import_kind", "plan_status", "source_system",
+  "payload_sha256", "preview_sha256", "payload_json", "summary_json", "expires_at",
+  "committed_at", "invalidated_at", "invalidation_code", "result_json", "created_at",
+]);
 
 const operations = Object.freeze({
   listCurrencies: {
@@ -119,29 +128,32 @@ const operations = Object.freeze({
   deleteAccount: {
     name: "delete_account",
     purpose: "Preview, commit, and verify deletion of one empty owner-scoped leaf account.",
-    schemaObjects: ["accounts", "line_items", "account_balance_assertions"],
+    schemaObjects: ["accounts", "line_items", "account_balance_assertions", "accounting_import_plans"],
     fields: {
       accounts: ["account_id", "AccountName", "parent_account_id", "owner_person_id"],
       line_items: ["line_item_id", "account_id"],
       account_balance_assertions: ["account_balance_assertion_id", "account_id"],
+      accounting_import_plans: planCommitFields,
     },
   },
   importAccountTree: {
     name: "import_account_tree",
     purpose: "Validate a colon-delimited account hierarchy and save a durable owner-scoped commit plan.",
-    schemaObjects: ["accounts", "currencies"],
+    schemaObjects: ["accounts", "currencies", "accounting_import_plans"],
     fields: {
       accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
       currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
+      accounting_import_plans: planPreviewFields,
     },
   },
   commitAccountTreeImport: {
     name: "commit_account_tree_import",
     purpose: "Commit one previously validated account-tree import plan.",
-    schemaObjects: ["accounts", "currencies"],
+    schemaObjects: ["accounts", "currencies", "accounting_import_plans"],
     fields: {
       accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "source_system", "source_id"],
       currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
+      accounting_import_plans: planCommitFields,
     },
   },
   listTransactions: {
@@ -185,25 +197,27 @@ const operations = Object.freeze({
   importTransactions: {
     name: "import_transactions",
     purpose: "Validate complete source-neutral transactions with nested line items and save a durable import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates"],
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
       line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      accounting_import_plans: planPreviewFields,
     },
   },
   commitTransactionImport: {
     name: "commit_transaction_import",
     purpose: "Commit one previously validated transaction import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates"],
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
       line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      accounting_import_plans: planCommitFields,
     },
   },
   listBalanceAssertions: {

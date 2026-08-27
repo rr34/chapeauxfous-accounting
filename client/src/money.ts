@@ -13,8 +13,8 @@ export function unitsToDecimal(value: string, scale: number): string {
   const digits = (units < 0n ? -units : units).toString().padStart(scale + 1, "0");
   if (scale === 0) return `${sign}${digits}`;
   const whole = digits.slice(0, -scale);
-  const decimals = digits.slice(-scale).replace(/0+$/, "");
-  return decimals ? `${sign}${whole}.${decimals}` : `${sign}${whole}`;
+  const decimals = digits.slice(-scale);
+  return `${sign}${whole}.${decimals}`;
 }
 
 export function parseTags(value: string): Array<{ key: string; value: string }> {
@@ -25,4 +25,3 @@ export function parseTags(value: string): Array<{ key: string; value: string }> 
     return { key: part.slice(0, separator).trim(), value: part.slice(separator + 1).trim() };
   });
 }
-

@@ -19,6 +19,7 @@ function deletionPool() {
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params = []) {
+          if (sql.startsWith("DELETE FROM accounting_import_plans")) return [{ affectedRows: 0 }];
           if (sql.includes("INSERT INTO accounting_import_plans")) {
             const [id, owner, payloadHash, previewHash, payload, summary, expiresAt] = params;
             state.plans.set(id, { import_plan_id: id, owner_person_id: owner, import_kind: "account_delete",

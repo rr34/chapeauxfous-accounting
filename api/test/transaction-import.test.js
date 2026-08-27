@@ -55,6 +55,7 @@ function memoryPool() {
         },
         release() {},
         async query(sql, params = []) {
+          if (sql.startsWith("DELETE FROM accounting_import_plans")) return [{ affectedRows: 0 }];
           if (sql.includes("FROM accounts a") && sql.includes("JOIN currencies c")) {
             return [state.accounts.map((account) => ({
               ...account,

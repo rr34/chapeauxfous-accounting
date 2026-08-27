@@ -8,7 +8,7 @@ import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
-  createAccount, createTransaction, deleteAccount, getTransaction, listAccounts,
+  createAccount, createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
   listTransactions, updateAccount, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
@@ -75,6 +75,10 @@ app.delete("/api/auth/tokens/:tokenId", requireAuth, async (req, res, next) => {
 
 app.get("/api/accounts", requireAuth, async (req, res, next) => {
   try { res.json({ accounts: await listAccounts(pool, req.auth.personId) }); } catch (error) { next(error); }
+});
+
+app.get("/api/accounts/:accountId/ledger", requireAuth, async (req, res, next) => {
+  try { res.json(await listAccountLedger(pool, req.auth.personId, req.params.accountId)); } catch (error) { next(error); }
 });
 
 app.post("/api/accounts", requireAuth, async (req, res, next) => {

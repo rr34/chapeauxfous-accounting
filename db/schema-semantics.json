@@ -8,9 +8,9 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 9,
-    "schemaFingerprint": "62bf10422ef0bfc715dd1d2f6b0945bc63aa9b3e8c93b026b878b2c01f15762b",
-    "extractedAt": "2026-08-24T12:17:31.362Z"
+    "schemaVersion": 11,
+    "schemaFingerprint": "101f4850c6a8e474d28c63810f9464d09d92cfea2b128ee8435db29f22547e83",
+    "extractedAt": "2026-08-27T20:59:50.879Z"
   },
   "instructions": {
     "humanOwned": "Fill only semantics properties. Null, empty arrays, and empty objects are intentional blanks.",
@@ -178,7 +178,7 @@
             "inheritsFrom": null,
             "meaning": "Calendar date whose end-of-day balance is known.",
             "units": null,
-            "format": null,
+            "format": "YYYY-MM-DD accounting calendar date without a time zone",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],
@@ -204,8 +204,8 @@
           "semantics": {
             "inheritsFrom": null,
             "meaning": "Signed known balance in the account currency's smallest native units.",
-            "units": null,
-            "format": null,
+            "units": "Signed integer native units interpreted using the referenced account currency's scale.",
+            "format": "base-10 integer",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],
@@ -238,6 +238,304 @@
           }
         }
       }
+    },
+    "accounting_import_plans": {
+      "mechanics": {
+        "present": true,
+        "kind": "table",
+        "definition": null,
+        "indexes": [
+          {
+            "name": "accounting_import_plans_expires_IDX",
+            "columns": ["expires_at"],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "accounting_import_plans_owner_created_IDX",
+            "columns": ["owner_person_id", "created_at", "import_plan_id"],
+            "unique": false,
+            "partial": false,
+            "origin": "BTREE"
+          },
+          {
+            "name": "PRIMARY",
+            "columns": ["import_plan_id"],
+            "unique": true,
+            "partial": false,
+            "origin": "BTREE"
+          }
+        ]
+      },
+      "semantics": {
+        "purpose": "Store durable owner-scoped provider plans that bind an approved preview to one exact account-tree import, transaction import, or account deletion commit.",
+        "rowMeaning": "One temporary authoritative workflow plan that records the exact validated input, preview binding, lifecycle state, and optional commit result.",
+        "sourceOfTruth": true,
+        "derivedFrom": [],
+        "synonyms": ["accounting plan", "import plan", "deletion plan", "confirmation plan"],
+        "keywords": ["preview", "approval", "commit", "expiration", "invalidation", "retry"],
+        "routingWeight": 0.6,
+        "importantRules": [
+          "A ready, unexpired, owner-scoped plan is the authoritative record permitting its exact provider commit; there is no separate commit-authorization record.",
+          "Plans and their fields may be read only through owner-scoped provider workflow tools and stable plan references.",
+          "Raw payload_json, result_json, and hash values are never generic search evidence or ordinary context; tools may return only exact bounded projections defined by their output schemas.",
+          "Only import_plan_id, owner_person_id for server-side isolation, import_kind, plan_status, source_system, and lifecycle timestamps are queryable or filterable. JSON and hash fields are not searchable.",
+          "A plan is eligible for pruning 48 hours after it expires, commits, or is invalidated."
+        ],
+        "sensitivity": "Private financial workflow data; expose only through exact authenticated owner-scoped provider contracts."
+      },
+      "fields": {
+        "import_plan_id": {
+          "mechanics": {"present": true, "name": "import_plan_id", "ordinal": 0, "type": "char(36)", "nullable": false, "default": null, "primaryKeyPosition": 1, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Opaque stable provider identifier that binds status reads and a later commit to this exact plan.",
+            "units": null,
+            "format": "UUID string",
+            "allowedValueMeanings": {},
+            "synonyms": ["plan ID"],
+            "keywords": ["opaque reference", "commit binding"],
+            "routingWeight": 0.8,
+            "examples": [],
+            "importantRules": ["Never infer, alter, or reuse this identifier for a different workflow."],
+            "sensitivity": "Private owner-scoped workflow identifier; another owner's identifier is reported as not found."
+          }
+        },
+        "owner_person_id": {
+          "mechanics": {"present": true, "name": "owner_person_id", "ordinal": 1, "type": "int(11)", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Person whose accounting workflow owns this plan and is the only person allowed to read or commit it.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": [],
+            "keywords": ["owner", "tenant isolation"],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": ["Use only for server-side authorization and isolation."],
+            "sensitivity": "Private tenant identifier; never expose as ordinary model context."
+          }
+        },
+        "import_kind": {
+          "mechanics": {"present": true, "name": "import_kind", "ordinal": 2, "type": "enum('account_tree','transactions','account_delete')", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": ["account_tree", "transactions", "account_delete"]},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Closed provider workflow family whose exact preview and commit contract owns this plan.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {
+              "account_tree": "A complete account-tree import plan.",
+              "transactions": "A complete transaction-batch import plan.",
+              "account_delete": "A verified single-account permanent-deletion plan."
+            },
+            "synonyms": ["plan kind", "workflow kind"],
+            "keywords": [],
+            "routingWeight": 0.8,
+            "examples": [],
+            "importantRules": ["Only the matching workflow's status and commit services may consume the row."],
+            "sensitivity": "Private financial workflow metadata."
+          }
+        },
+        "plan_status": {
+          "mechanics": {"present": true, "name": "plan_status", "ordinal": 3, "type": "enum('ready','committed','invalidated')", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": ["ready", "committed", "invalidated"]},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stored workflow state; expiration is derived separately by comparing expires_at with the current UTC time.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {
+              "ready": "The exact plan may be committed if it is unexpired and passes revalidation.",
+              "committed": "The exact plan completed and its bounded result was stored.",
+              "invalidated": "The plan can no longer be committed and a new preview is required."
+            },
+            "synonyms": ["plan state"],
+            "keywords": ["ready", "committed", "invalidated", "expired"],
+            "routingWeight": 0.8,
+            "examples": [],
+            "importantRules": ["An expired plan remains stored as ready but is reported as expired by the provider."],
+            "sensitivity": "Private financial workflow metadata."
+          }
+        },
+        "source_system": {
+          "mechanics": {"present": true, "name": "source_system", "ordinal": 4, "type": "varchar(32)", "nullable": true, "default": "NULL", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Optional external-system namespace for a transaction import; null for workflows that do not use a source namespace.",
+            "units": null,
+            "format": null,
+            "allowedValueMeanings": {},
+            "synonyms": ["source namespace"],
+            "keywords": ["import source"],
+            "routingWeight": 0.6,
+            "examples": [],
+            "importantRules": ["May be filtered only within the authenticated owner's plans."],
+            "sensitivity": "Private financial provenance metadata."
+          }
+        },
+        "payload_sha256": {
+          "mechanics": {"present": true, "name": "payload_sha256", "ordinal": 5, "type": "char(64)", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Integrity digest of the exact normalized payload_json stored for commit revalidation.",
+            "units": null,
+            "format": "lowercase hexadecimal SHA-256",
+            "allowedValueMeanings": {},
+            "synonyms": ["payload digest"],
+            "keywords": ["integrity"],
+            "routingWeight": 0.3,
+            "examples": [],
+            "importantRules": ["Not searchable or filterable; a mismatch invalidates the plan."],
+            "sensitivity": "Server-only integrity metadata for private financial data."
+          }
+        },
+        "preview_sha256": {
+          "mechanics": {"present": true, "name": "preview_sha256", "ordinal": 6, "type": "char(64)", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Digest binding the provider's validated preview to the durable plan reported for confirmation.",
+            "units": null,
+            "format": "lowercase hexadecimal SHA-256",
+            "allowedValueMeanings": {},
+            "synonyms": ["preview digest"],
+            "keywords": ["confirmation binding"],
+            "routingWeight": 0.5,
+            "examples": [],
+            "importantRules": ["May be returned by exact plan tools but is not searchable or filterable."],
+            "sensitivity": "Private workflow integrity metadata."
+          }
+        },
+        "payload_json": {
+          "mechanics": {"present": true, "name": "payload_json", "ordinal": 7, "type": "longtext", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Exact normalized private financial input that the provider revalidates and applies during commit.",
+            "units": null,
+            "format": "JSON encoded with the owning workflow's versioned internal shape",
+            "allowedValueMeanings": {},
+            "synonyms": ["stored plan payload"],
+            "keywords": [],
+            "routingWeight": 0.1,
+            "examples": [],
+            "importantRules": ["Never expose the raw value through generic search, schema description results, context views, or ordinary model context."],
+            "sensitivity": "Server-only private financial data containing complete proposed accounting changes."
+          }
+        },
+        "summary_json": {
+          "mechanics": {"present": true, "name": "summary_json", "ordinal": 8, "type": "longtext", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Compact numerical preview summary stored for bounded status reads and confirmation reporting.",
+            "units": null,
+            "format": "JSON object with the owning workflow's exact summary schema",
+            "allowedValueMeanings": {},
+            "synonyms": ["plan summary"],
+            "keywords": ["created count", "reused count", "rejected count"],
+            "routingWeight": 0.6,
+            "examples": [],
+            "importantRules": ["Only exact owner-scoped plan tools may return its validated bounded projection; the raw database field is not searchable."],
+            "sensitivity": "Private financial workflow summary."
+          }
+        },
+        "expires_at": {
+          "mechanics": {"present": true, "name": "expires_at", "ordinal": 9, "type": "datetime(6)", "nullable": false, "default": null, "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "UTC instant after which the plan cannot be committed and is reported as expired.",
+            "units": null,
+            "format": "UTC date-time with microsecond precision",
+            "allowedValueMeanings": {},
+            "synonyms": ["plan expiration"],
+            "keywords": ["expired"],
+            "routingWeight": 0.8,
+            "examples": [],
+            "importantRules": ["An expired plan is eligible for pruning 48 hours after this instant."],
+            "sensitivity": "Private workflow lifecycle metadata."
+          }
+        },
+        "committed_at": {
+          "mechanics": {"present": true, "name": "committed_at", "ordinal": 10, "type": "datetime(6)", "nullable": true, "default": "NULL", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "UTC instant when this exact plan successfully committed, or null before commitment.",
+            "units": null,
+            "format": "UTC date-time with microsecond precision",
+            "allowedValueMeanings": {},
+            "synonyms": ["commit time"],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": ["A committed plan is eligible for pruning 48 hours after this instant."],
+            "sensitivity": "Private workflow lifecycle metadata."
+          }
+        },
+        "invalidated_at": {
+          "mechanics": {"present": true, "name": "invalidated_at", "ordinal": 11, "type": "datetime(6)", "nullable": true, "default": "NULL", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "UTC instant when integrity or database-state revalidation made this plan unusable, or null while it remains valid or committed.",
+            "units": null,
+            "format": "UTC date-time with microsecond precision",
+            "allowedValueMeanings": {},
+            "synonyms": ["invalidation time"],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": ["An invalidated plan is eligible for pruning 48 hours after this instant."],
+            "sensitivity": "Private workflow lifecycle metadata."
+          }
+        },
+        "invalidation_code": {
+          "mechanics": {"present": true, "name": "invalidation_code", "ordinal": 12, "type": "varchar(64)", "nullable": true, "default": "NULL", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stable provider reason code explaining why a plan was invalidated, or null if it was not invalidated.",
+            "units": null,
+            "format": "uppercase machine-readable provider code",
+            "allowedValueMeanings": {},
+            "synonyms": ["invalidation reason"],
+            "keywords": ["database state changed", "integrity failure"],
+            "routingWeight": 0.6,
+            "examples": [],
+            "importantRules": ["The owning workflow defines the code; clients must not infer uncontracted behavior from its spelling."],
+            "sensitivity": "Private workflow validation metadata."
+          }
+        },
+        "result_json": {
+          "mechanics": {"present": true, "name": "result_json", "ordinal": 13, "type": "longtext", "nullable": true, "default": "NULL", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Stored bounded provider result for a successful commit, used to make repeated commit calls idempotent.",
+            "units": null,
+            "format": "JSON object with the owning workflow's exact committed-result schema",
+            "allowedValueMeanings": {},
+            "synonyms": ["stored commit result"],
+            "keywords": ["idempotent replay"],
+            "routingWeight": 0.3,
+            "examples": [],
+            "importantRules": ["Never expose the raw field through generic search; exact owner-scoped workflow tools may return only its validated bounded projection."],
+            "sensitivity": "Server-only private financial result data except for exact provider-authorized projections."
+          }
+        },
+        "created_at": {
+          "mechanics": {"present": true, "name": "created_at", "ordinal": 14, "type": "datetime(6)", "nullable": false, "default": "current_timestamp(6)", "primaryKeyPosition": 0, "generated": false, "hidden": false, "allowedValues": []},
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "UTC instant when the provider persisted the validated preview plan.",
+            "units": null,
+            "format": "UTC date-time with microsecond precision",
+            "allowedValueMeanings": {},
+            "synonyms": ["plan creation time"],
+            "keywords": [],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": ["May be used with owner_person_id for server-side lifecycle inspection."],
+            "sensitivity": "Private workflow lifecycle metadata."
+          }
+        }
+      },
+      "relationships": {}
     },
     "accounts": {
       "mechanics": {
@@ -1089,8 +1387,8 @@
           "semantics": {
             "inheritsFrom": null,
             "meaning": "Signed integer amount in the referenced account's smallest native currency units.",
-            "units": null,
-            "format": null,
+            "units": "Signed integer native units interpreted using the referenced account currency's scale.",
+            "format": "base-10 integer",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],
@@ -1894,7 +2192,7 @@
             "inheritsFrom": null,
             "meaning": "Accounting calendar date of the transaction.",
             "units": null,
-            "format": null,
+            "format": "YYYY-MM-DD accounting calendar date without a time zone",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],
@@ -2156,6 +2454,7 @@
         "routingWeight": 0.8,
         "importantRules": [
           "Transaction rates use positive integer ratios rather than floating-point decimals.",
+          "Convert a signed from-currency amount to target native units by multiplying by to_units and dividing by from_units.",
           "Each foreign account currency used by a transaction needs exactly one rate into its valuation currency.",
           "Reference rates never determine posted accounting values unless explicitly copied into a transaction rate."
         ],
@@ -2316,8 +2615,8 @@
           "semantics": {
             "inheritsFrom": null,
             "meaning": "Positive integer source-currency units in the exact conversion ratio.",
-            "units": null,
-            "format": null,
+            "units": "Positive integer native units interpreted using from_currency_id's scale.",
+            "format": "base-10 integer ratio denominator",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],
@@ -2370,8 +2669,8 @@
           "semantics": {
             "inheritsFrom": null,
             "meaning": "Positive integer target-currency units in the exact conversion ratio.",
-            "units": null,
-            "format": null,
+            "units": "Positive integer native units interpreted using to_currency_id's scale.",
+            "format": "base-10 integer ratio numerator",
             "allowedValueMeanings": {},
             "synonyms": [],
             "keywords": [],

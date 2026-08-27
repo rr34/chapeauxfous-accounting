@@ -45,6 +45,7 @@ function memoryPool(initialAccounts = []) {
         },
         release() {},
         async query(sql, params = []) {
+          if (sql.startsWith("DELETE FROM accounting_import_plans")) return [{ affectedRows: 0 }];
           if (sql.includes("INSERT INTO accounting_import_plans")) {
             const [planId, ownerPersonId, payloadSha256, previewSha256, payloadJson,
               summaryJson, expiresAt] = params;

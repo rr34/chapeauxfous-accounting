@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { createOrMatchUserCurrencies, currencyKey } from "./currencies.js";
+import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
 
 const allowedTypes = new Set(["asset", "liability", "equity", "income", "expense"]);
 const importSourceSystem = "account_tree";
@@ -427,6 +428,7 @@ async function loadAccountTreePlan(connection, personId, importPlanId, { lock = 
 
 export async function previewAccountTreeImport({ pool, personId, accounts, currencies = [] }) {
   return withPoolTransaction(pool, async (connection) => {
+    await pruneOwnerAccountingImportPlans(connection, personId);
     const preview = await importAccountTreeWithConnection({ connection, personId, accounts, currencies, dryRun: true });
     const normalizedPayload = {
       accounts: preview.accounts.map((account) => ({

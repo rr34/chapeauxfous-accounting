@@ -45,6 +45,28 @@ export type Account = {
   archivedAt: string | null;
 };
 
+export type AccountLedgerEntry = {
+  lineItemId: number;
+  transactionId: number;
+  date: string;
+  description: string | null;
+  memo: string | null;
+  splitAccountNames: string[];
+  splits: Array<{
+    lineItemId: number;
+    accountId: number;
+    accountName: string;
+    memo: string | null;
+    amountUnits: string;
+    currencyId: number;
+    currencyCode: string;
+    scale: number;
+  }>;
+  debitUnits: string | null;
+  creditUnits: string | null;
+  runningBalanceUnits: string;
+};
+
 export type BalanceAssertion = {
   id: number;
   accountId: number;

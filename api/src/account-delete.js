@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { deleteAccount, inspectAccountDeletion } from "./accounting.js";
+import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
 
 const failureMetadata = Object.freeze({
   ACCOUNT_DELETE_PLAN_NOT_FOUND: { status: 404, recoverable: true, requiredAction: "RUN_NEW_DELETE_PREVIEW" },
@@ -80,6 +81,7 @@ function identity(row) {
 
 export async function previewAccountDeletion({ pool, personId, accountId }) {
   return withPoolTransaction(pool, async (connection) => {
+    await pruneOwnerAccountingImportPlans(connection, personId);
     const account = await inspectAccountDeletion({ personId, accountId }, async (work) => work(connection));
     const payloadJson = JSON.stringify({ accountId: account.accountId });
     const summary = { accountId: account.accountId, accountName: account.name };

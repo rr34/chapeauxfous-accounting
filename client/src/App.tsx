@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
 import type {
-  Account, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
+  Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CurrencyType, TransactionDetail, TransactionSummary, User,
 } from "./types";
 
@@ -19,7 +19,8 @@ function errorMessage(error: unknown) {
 
 type AuthProps = { onAuthenticated: (token: string, user: User) => void };
 
-type AccountTreeNode = Account & { children: AccountTreeNode[] };
+type AccountTreeBalance = { currencyId: number; currencyCode: string; scale: number; units: string };
+type AccountTreeNode = Account & { children: AccountTreeNode[]; subtreeBalances: AccountTreeBalance[] };
 
 function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
   const accountIds = new Set(accounts.map((account) => account.id));
@@ -36,18 +37,38 @@ function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
 
   const addChildren = (account: Account, ancestors: Set<number>): AccountTreeNode => {
     const nextAncestors = new Set(ancestors).add(account.id);
+    const children = (childrenByParentId.get(account.id) ?? [])
+      .filter((child) => !nextAncestors.has(child.id))
+      .map((child) => addChildren(child, nextAncestors));
+    const balancesByCurrency = new Map<number, AccountTreeBalance>();
+    balancesByCurrency.set(account.currencyId, {
+      currencyId: account.currencyId,
+      currencyCode: account.currencyCode,
+      scale: account.scale,
+      units: account.balanceUnits,
+    });
+    for (const child of children) {
+      for (const balance of child.subtreeBalances) {
+        const current = balancesByCurrency.get(balance.currencyId);
+        balancesByCurrency.set(balance.currencyId, current
+          ? { ...current, units: (BigInt(current.units) + BigInt(balance.units)).toString() }
+          : balance);
+      }
+    }
     return {
       ...account,
-      children: (childrenByParentId.get(account.id) ?? [])
-        .filter((child) => !nextAncestors.has(child.id))
-        .map((child) => addChildren(child, nextAncestors)),
+      children,
+      subtreeBalances: [...balancesByCurrency.values()],
     };
   };
 
   return (childrenByParentId.get(null) ?? []).map((account) => addChildren(account, new Set()));
 }
 
-function AccountTree({ accounts, onEdit }: { accounts: Account[]; onEdit: (account: Account) => void }) {
+function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
+  accounts: Account[]; selectedAccountId: number | null;
+  onSelect: (account: Account) => void; onEdit: (account: Account) => void;
+}) {
   const [expandedAccountIds, setExpandedAccountIds] = useState<Set<number>>(() => new Set());
   const tree = useMemo(() => buildAccountTree(accounts), [accounts]);
 
@@ -70,11 +91,17 @@ function AccountTree({ accounts, onEdit }: { accounts: Account[]; onEdit: (accou
               aria-label={`${isExpanded ? "Collapse" : "Expand"} ${node.name}`}
               onClick={() => toggleExpanded(node.id)}><span aria-hidden="true">›</span></button>
           : <span className="account-disclosure-spacer" />}
-        <button type="button" className="account-row" aria-label={`Edit account ${node.name}`} onClick={() => onEdit(node)}>
+        <button type="button" className={`account-row ${selectedAccountId === node.id ? "selected" : ""}`}
+          aria-label={`View ${node.name} ledger`} onClick={() => onSelect(node)}>
           <div><strong>{node.name}</strong><span>{node.type} · {node.currencyCode}{node.placeholder ? " · placeholder" : ""}</span>
             {node.description && <small>{node.description}</small>}</div>
-          <b>{unitsToDecimal(node.balanceUnits, node.scale)}</b>
+          <div className="account-balances">{node.subtreeBalances.map((balance) => <b key={balance.currencyId}>
+            {unitsToDecimal(balance.units, balance.scale)}
+            {node.subtreeBalances.length > 1 && <em>{balance.currencyCode}</em>}
+          </b>)}</div>
         </button>
+        <button type="button" className="account-edit-button" aria-label={`Edit account ${node.name}`}
+          onClick={() => onEdit(node)}>✎</button>
       </div>
       {isExpanded && <div role="group" aria-label={`${node.name} subaccounts`}>
         {node.children.map((child) => renderNode(child, depth + 1))}
@@ -210,9 +237,10 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   </div>;
 }
 
-function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
+function AccountPanel({ accounts, assertions, currencies, selectedAccountId, token, onSelectAccount, onChanged }: {
   accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[];
-  token: string; onChanged: () => Promise<void>;
+  selectedAccountId: number | null; token: string;
+  onSelectAccount: (account: Account) => void; onChanged: () => Promise<void>;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -298,7 +326,8 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
-    <AccountTree accounts={accounts} onEdit={setEditingAccount} />
+    <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}
+      onSelect={onSelectAccount} onEdit={setEditingAccount} />
     <section className="currencies-panel">
       <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
         <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
@@ -355,14 +384,17 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
 type EditableLine = { accountId: string; amount: string; memo: string; tags: string };
 type EditableRate = { fromAmount: string; toAmount: string };
 
-function TransactionComposer({ accounts, currencies, token, onCreated }: {
-  accounts: Account[]; currencies: Currency[]; token: string; onCreated: () => Promise<void>;
+function TransactionComposer({ accounts, currencies, initialAccountId, token, onCreated }: {
+  accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
+  token: string; onCreated: () => Promise<void>;
 }) {
+  const initialAccount = accounts.find((account) => account.id === initialAccountId);
   const [description, setDescription] = useState("");
   const [date, setDate] = useState(today());
-  const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">("");
+  const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(initialAccount?.currencyId ?? "");
   const [lines, setLines] = useState<EditableLine[]>([
-    { accountId: "", amount: "", memo: "", tags: "" }, { accountId: "", amount: "", memo: "", tags: "" },
+    { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "", tags: "" },
+    { accountId: "", amount: "", memo: "", tags: "" },
   ]);
   const [rates, setRates] = useState<Record<number, EditableRate>>({});
   const [error, setError] = useState("");
@@ -395,14 +427,16 @@ function TransactionComposer({ accounts, currencies, token, onCreated }: {
       });
       await api("/transactions", { method: "POST", body: JSON.stringify({ description, transactionDate: date,
         valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: payloadRates, post: true }) }, token);
-      setDescription(""); setDate(today()); setLines([{ accountId: "", amount: "", memo: "", tags: "" }, { accountId: "", amount: "", memo: "", tags: "" }]);
+      setDescription(""); setDate(today()); setLines([
+        { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "", tags: "" },
+        { accountId: "", amount: "", memo: "", tags: "" },
+      ]);
       setRates({}); await onCreated();
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusy(false); }
   }
 
-  return <section className="composer card">
-    <div className="section-heading"><div><p className="eyebrow">New entry</p><h2>Balanced transaction</h2></div></div>
+  return <section className="composer">
     <form onSubmit={submit}>
       <div className="transaction-meta"><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
         <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What happened?" /></label>
@@ -433,6 +467,21 @@ function TransactionComposer({ accounts, currencies, token, onCreated }: {
   </section>;
 }
 
+function TransactionComposerDialog({ accounts, currencies, initialAccountId, token, onCreated, onClose }: {
+  accounts: Account[]; currencies: Currency[]; initialAccountId: number | null; token: string;
+  onCreated: () => Promise<void>; onClose: () => void;
+}) {
+  return <div className="dialog-backdrop" role="presentation">
+    <section className="agent-dialog transaction-dialog" role="dialog" aria-modal="true" aria-labelledby="transaction-dialog-title">
+      <div className="dialog-heading"><div><p className="eyebrow">New entry</p>
+        <h2 id="transaction-dialog-title">Balanced transaction</h2></div>
+        <button className="dialog-close" aria-label="Close transaction composer" onClick={onClose}>×</button></div>
+      <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={initialAccountId}
+        token={token} onCreated={onCreated} />
+    </section>
+  </div>;
+}
+
 function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
   transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void;
   onVerify: () => void; verification: string;
@@ -447,6 +496,80 @@ function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
       {selected.lineItems.map((line) => <div className="detail-line" key={line.id}><div><strong>{line.accountName}</strong><small>{line.memo}</small>
         {line.tags.length > 0 && <div className="tag-list">{line.tags.map((tag) => <span key={`${tag.key}:${tag.value}`}>{tag.key}:{tag.value}</span>)}</div>}</div>
         <b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
+  </section>;
+}
+
+function AccountRegister({ account, entries, loading, error, onShowAll, onNewTransaction }: {
+  account: Account; entries: AccountLedgerEntry[]; loading: boolean; error: string;
+  onShowAll: () => void; onNewTransaction: () => void;
+}) {
+  const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
+  const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
+  const debitIncreases = account.type === "asset" || account.type === "expense";
+  const debitEffect = debitIncreases ? "increases" : "decreases";
+  const creditEffect = debitIncreases ? "decreases" : "increases";
+
+  useEffect(() => { setActiveTransactionId(null); }, [account.id]);
+
+  function activateTransaction(transactionId: number) {
+    if (view === "auto-split") setActiveTransactionId(transactionId);
+  }
+
+  return <section className="account-register card">
+    <div className="section-heading"><div><p className="eyebrow">Account register</p><h2>{account.name}</h2>
+      <p className="register-subtitle">Posted transactions · {account.currencyCode}</p></div>
+      <button className="secondary" onClick={onShowAll}>All activity</button></div>
+    <div className="register-view-controls" role="group" aria-label="Register view">
+      <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
+        onClick={() => setView("basic")}>Basic Ledger</button>
+      <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
+        onClick={() => setView("auto-split")}>Auto-Split Ledger</button>
+      <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
+        onClick={() => setView("journal")}>Transaction Journal</button>
+    </div>
+    {error && <p className="error">{error}</p>}
+    {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
+      : !error && entries.length === 0 ? <p className="register-message">No posted transactions in this account.</p>
+      : !error && <div className="register-table-wrap"><table className="register-table">
+        <thead><tr><th>Date</th><th>Description</th><th>Split account</th>
+          <th>Debit <span>({debitEffect} {account.type})</span></th>
+          <th>Credit <span>({creditEffect} {account.type})</span></th><th>Running balance</th></tr></thead>
+        <tbody>{entries.map((entry) => {
+          const splitLabel = entry.splitAccountNames.length === 0 ? "—"
+            : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split transaction";
+          const expanded = view === "journal" || (view === "auto-split" && activeTransactionId === entry.transactionId);
+          return <Fragment key={entry.lineItemId}>
+            <tr className={`register-entry-row ${view === "auto-split" ? "selectable" : ""} ${expanded ? "expanded" : ""}`}
+              tabIndex={view === "auto-split" ? 0 : undefined}
+              aria-expanded={view === "auto-split" ? expanded : undefined}
+              onClick={() => activateTransaction(entry.transactionId)}
+              onKeyDown={(event) => {
+                if (view === "auto-split" && (event.key === "Enter" || event.key === " ")) {
+                  event.preventDefault(); activateTransaction(entry.transactionId);
+                }
+              }}>
+              <td>{entry.date}</td>
+              <td><strong>{entry.description || "Untitled transaction"}</strong>
+                {entry.memo && <small>{entry.memo}</small>}</td>
+              <td>{splitLabel}{entry.splitAccountNames.length > 1 && <small>{entry.splitAccountNames.join(", ")}</small>}</td>
+              <td className={`amount ${debitIncreases ? "increase-effect" : "decrease-effect"}`}>
+                {entry.debitUnits == null ? "" : unitsToDecimal(entry.debitUnits, account.scale)}</td>
+              <td className={`amount ${debitIncreases ? "decrease-effect" : "increase-effect"}`}>
+                {entry.creditUnits == null ? "" : unitsToDecimal(entry.creditUnits, account.scale)}</td>
+              <td className="amount balance">{unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
+            </tr>
+            {expanded && <tr className="register-splits-row"><td colSpan={6}>
+              <div className="register-splits" aria-label={`Splits for ${entry.description || "untitled transaction"}`}>
+                {entry.splits.map((split) => <div className="register-split" key={split.lineItemId}>
+                  <div><strong>{split.accountName}</strong>{split.memo && <small>{split.memo}</small>}</div>
+                  <span>{unitsToDecimal(split.amountUnits, split.scale)} {split.currencyCode}</span>
+                </div>)}
+              </div>
+            </td></tr>}
+          </Fragment>;
+        })}</tbody>
+      </table></div>}
+    <div className="register-actions"><button className="primary" onClick={onNewTransaction}>＋ New transaction</button></div>
   </section>;
 }
 
@@ -557,6 +680,12 @@ export default function App() {
   const [assertions, setAssertions] = useState<BalanceAssertion[]>([]);
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
   const [selected, setSelected] = useState<TransactionDetail | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
+  const [accountLedgerEntries, setAccountLedgerEntries] = useState<AccountLedgerEntry[]>([]);
+  const [accountLedgerLoading, setAccountLedgerLoading] = useState(false);
+  const [accountLedgerError, setAccountLedgerError] = useState("");
+  const [accountLedgerRefresh, setAccountLedgerRefresh] = useState(0);
+  const [showTransactionComposer, setShowTransactionComposer] = useState(false);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -582,10 +711,32 @@ export default function App() {
   }
   useEffect(() => { if (token && user) void refresh(); }, [token, user]);
 
+  useEffect(() => {
+    if (!token || selectedAccountId == null) {
+      setAccountLedgerEntries([]); setAccountLedgerError(""); setAccountLedgerLoading(false); return;
+    }
+    let active = true;
+    setAccountLedgerLoading(true); setAccountLedgerError("");
+    api<{ entries: AccountLedgerEntry[] }>(`/accounts/${selectedAccountId}/ledger`, {}, token)
+      .then((result) => { if (active) setAccountLedgerEntries(result.entries); })
+      .catch((nextError) => { if (active) { setAccountLedgerEntries([]); setAccountLedgerError(errorMessage(nextError)); } })
+      .finally(() => { if (active) setAccountLedgerLoading(false); });
+    return () => { active = false; };
+  }, [token, selectedAccountId, accountLedgerRefresh]);
+
+  useEffect(() => {
+    if (selectedAccountId != null && !accounts.some((account) => account.id === selectedAccountId)) setSelectedAccountId(null);
+  }, [accounts, selectedAccountId]);
+
   function authenticated(nextToken: string, nextUser: User) {
     localStorage.setItem(tokenKey, nextToken); setToken(nextToken); setUser(nextUser);
   }
-  function logout() { localStorage.removeItem(tokenKey); setToken(null); setUser(null); }
+  function logout() { localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null); }
+  async function refreshAfterTransaction() {
+    await refresh();
+    setAccountLedgerRefresh((current) => current + 1);
+    setShowTransactionComposer(false);
+  }
   async function selectTransaction(id: number) {
     if (!token) return;
     const result = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token); setSelected(result.transaction);
@@ -601,13 +752,21 @@ export default function App() {
 
   if (loading) return <div className="loading">Loading accounting…</div>;
   if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
+  const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <button className="header-action" onClick={() => setShowAgentAccess(true)}>Agent access</button>
     <button className="link-button" onClick={logout}>Sign out</button></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
-      token={token} onChanged={refresh} />
-      <div className="main-column"><TransactionComposer accounts={accounts} currencies={currencies} token={token} onCreated={refresh} />
-        <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)} onVerify={() => void verify()} verification={verification} /></div></main>
+      selectedAccountId={selectedAccountId} token={token} onSelectAccount={(account) => setSelectedAccountId(account.id)} onChanged={refresh} />
+      <div className="main-column">{selectedAccount
+          ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} loading={accountLedgerLoading}
+              error={accountLedgerError} onShowAll={() => setSelectedAccountId(null)}
+              onNewTransaction={() => setShowTransactionComposer(true)} />
+          : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
+              onVerify={() => void verify()} verification={verification} />}</div></main>
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
+    {showTransactionComposer && <TransactionComposerDialog accounts={accounts} currencies={currencies}
+      initialAccountId={selectedAccount && !selectedAccount.placeholder && !selectedAccount.archivedAt ? selectedAccount.id : null}
+      token={token} onCreated={refreshAfterTransaction} onClose={() => setShowTransactionComposer(false)} />}
   </div>;
 }
