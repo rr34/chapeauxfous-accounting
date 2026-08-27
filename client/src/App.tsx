@@ -19,6 +19,72 @@ function errorMessage(error: unknown) {
 
 type AuthProps = { onAuthenticated: (token: string, user: User) => void };
 
+type AccountTreeNode = Account & { children: AccountTreeNode[] };
+
+function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
+  const accountIds = new Set(accounts.map((account) => account.id));
+  const childrenByParentId = new Map<number | null, Account[]>();
+
+  for (const account of accounts) {
+    const parentId = account.parentAccountId != null && accountIds.has(account.parentAccountId)
+      ? account.parentAccountId
+      : null;
+    const siblings = childrenByParentId.get(parentId) ?? [];
+    siblings.push(account);
+    childrenByParentId.set(parentId, siblings);
+  }
+
+  const addChildren = (account: Account, ancestors: Set<number>): AccountTreeNode => {
+    const nextAncestors = new Set(ancestors).add(account.id);
+    return {
+      ...account,
+      children: (childrenByParentId.get(account.id) ?? [])
+        .filter((child) => !nextAncestors.has(child.id))
+        .map((child) => addChildren(child, nextAncestors)),
+    };
+  };
+
+  return (childrenByParentId.get(null) ?? []).map((account) => addChildren(account, new Set()));
+}
+
+function AccountTree({ accounts, onEdit }: { accounts: Account[]; onEdit: (account: Account) => void }) {
+  const [expandedAccountIds, setExpandedAccountIds] = useState<Set<number>>(() => new Set());
+  const tree = useMemo(() => buildAccountTree(accounts), [accounts]);
+
+  function toggleExpanded(accountId: number) {
+    setExpandedAccountIds((current) => {
+      const next = new Set(current);
+      if (next.has(accountId)) next.delete(accountId);
+      else next.add(accountId);
+      return next;
+    });
+  }
+
+  function renderNode(node: AccountTreeNode, depth: number) {
+    const hasChildren = node.children.length > 0;
+    const isExpanded = hasChildren && expandedAccountIds.has(node.id);
+    return <div className="account-tree-item" key={node.id}>
+      <div className="account-tree-row" style={{ paddingInlineStart: `${depth * 0.9}rem` }}>
+        {hasChildren
+          ? <button type="button" className="account-disclosure" aria-expanded={isExpanded}
+              aria-label={`${isExpanded ? "Collapse" : "Expand"} ${node.name}`}
+              onClick={() => toggleExpanded(node.id)}><span aria-hidden="true">›</span></button>
+          : <span className="account-disclosure-spacer" />}
+        <button type="button" className="account-row" aria-label={`Edit account ${node.name}`} onClick={() => onEdit(node)}>
+          <div><strong>{node.name}</strong><span>{node.type} · {node.currencyCode}{node.placeholder ? " · placeholder" : ""}</span>
+            {node.description && <small>{node.description}</small>}</div>
+          <b>{unitsToDecimal(node.balanceUnits, node.scale)}</b>
+        </button>
+      </div>
+      {isExpanded && <div role="group" aria-label={`${node.name} subaccounts`}>
+        {node.children.map((child) => renderNode(child, depth + 1))}
+      </div>}
+    </div>;
+  }
+
+  return <div className="account-list">{tree.map((node) => renderNode(node, 0))}</div>;
+}
+
 function AuthScreen({ onAuthenticated }: AuthProps) {
   const [registering, setRegistering] = useState(false);
   const [name, setName] = useState("");
@@ -232,12 +298,7 @@ function AccountPanel({ accounts, assertions, currencies, token, onChanged }: {
         onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
-    <div className="account-list">{accounts.map((account) => <button type="button" className="account-row" key={account.id}
-      aria-label={`Edit account ${account.name}`} onClick={() => setEditingAccount(account)}>
-      <div><strong>{account.name}</strong><span>{account.type} · {account.currencyCode}{account.placeholder ? " · placeholder" : ""}</span>
-        {account.description && <small>{account.description}</small>}</div>
-      <b>{unitsToDecimal(account.balanceUnits, account.scale)}</b>
-    </button>)}</div>
+    <AccountTree accounts={accounts} onEdit={setEditingAccount} />
     <section className="currencies-panel">
       <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
         <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
