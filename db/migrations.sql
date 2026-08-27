@@ -7,6 +7,20 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0011: add-account-deletion-plans
+-- writer downtime: not required; this extends the closed workflow-kind set used
+-- by short-lived confirmation plans.
+-- deployment order: apply before exposing preview_delete_account or
+-- commit_delete_account.
+-- locking: changing the enum requires a brief metadata lock on the import-plan
+-- table.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE accounting_import_plans
+  MODIFY import_kind ENUM('account_tree','transactions','account_delete') NOT NULL;
+
+-- end migration 0011
+
 -- migration 0010: complete-durable-import-plan-workflow
 -- writer downtime: not required; import plans are short-lived operational
 -- records, but importing should be paused while this migration runs.

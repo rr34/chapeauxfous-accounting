@@ -18,10 +18,10 @@ try {
     `SELECT TABLE_NAME FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN
         ('people2_people','accounts','transactions','line_items','tags','lineitems_tags_join','xrates',
-         'account_balance_assertions','api_tokens')`,
+         'account_balance_assertions','accounting_import_plans','api_tokens')`,
     [databaseName],
   );
-  if (tables.length !== 9) throw new Error("Required accounting tables are missing");
+  if (tables.length !== 10) throw new Error("Required accounting tables are missing");
   await assertAccountingSemanticFormMatches(pool, databaseName);
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);

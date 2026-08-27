@@ -19,18 +19,62 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let importedTransactions;
   let committedTransactionPlan;
   let createdCurrency;
+  const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
+    status,
+    dryRun: !ledgerChanged,
+    ledgerChanged,
+    readyToCommit,
+    importPlanId,
+    importPlanExpiresAt: importPlanId ? "2026-08-25T18:42:00.000Z" : null,
+    sourceSystem: "source_app",
+    submittedTransactionCount: transactionCount,
+    uniqueTransactionCount: transactionCount,
+    duplicateInputTransactionCount: 0,
+    submittedLineItemCount: transactionCount * 2,
+    wouldCreateTransactionCount: ledgerChanged ? 0 : transactionCount,
+    wouldReuseTransactionCount: 0,
+    wouldCreateLineItemCount: ledgerChanged ? 0 : transactionCount * 2,
+    wouldReuseLineItemCount: 0,
+    createdTransactionCount: ledgerChanged ? transactionCount : 0,
+    reusedTransactionCount: 0,
+    createdLineItemCount: ledgerChanged ? transactionCount * 2 : 0,
+    reusedLineItemCount: 0,
+    rejectedTransactionCount: 0,
+    rejectedLineItemCount: 0,
+    unknownAccountPaths: [],
+    ambiguousAccountPaths: [],
+    transactionSummary: {
+      byStatus: { planned: ledgerChanged ? 0 : transactionCount, existing: 0,
+        created: ledgerChanged ? transactionCount : 0, rejected: 0 },
+      byValuationCurrency: { USD: transactionCount },
+      byYear: { 2026: transactionCount },
+    },
+    lineItemSummary: { byAccountCurrency: { USD: transactionCount * 2 }, byTopLevelBranch: { Assets: transactionCount } },
+    transactions: [{ externalId: "tx-1", transactionDate: "2026-01-01", description: "Test",
+      valuationCurrencyCode: "USD", lineItemCount: 2, status: ledgerChanged ? "created" : "planned",
+      transactionId: ledgerChanged ? 91 : null, errors: [] }],
+  });
   const services = {
     async listCurrencies(_pool, personId) {
       seen.push(`currencies:${personId}`);
       return [
-        { id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8 },
-        { id: 1, code: "USD", displayName: "US Dollar", type: "iso_4217", scale: 2 },
+        { id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8, ownerPersonId: 7, userDefined: true },
+        { id: 1, code: "USD", displayName: "US Dollar", type: "iso_4217", scale: 2, ownerPersonId: null, userDefined: false },
       ];
     },
-    async createCurrency(input) { createdCurrency = input; return { id: 12, ...input }; },
+    async createCurrency(input) {
+      createdCurrency = input;
+      return { id: 12, code: input.code, displayName: input.displayName, type: input.type, scale: input.scale,
+        ownerPersonId: input.personId, userDefined: true };
+    },
+    async getCurrency(_pool, personId, currencyId) {
+      return { id: Number(currencyId), code: "VTSAX", displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
+        type: "security", scale: 4, ownerPersonId: personId, userDefined: true };
+    },
     async listAccounts(_pool, personId) {
       seen.push(personId);
-      return [{ id: 10, name: "Wallet", balanceUnits: "123" }];
+      return [{ id: 10, name: "Wallet", description: null, placeholder: false, parentAccountId: null,
+        type: "asset", currencyId: 1, currencyCode: "USD", scale: 2, balanceUnits: "123", archivedAt: null }];
     },
     async importAccountTree(input) {
       imported = input;
@@ -41,7 +85,29 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
         expiresAt: "2026-08-25T18:42:00.000Z",
         previewDigest: `sha256:${"a".repeat(64)}`,
         summary: { accountsCreated: 1, accountsReused: 0, currenciesCreated: 1, currenciesReused: 0, rejectedRows: 0 },
-        preview: { dryRun: true, totalCount: input.accounts.length, plannedCount: input.accounts.length },
+        preview: {
+          dryRun: true, ledgerChanged: false, totalCount: input.accounts.length,
+          createdCount: 0, existingCount: 0, plannedCount: input.accounts.length,
+          currencyCreatedCount: 0, currencyExistingCount: 0, currencyPlannedCount: 1,
+          wouldCreateAccountCount: input.accounts.length, wouldReuseAccountCount: 0,
+          wouldCreateCurrencyCount: 1, wouldReuseCurrencyCount: 0,
+          accountSummary: {
+            byStatus: { planned: input.accounts.length, existing: 0, created: 0 },
+            byAccountType: { asset: input.accounts.length }, byCurrencyCode: { USD: input.accounts.length },
+            byPlaceholderStatus: { placeholder: input.accounts.filter((account) => account.placeholder).length,
+              postable: input.accounts.filter((account) => !account.placeholder).length },
+            byTopLevelBranch: { Assets: input.accounts.length },
+          },
+          currencies: [{ id: null, ownerPersonId: 7, userDefined: true, code: "VTSAX",
+            displayName: "Vanguard Total Stock Market Index Fund Admiral Shares", type: "security", scale: 4,
+            status: "planned" }],
+          accounts: input.accounts.map((account) => ({
+            fullName: account.fullName, accountType: account.type, currencyCode: account.currencyCode,
+            description: account.description ?? null, placeholder: account.placeholder,
+            parentFullName: account.fullName.includes(":") ? account.fullName.split(":").slice(0, -1).join(":") : null,
+            topLevelBranch: account.fullName.split(":")[0], status: "planned", accountId: null,
+          })),
+        },
       };
     },
     async commitAccountTreeImport(input) {
@@ -78,12 +144,32 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     },
     async previewTransactionImport(input) {
       importedTransactions = input;
-      return { readyToCommit: true, importPlanId: "11111111-1111-4111-8111-111111111111",
-        wouldCreateTransactionCount: input.transactions.length };
+      return transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
+        importPlanId: "11111111-1111-4111-8111-111111111111", transactionCount: input.transactions.length });
     },
     async commitTransactionImportPlan(input) {
       committedTransactionPlan = input;
-      return { committed: true, createdTransactionCount: 1 };
+      return { ...transactionImportFixture({ status: "committed", readyToCommit: false, ledgerChanged: true,
+        importPlanId: input.importPlanId }), committed: true, alreadyCommitted: false,
+        expiresAt: "2026-08-25T18:42:00.000Z", previewDigest: `sha256:${"b".repeat(64)}`,
+        summary: { transactionsCreated: 1, transactionsReused: 0, lineItemsCreated: 2,
+          lineItemsReused: 0, rejectedTransactions: 0 } };
+    },
+    async getTransactionImportPlan(input) {
+      const commitResult = { ...transactionImportFixture({
+        status: "committed", readyToCommit: false, ledgerChanged: true, importPlanId: input.importPlanId,
+      }), committed: true, alreadyCommitted: true };
+      return {
+        readyToCommit: false,
+        status: "committed",
+        importPlanId: input.importPlanId,
+        expiresAt: "2026-08-25T18:42:00.000Z",
+        previewDigest: `sha256:${"b".repeat(64)}`,
+        summary: { transactionsCreated: 1, transactionsReused: 0, lineItemsCreated: 2,
+          lineItemsReused: 0, rejectedTransactions: 0 },
+        commitResult,
+        alreadyCommitted: true,
+      };
     },
   };
   const server = createAccountingMcpServer({ personId: 7, pool: {}, services });
@@ -100,10 +186,18 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "get_account_tree_import_plan"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_plan"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "update_account"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_account"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_account_delete_plan"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_delete_account"), true);
+  assert.equal(tools.tools.every((tool) => tool.outputSchema?.type === "object"), true);
+  assert.equal(tools.tools.every((tool) => ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
+    .every((annotation) => typeof tool.annotations?.[annotation] === "boolean")), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
-  assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, false);
   assert.match(tools.tools.find((tool) => tool.name === "create_currency").description, /Never guess or choose a default scale/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /even when new currency details or scales are unknown/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended batch/);
@@ -118,6 +212,19 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /source-neutral/);
   assert.match(tools.tools.find((tool) => tool.name === "import_transactions").description, /unknown or ambiguous paths/);
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "import_transactions").annotations.idempotentHint, false);
+  assert.equal(tools.tools.find((tool) => tool.name === "commit_delete_account").annotations.destructiveHint, true);
+
+  const resources = await client.listResources();
+  assert.equal(resources.resources.some((resource) => resource.uri === "accounting://manifest/capabilities/v1"), true);
+  assert.equal(resources.resources.some((resource) => resource.uri === "accounting://context/currencies/active"), true);
+  const resourceTemplates = await client.listResourceTemplates();
+  assert.equal(resourceTemplates.resourceTemplates.some((template) =>
+    template.uriTemplate === "accounting://currencies/{currencyId}"), true);
+  const manifestResource = await client.readResource({ uri: "accounting://manifest/capabilities/v1" });
+  const manifest = JSON.parse(manifestResource.contents[0].text);
+  assert.equal(manifest.contractVersion, 1);
+  assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,
@@ -130,7 +237,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const currenciesResult = await client.callTool({ name: "list_currencies", arguments: {} });
   assert.equal(currenciesResult.structuredContent.currencies[0].displayName, "Bitcoin");
 
-  await client.callTool({
+  const createCurrencyResult = await client.callTool({
     name: "create_currency",
     arguments: {
       code: "VTSAX",
@@ -144,6 +251,14 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
     type: "security", scale: 4,
   });
+  assert.equal(createCurrencyResult.structuredContent.contractVersion, 1);
+  assert.equal(createCurrencyResult.structuredContent.status, "success");
+  assert.equal(createCurrencyResult.structuredContent.effectReceipt.tool, "create_currency");
+  assert.match(createCurrencyResult.structuredContent.effectReceipt.argumentsSha256, /^sha256:/);
+  const currencyLink = createCurrencyResult.content.find((item) => item.type === "resource_link");
+  assert.equal(currencyLink.uri, "accounting://currencies/12");
+  const currencyResource = await client.readResource({ uri: currencyLink.uri });
+  assert.equal(JSON.parse(currencyResource.contents[0].text).currency.id, 12);
 
   const result = await client.callTool({ name: "list_accounts", arguments: {} });
   assert.deepEqual(seen, ["currencies:7", 7]);
@@ -217,7 +332,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(missingScales.structuredContent.requiredAction, "ASK_USER_FOR_CURRENCY_SCALES");
   assert.equal(missingScales.structuredContent.batchSummary.accountCount, 2);
   assert.deepEqual(missingScales.structuredContent.missingCurrencies.map((currency) => currency.code), ["S5L", "VIGIX"]);
-  assert.equal(missingScales.structuredContent.nextAction.retry.preserveEntireBatch, true);
+  assert.equal(missingScales.structuredContent.nextAction.tool, "import_account_tree");
+  assert.equal(missingScales.structuredContent.retry.protocol, "agent-slayer.retry-descriptor");
+  assert.equal(missingScales.structuredContent.retry.preserve_complete_original_batch, true);
   assert.equal(imported.accounts.length, 1);
 
   const planStatus = await client.callTool({
@@ -234,9 +351,11 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_plan_id: "22222222-2222-4222-8222-222222222222" },
   });
   assert.equal(missingPlan.isError, true);
-  assert.deepEqual(missingPlan.structuredContent, {
-    code: "IMPORT_PLAN_NOT_FOUND", recoverable: true, requiredAction: "RUN_NEW_DRY_RUN",
-  });
+  assert.equal(missingPlan.structuredContent.contractVersion, 1);
+  assert.equal(missingPlan.structuredContent.status, "error");
+  assert.equal(missingPlan.structuredContent.code, "IMPORT_PLAN_NOT_FOUND");
+  assert.equal(missingPlan.structuredContent.recoverable, true);
+  assert.equal(missingPlan.structuredContent.requiredAction, "RUN_NEW_DRY_RUN");
 
   await client.callTool({
     name: "commit_account_tree_import",
@@ -254,9 +373,10 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       name: "commit_account_tree_import", arguments: { import_plan_id: planId },
     });
     assert.equal(failure.isError, true);
-    assert.deepEqual(failure.structuredContent, {
-      code, recoverable: true, requiredAction: "RUN_NEW_DRY_RUN",
-    });
+    assert.equal(failure.structuredContent.status, "error");
+    assert.equal(failure.structuredContent.code, code);
+    assert.equal(failure.structuredContent.recoverable, true);
+    assert.equal(failure.structuredContent.requiredAction, "RUN_NEW_DRY_RUN");
   }
 
   const transactionPreview = await client.callTool({
@@ -290,6 +410,13 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.deepEqual(committedTransactionPlan, {
     pool: {}, personId: 7, importPlanId: "11111111-1111-4111-8111-111111111111",
   });
+
+  const transactionPlanStatus = await client.callTool({
+    name: "get_transaction_import_plan",
+    arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
+  });
+  assert.equal(transactionPlanStatus.structuredContent.status, "committed");
+  assert.equal(transactionPlanStatus.structuredContent.commitResult.alreadyCommitted, true);
 
   await client.close();
   await server.close();
@@ -332,7 +459,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.6.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.1.0");
 
   await handler.close();
 });

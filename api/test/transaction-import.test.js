@@ -6,7 +6,7 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { commitTransactionImportPlan, previewTransactionImport } = await import("../src/transaction-import.js");
+const { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } = await import("../src/transaction-import.js");
 
 function memoryPool() {
   const state = {
@@ -146,11 +146,14 @@ function memoryPool() {
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("UPDATE accounting_import_plans")) {
-            const [resultJson, planId, ownerPersonId] = params;
+            const committing = sql.includes("plan_status = 'committed'");
+            const [resultJson, planId, ownerPersonId] = committing ? params : [null, ...params];
             const plan = state.plans.get(planId);
             if (plan && Number(plan.owner_person_id) === Number(ownerPersonId)) {
-              plan.plan_status = "committed";
-              plan.committed_at = "now";
+              plan.plan_status = committing ? "committed" : "invalidated";
+              plan.committed_at = committing ? "now" : null;
+              plan.invalidation_code = committing ? null
+                : (sql.includes("PAYLOAD_INTEGRITY_FAILURE") ? "PAYLOAD_INTEGRITY_FAILURE" : "DATABASE_STATE_CHANGED");
               plan.result_json = resultJson;
             }
             return [{ affectedRows: plan ? 1 : 0 }];
@@ -200,6 +203,11 @@ test("transaction preview plans complete nested transactions and commit is repea
   assert.deepEqual(preview.lineItemSummary.byTopLevelBranch, { Assets: 3, Expenses: 1 });
   assert.equal(pool.state.transactions.length, 0);
 
+  const readyPlan = await getTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(readyPlan.status, "ready");
+  assert.equal(readyPlan.previewDigest, preview.previewDigest);
+  assert.deepEqual(readyPlan.summary, preview.summary);
+
   await assert.rejects(
     commitTransactionImportPlan({ pool, personId: 8, importPlanId: preview.importPlanId }),
     (error) => error.code === "IMPORT_PLAN_NOT_FOUND",
@@ -214,6 +222,11 @@ test("transaction preview plans complete nested transactions and commit is repea
   assert.equal(pool.state.transactions.every((transaction) => transaction.TransactionState === "posted"), true);
   assert.deepEqual(pool.state.rates.map((rate) => [rate.from_units, rate.to_units]), [["617", "5000"]]);
 
+  const committedPlan = await getTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(committedPlan.status, "committed");
+  assert.equal(committedPlan.alreadyCommitted, true);
+  assert.equal(committedPlan.commitResult.createdTransactionCount, 2);
+
   const repeated = await commitTransactionImportPlan({
     pool, personId: 7, importPlanId: preview.importPlanId,
   });
@@ -226,6 +239,23 @@ test("transaction preview plans complete nested transactions and commit is repea
   });
   assert.equal(retryPreview.wouldCreateTransactionCount, 0);
   assert.equal(retryPreview.wouldReuseTransactionCount, 2);
+});
+
+test("transaction commit persists plan invalidation after an integrity failure", async () => {
+  const pool = memoryPool();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "source_app", transactions: importedTransactions(),
+  });
+  pool.state.plans.get(preview.importPlanId).payload_json += " ";
+
+  await assert.rejects(
+    commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId }),
+    (error) => error.code === "IMPORT_PLAN_INTEGRITY_FAILURE",
+  );
+  const status = await getTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(status.status, "invalidated");
+  assert.equal(status.invalidationCode, "PAYLOAD_INTEGRITY_FAILURE");
+  assert.equal(pool.state.transactions.length, 0);
 });
 
 test("transaction dry run lists every unknown path and does not create a commit plan", async () => {

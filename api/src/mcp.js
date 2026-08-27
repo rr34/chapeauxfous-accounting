@@ -1,29 +1,76 @@
+import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
-import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
+import {
+  getBalanceAssertion,
+  listBalanceAssertions,
+  listBalanceAssertionsPage,
+  saveBalanceAssertion,
+} from "./balance-assertions.js";
 import {
   createAccount,
   createTransaction,
+  getAccount,
   getTransaction,
-  listAccounts,
-  listTransactions,
-  verifyAllPostedTransactions,
+  listAccounts, listAccountsPage,
+  listTransactions, listTransactionsPage,
+  updateAccount,
+  verifyAllPostedTransactions, verifyPostedTransactionsPage,
 } from "./accounting.js";
+import {
+  accountDeletePlanFailure,
+  commitAccountDeletion,
+  getAccountDeletionPlan,
+  previewAccountDeletion,
+} from "./account-delete.js";
 import {
   accountTreeImportPlanFailure,
   commitAccountTreeImport,
   getAccountTreeImportPlan,
   previewAccountTreeImport,
 } from "./account-tree.js";
-import { createCurrency, listCurrencies, userCurrencyTypes } from "./currencies.js";
+import {
+  accountTreeCurrencyRequirements,
+  accountTreeNeedsInputWorkflow,
+  accountTreeReadyWorkflow,
+  transactionPreviewWorkflow,
+} from "./account-tree-workflow.js";
+import {
+  createCurrency,
+  currencyKey,
+  getCurrency,
+  listCurrencies,
+  listCurrenciesPage,
+  userCurrencyTypes,
+} from "./currencies.js";
+import {
+  accountingCapabilityManifest,
+  accountSchema,
+  balanceAssertionSchema,
+  CAPABILITY_MANIFEST_URI,
+  currencySchema,
+  effectReceiptSchema,
+  makeRetryDescriptor,
+  MCP_CONTRACT_VERSION,
+  MCP_SERVER_VERSION,
+  retryDescriptorSchema,
+  resultMetadataSchema,
+  schemaProjectionSchema,
+  structuredErrorSchema,
+  successOutputSchema,
+  toolMetadata,
+  transactionListItemSchema,
+  transactionSchema,
+} from "./mcp-contracts.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
-import { commitTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
+import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 
-const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
 const idempotentWrite = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+const destructiveWrite = Object.freeze({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
 
 const operations = Object.freeze({
   listCurrencies: {
@@ -56,6 +103,27 @@ const operations = Object.freeze({
     fields: {
       accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+    },
+  },
+  updateAccount: {
+    name: "update_account",
+    purpose: "Update one owner-scoped accounting account after enforcing account invariants.",
+    schemaObjects: ["accounts", "currencies", "line_items", "account_balance_assertions"],
+    fields: {
+      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      line_items: ["line_item_id", "account_id"],
+      account_balance_assertions: ["account_balance_assertion_id", "account_id"],
+    },
+  },
+  deleteAccount: {
+    name: "delete_account",
+    purpose: "Preview, commit, and verify deletion of one empty owner-scoped leaf account.",
+    schemaObjects: ["accounts", "line_items", "account_balance_assertions"],
+    fields: {
+      accounts: ["account_id", "AccountName", "parent_account_id", "owner_person_id"],
+      line_items: ["line_item_id", "account_id"],
+      account_balance_assertions: ["account_balance_assertion_id", "account_id"],
     },
   },
   importAccountTree: {
@@ -175,19 +243,147 @@ const operations = Object.freeze({
   },
 });
 
-function toolResult(value) {
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function effectReceipt(tool, args, outcome, entityRefs = []) {
+  const argumentsDigest = createHash("sha256").update(canonicalJson(args), "utf8").digest("hex");
   return {
-    content: [{ type: "text", text: JSON.stringify(value) }],
-    structuredContent: value,
+    receiptId: randomUUID(),
+    tool,
+    argumentsSha256: `sha256:${argumentsDigest}`,
+    outcome,
+    entityRefs,
+    observedAt: new Date().toISOString(),
+  };
+}
+
+function pageMetadata(items, nextCursor, type) {
+  return {
+    complete: nextCursor == null,
+    returned: items.length,
+    nextCursor,
+    sourceRefs: items.map((item) => `accounting://${type}/${item.id}`),
+  };
+}
+
+const entityCollections = Object.freeze({
+  account: "accounts",
+  account_delete_plan: "account-delete-plans",
+  account_tree_import_plan: "account-tree-import-plans",
+  balance_assertion: "balance-assertions",
+  currency: "currencies",
+  transaction: "transactions",
+  transaction_import_plan: "transaction-import-plans",
+});
+
+function entityUri({ type, id }) {
+  return `accounting://${entityCollections[type] ?? type}/${encodeURIComponent(String(id))}`;
+}
+
+function accountPathContext(accounts) {
+  const byId = new Map(accounts.map((account) => [account.id, account]));
+  const paths = new Map();
+  function pathFor(account, visiting = new Set()) {
+    if (paths.has(account.id)) return paths.get(account.id);
+    if (visiting.has(account.id)) return null;
+    visiting.add(account.id);
+    const parent = account.parentAccountId == null ? null : byId.get(account.parentAccountId);
+    const parentPath = parent ? pathFor(parent, visiting) : null;
+    const path = account.parentAccountId != null && !parentPath ? null : [parentPath, account.name].filter(Boolean).join(":");
+    paths.set(account.id, path);
+    return path;
+  }
+  return accounts.filter((account) => account.archivedAt == null).map((account) => ({
+    sourceRef: `accounting://accounts/${account.id}`,
+    accountId: account.id,
+    fullName: pathFor(account),
+    accountType: account.type,
+    currencyCode: account.currencyCode,
+    placeholder: account.placeholder,
+  }));
+}
+
+function toolResult(value, defaultStatus = "success") {
+  const structuredContent = JSON.parse(JSON.stringify({
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: value?.status ?? defaultStatus,
+    ...value,
+  }));
+  const sourceRefs = new Set(structuredContent.resultMetadata?.sourceRefs ?? []);
+  for (const entity of structuredContent.effectReceipt?.entityRefs ?? []) {
+    if (structuredContent.effectReceipt.outcome === "deleted" && entity.type === "account") continue;
+    sourceRefs.add(entityUri(entity));
+  }
+  const resourceLinks = [...sourceRefs].map((uri) => ({
+    type: "resource_link",
+    uri,
+    name: uri.replace("accounting://", ""),
+    description: "Stable accounting provider reference for this result.",
+    mimeType: "application/json",
+  }));
+  return {
+    content: [{ type: "text", text: JSON.stringify(structuredContent) }, ...resourceLinks],
+    structuredContent,
   };
 }
 
 function toolFailureResult(value) {
+  const structuredContent = {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: value?.status ?? "error",
+    code: String(value?.code ?? "ACCOUNTING_ERROR"),
+    message: String(value?.message ?? "The accounting operation failed."),
+    details: value?.details ?? null,
+    recoverable: value?.recoverable ?? Number(value?.status) < 500,
+    retry: value?.retry ?? null,
+    ...value,
+  };
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify(value) }],
-    structuredContent: value,
+    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+    structuredContent,
   };
+}
+
+async function safeToolResult(work, defaultStatus = "success") {
+  try {
+    return toolResult(await work(), defaultStatus);
+  } catch (error) {
+    return toolFailureResult({
+      code: error?.code ?? "ACCOUNTING_ERROR",
+      message: Number(error?.status) >= 500 ? "Unexpected accounting service error." : error?.message,
+      details: error?.details ?? null,
+      recoverable: Number(error?.status) < 500,
+      retry: Number(error?.status) < 500
+        ? makeRetryDescriptor(error?.code ?? "accounting_validation_failed")
+        : null,
+    });
+  }
+}
+
+async function safeWorkflowResult(work, { defaultStatus = "success", retryTool, preserveEntireBatch = false,
+  failureMapper = null } = {}) {
+  try {
+    return toolResult(await work(), defaultStatus);
+  } catch (error) {
+    const mapped = failureMapper?.(error);
+    return toolFailureResult({
+      code: mapped?.code ?? error?.code ?? "ACCOUNTING_WORKFLOW_ERROR",
+      message: Number(error?.status) >= 500 ? "Unexpected accounting workflow error." : mapped?.message ?? error?.message,
+      details: mapped?.details ?? error?.details ?? null,
+      recoverable: mapped?.recoverable ?? Number(error?.status) < 500,
+      retry: retryTool ? makeRetryDescriptor(mapped?.code ?? error?.code ?? "workflow_retry_required", {
+        retryable: mapped?.recoverable ?? Number(error?.status) < 500,
+        preserveCompleteOriginalBatch: preserveEntireBatch,
+      }) : null,
+    });
+  }
 }
 
 async function accountTreePlanToolResult(work, {
@@ -202,7 +398,10 @@ async function accountTreePlanToolResult(work, {
       : result);
   } catch (error) {
     const failure = accountTreeImportPlanFailure(error);
-    if (failure) return toolFailureResult(failure);
+    if (failure) return toolFailureResult({
+      ...failure,
+      retry: makeRetryDescriptor("new_account_tree_dry_run_required", { preserveCompleteOriginalBatch: true }),
+    });
     if (includeValidationRecovery && error?.code && [400, 409].includes(Number(error.status))) {
       return toolFailureResult({
         readyToCommit: false,
@@ -211,10 +410,11 @@ async function accountTreePlanToolResult(work, {
         message: String(error.message),
         details: error.details ?? null,
         recoverable: true,
+        retry: makeRetryDescriptor("invalid_account_tree_batch", { preserveCompleteOriginalBatch: true }),
         requiredAction: "CORRECT_INPUT_AND_RUN_NEW_DRY_RUN",
         nextAction: {
           type: "correct_import_batch",
-          retry: { tool: "import_account_tree", preserveEntireBatch: true },
+          tool: "import_account_tree",
         },
       });
     }
@@ -226,197 +426,391 @@ function positiveInteger(label) {
   return z.number().int().positive().describe(label);
 }
 
-function accountingUnitKey(value) {
-  return String(value ?? "").trim().toLocaleUpperCase("en-US");
-}
-
-function accountTreeCurrencyRequirements({ accounts, currencies, accessibleCurrencies }) {
-  const accessibleCodes = new Set(accessibleCurrencies.map((currency) => accountingUnitKey(currency.code)));
-  const definitions = new Map(currencies.map((currency) => [accountingUnitKey(currency.code), currency]));
-  const references = new Map();
-  for (const account of accounts) {
-    const key = accountingUnitKey(account.currency_code);
-    const reference = references.get(key) ?? { code: String(account.currency_code).trim(), paths: [] };
-    reference.paths.push(account.full_name);
-    references.set(key, reference);
-  }
-
-  const unknownCodes = new Set([
-    ...[...references.keys()].filter((code) => !accessibleCodes.has(code)),
-    ...[...definitions.keys()].filter((code) => !accessibleCodes.has(code)),
-  ]);
-  return [...unknownCodes].sort().flatMap((key) => {
-    const definition = definitions.get(key);
-    const reference = references.get(key);
-    const missingFields = [];
-    if (!definition?.display_name) missingFields.push("display_name");
-    if (!definition?.currency_type) missingFields.push("currency_type");
-    if (definition?.scale == null) missingFields.push("scale");
-    if (!missingFields.length) return [];
-
-    const code = definition?.code ?? reference?.code ?? key;
-    const userQuestions = [];
-    if (missingFields.includes("scale")) {
-      userQuestions.push(`What decimal scale (0 through 18) should be used for ${code}?`);
-    }
-    if (missingFields.includes("display_name")) {
-      userQuestions.push(`What display name should be used for ${code}?`);
-    }
-    if (missingFields.includes("currency_type")) {
-      userQuestions.push(`Should ${code} be a crypto, security, commodity, or custom unit?`);
-    }
-    return [{
-      code,
-      displayName: definition?.display_name ?? null,
-      currencyType: definition?.currency_type ?? null,
-      missingFields,
-      referencedByAccountCount: reference?.paths.length ?? 0,
-      exampleAccountPaths: reference?.paths.slice(0, 5) ?? [],
-      userQuestions,
-    }];
-  });
-}
-
-function accountTreeNeedsInputWorkflow({ accounts, currencies, requirements }) {
-  const onlyScalesMissing = requirements.every((requirement) =>
-    requirement.missingFields.length === 1 && requirement.missingFields[0] === "scale");
-  return {
-    readyToCommit: false,
-    status: "needs_input",
-    code: onlyScalesMissing ? "CURRENCY_SCALES_REQUIRED" : "CURRENCY_DETAILS_REQUIRED",
-    requiredAction: onlyScalesMissing ? "ASK_USER_FOR_CURRENCY_SCALES" : "COMPLETE_CURRENCY_DEFINITIONS",
-    message: onlyScalesMissing
-      ? "Ask the user for the listed currency scales, then repeat this dry run with the complete original batch."
-      : "Complete the listed currency definitions from authoritative source data or ask the user, then repeat this dry run with the complete original batch.",
-    batchSummary: {
-      accountCount: accounts.length,
-      suppliedCurrencyDefinitionCount: currencies.length,
-      unresolvedCurrencyCount: requirements.length,
-    },
-    missingCurrencies: requirements,
-    nextAction: {
-      type: "collect_currency_details",
-      askUser: requirements.flatMap((requirement) => requirement.userQuestions),
-      retry: {
-        tool: "import_account_tree",
-        preserveEntireBatch: true,
-        instruction: "Repeat import_account_tree with the entire original accounts array and completed currency definitions. Do not retry only the affected rows.",
-      },
-    },
-  };
-}
-
-function accountTreeReadyWorkflow(result) {
-  const { preview, ...identity } = result;
-  return {
-    ...identity,
-    requiredAction: "REQUEST_USER_CONFIRMATION",
-    nextAction: {
-      type: "request_user_confirmation",
-      instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the import payload.",
-      onApproval: {
-        tool: "commit_account_tree_import",
-        arguments: { import_plan_id: result.importPlanId },
-      },
-    },
-    preview,
-  };
-}
-
-function transactionPreviewWorkflow(result) {
-  if (result.readyToCommit && result.importPlanId) {
-    return {
-      ...result,
-      requiredAction: "REQUEST_USER_CONFIRMATION",
-      nextAction: {
-        type: "request_user_confirmation",
-        instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the transaction batch.",
-        onApproval: { tool: "commit_transaction_import", arguments: { import_plan_id: result.importPlanId } },
-      },
-    };
-  }
-  return {
-    ...result,
-    requiredAction: "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN",
-    nextAction: {
-      type: "correct_rejected_transactions",
-      instruction: "Report every rejection and unknown or ambiguous account path, correct the complete batch, then run a new dry run.",
-      retry: { tool: "import_transactions", preserveEntireBatch: true },
-    },
-  };
-}
-
 export function createAccountingMcpServer({ personId, pool, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
+  const injectedPage = (list, key) => async (...args) => {
+    const options = args.at(-1) ?? {};
+    const limit = Number(options.limit) || 100;
+    const items = await list(...args.slice(0, -1));
+    return { [key]: items.slice(0, limit), nextCursor: items.length > limit ? String(items[limit - 1]?.id) : null };
+  };
   const accounting = {
     listCurrencies: services.listCurrencies ?? listCurrencies,
+    getCurrency: services.getCurrency ?? getCurrency,
     createCurrency: services.createCurrency ?? createCurrency,
     listAccounts: services.listAccounts ?? listAccounts,
+    listAccountsPage: services.listAccountsPage ?? (services.listAccounts ? injectedPage(services.listAccounts, "accounts") : listAccountsPage),
+    getAccount: services.getAccount ?? getAccount,
     createAccount: services.createAccount ?? createAccount,
+    updateAccount: services.updateAccount ?? updateAccount,
     previewAccountTreeImport: services.previewAccountTreeImport ?? services.importAccountTree ?? previewAccountTreeImport,
     commitAccountTreeImport: services.commitAccountTreeImport ?? commitAccountTreeImport,
     getAccountTreeImportPlan: services.getAccountTreeImportPlan ?? getAccountTreeImportPlan,
     listTransactions: services.listTransactions ?? listTransactions,
+    listTransactionsPage: services.listTransactionsPage ?? (services.listTransactions ? injectedPage(services.listTransactions, "transactions") : listTransactionsPage),
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
+    getTransactionImportPlan: services.getTransactionImportPlan ?? getTransactionImportPlan,
     commitTransactionImportPlan: services.commitTransactionImportPlan ?? commitTransactionImportPlan,
     listBalanceAssertions: services.listBalanceAssertions ?? listBalanceAssertions,
+    listBalanceAssertionsPage: services.listBalanceAssertionsPage ?? (services.listBalanceAssertions ? injectedPage(services.listBalanceAssertions, "assertions") : listBalanceAssertionsPage),
+    getBalanceAssertion: services.getBalanceAssertion ?? getBalanceAssertion,
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
+    verifyPostedTransactionsPage: services.verifyPostedTransactionsPage ?? verifyPostedTransactionsPage,
+    listCurrenciesPage: services.listCurrenciesPage ?? (services.listCurrencies ? injectedPage(services.listCurrencies, "currencies") : listCurrenciesPage),
+    previewAccountDeletion: services.previewAccountDeletion ?? previewAccountDeletion,
+    getAccountDeletionPlan: services.getAccountDeletionPlan ?? getAccountDeletionPlan,
+    commitAccountDeletion: services.commitAccountDeletion ?? commitAccountDeletion,
   };
-  const server = new McpServer({ name: "chapeaux-fous-accounting", version: "0.6.0" });
+  const server = new McpServer({
+    name: "chapeaux-fous-accounting",
+    title: "Chapeaux Fous Accounting",
+    version: MCP_SERVER_VERSION,
+  }, {
+    instructions: accountingCapabilityManifest.server.instructions,
+  });
+
+  server.registerResource("accounting-capability-manifest", CAPABILITY_MANIFEST_URI, {
+    title: "Accounting capability manifest",
+    description: "Versioned capabilities, dependencies, attachment guidance, and bounded context views for this accounting provider.",
+    mimeType: "application/json",
+  }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(accountingCapabilityManifest) }] }));
+
+  server.registerResource("accounting-currencies-active", "accounting://context/currencies/active", {
+    title: "Accessible accounting units",
+    description: "At most 500 global or owner-scoped currencies and accounting units for execution context.",
+    mimeType: "application/json",
+  }, async (uri) => {
+    const page = await accounting.listCurrenciesPage(pool, personId, { limit: 500 });
+    const value = {
+      contractVersion: MCP_CONTRACT_VERSION,
+      status: page.nextCursor == null ? "complete" : "partial",
+      contextView: "accounting.currencies.active",
+      evidence: page.currencies.map((currency) => ({
+        sourceRef: `accounting://currencies/${currency.id}`,
+        data: currency,
+      })),
+      summary: pageMetadata(page.currencies, page.nextCursor, "currencies"),
+    };
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }] };
+  });
+
+  server.registerResource("accounting-accounts-active-paths", "accounting://context/accounts/active-paths", {
+    title: "Active account path index",
+    description: "At most 500 active account paths with types, currencies, and placeholder state.",
+    mimeType: "application/json",
+  }, async (uri) => {
+    const page = await accounting.listAccountsPage(pool, personId, { limit: 500 });
+    const evidence = accountPathContext(page.accounts);
+    const value = {
+      contractVersion: MCP_CONTRACT_VERSION,
+      status: page.nextCursor == null ? "complete" : "partial",
+      contextView: "accounting.accounts.active_paths",
+      evidence,
+      summary: { ...pageMetadata(evidence.map((item) => ({ id: item.accountId })), page.nextCursor, "accounts") },
+    };
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }] };
+  });
+
+  const entityResource = (uri, value) => ({
+    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }],
+  });
+  const resourceTemplate = (uri) => new ResourceTemplate(uri, { list: undefined });
+
+  server.registerResource("accounting-currency", resourceTemplate("accounting://currencies/{currencyId}"), {
+    title: "Accounting currency or unit",
+    description: "One currently accessible global or owner-scoped accounting unit by stable provider ID.",
+    mimeType: "application/json",
+  }, async (uri, { currencyId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    currency: await accounting.getCurrency(pool, personId, currencyId),
+  }, operations.listCurrencies)));
+
+  server.registerResource("accounting-account", resourceTemplate("accounting://accounts/{accountId}"), {
+    title: "Accounting account",
+    description: "One current owner-scoped account and posted native-unit balance by stable provider ID.",
+    mimeType: "application/json",
+  }, async (uri, { accountId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    account: await accounting.getAccount(pool, personId, accountId),
+  }, operations.listAccounts)));
+
+  server.registerResource("accounting-transaction", resourceTemplate("accounting://transactions/{transactionId}"), {
+    title: "Accounting transaction",
+    description: "One current owner-scoped transaction with line items, tags, and transaction rates by stable provider ID.",
+    mimeType: "application/json",
+  }, async (uri, { transactionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    transaction: await accounting.getTransaction(pool, personId, transactionId),
+  }, operations.getTransaction)));
+
+  server.registerResource("accounting-balance-assertion", resourceTemplate("accounting://balance-assertions/{assertionId}"), {
+    title: "Accounting balance assertion",
+    description: "One current owner-scoped known-balance assertion and calculated ledger difference by stable provider ID.",
+    mimeType: "application/json",
+  }, async (uri, { assertionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    assertion: await accounting.getBalanceAssertion(pool, personId, assertionId),
+  }, operations.listBalanceAssertions)));
+
+  server.registerResource("accounting-account-tree-import-plan",
+    resourceTemplate("accounting://account-tree-import-plans/{planId}"), {
+      title: "Account-tree import plan",
+      description: "Current owner-scoped provider status for one durable account-tree import plan.",
+      mimeType: "application/json",
+    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+      contractVersion: MCP_CONTRACT_VERSION,
+      ...await accounting.getAccountTreeImportPlan({ pool, personId, importPlanId: planId }),
+    }, operations.importAccountTree)));
+
+  server.registerResource("accounting-account-delete-plan",
+    resourceTemplate("accounting://account-delete-plans/{planId}"), {
+      title: "Account-deletion plan",
+      description: "Current owner-scoped provider status for one durable verified account-deletion plan.",
+      mimeType: "application/json",
+    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+      contractVersion: MCP_CONTRACT_VERSION,
+      ...await accounting.getAccountDeletionPlan({ pool, personId, deletionPlanId: planId }),
+    }, operations.deleteAccount)));
+
+  server.registerResource("accounting-transaction-import-plan",
+    resourceTemplate("accounting://transaction-import-plans/{planId}"), {
+      title: "Transaction import plan",
+      description: "Current owner-scoped provider status for one durable transaction-import plan.",
+      mimeType: "application/json",
+    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+      contractVersion: MCP_CONTRACT_VERSION,
+      ...await accounting.getTransactionImportPlan({ pool, personId, importPlanId: planId }),
+    }, operations.commitTransactionImport)));
+
+  const schemaDescriptionOutput = successOutputSchema({ projection: schemaProjectionSchema });
+  const currencyListOutput = successOutputSchema({
+    currencies: z.array(currencySchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const currencyMutationOutput = successOutputSchema({
+    currency: currencySchema, effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const accountListOutput = successOutputSchema({
+    accounts: z.array(accountSchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const accountCreateOutput = successOutputSchema({
+    account: z.object({ id: z.number().int().positive() }),
+    effectReceipt: effectReceiptSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const accountUpdateOutput = successOutputSchema({
+    account: z.object({ accountId: z.number().int().positive(), updated: z.literal(true) }),
+    effectReceipt: effectReceiptSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const transactionListOutput = successOutputSchema({
+    transactions: z.array(transactionListItemSchema), resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const transactionReadOutput = successOutputSchema({ transaction: transactionSchema, schemaProjection: schemaProjectionSchema });
+  const transactionMutationOutput = successOutputSchema({
+    transaction: z.object({
+      transactionId: z.number().int().positive(),
+      state: z.enum(["draft", "posted"]),
+      validation: z.object({
+        valid: z.literal(true),
+        lineItemCount: z.number().int().min(2),
+        valuationCurrencyId: z.number().int().positive(),
+        foreignCurrencyIds: z.array(z.number().int().positive()),
+      }),
+    }),
+    effectReceipt: effectReceiptSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const assertionListOutput = successOutputSchema({
+    assertions: z.array(balanceAssertionSchema), resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const assertionMutationOutput = successOutputSchema({
+    assertion: balanceAssertionSchema, effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const ledgerVerificationOutput = successOutputSchema({
+    valid: z.boolean(), checked: z.number().int().nonnegative(),
+    failures: z.array(z.object({
+      transactionId: z.number().int().positive(), code: z.string().min(1), message: z.string().min(1),
+      details: z.json().optional(),
+    })),
+    resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const countMapSchema = z.record(z.string(), z.number().int().nonnegative());
+  const importIssueSchema = z.object({ code: z.string().min(1), message: z.string().min(1), details: z.json().optional() });
+  const transactionImportSummarySchema = z.object({
+    transactionsCreated: z.number().int().nonnegative(), transactionsReused: z.number().int().nonnegative(),
+    lineItemsCreated: z.number().int().nonnegative(), lineItemsReused: z.number().int().nonnegative(),
+    rejectedTransactions: z.number().int().nonnegative(),
+  });
+  const transactionImportSchema = z.object({
+    status: z.enum(["ready", "incomplete", "committed"]),
+    dryRun: z.boolean(), ledgerChanged: z.boolean(), readyToCommit: z.boolean(),
+    importPlanId: z.string().uuid().nullable(), importPlanExpiresAt: z.string().datetime().nullable(),
+    sourceSystem: z.string().min(1), submittedTransactionCount: z.number().int().nonnegative(),
+    uniqueTransactionCount: z.number().int().nonnegative(), duplicateInputTransactionCount: z.number().int().nonnegative(),
+    submittedLineItemCount: z.number().int().nonnegative(), wouldCreateTransactionCount: z.number().int().nonnegative(),
+    wouldReuseTransactionCount: z.number().int().nonnegative(), wouldCreateLineItemCount: z.number().int().nonnegative(),
+    wouldReuseLineItemCount: z.number().int().nonnegative(), createdTransactionCount: z.number().int().nonnegative(),
+    reusedTransactionCount: z.number().int().nonnegative(), createdLineItemCount: z.number().int().nonnegative(),
+    reusedLineItemCount: z.number().int().nonnegative(), rejectedTransactionCount: z.number().int().nonnegative(),
+    rejectedLineItemCount: z.number().int().nonnegative(), unknownAccountPaths: z.array(z.string()),
+    ambiguousAccountPaths: z.array(z.string()),
+    transactionSummary: z.object({
+      byStatus: z.object({ planned: z.number().int().nonnegative(), existing: z.number().int().nonnegative(),
+        created: z.number().int().nonnegative(), rejected: z.number().int().nonnegative() }),
+      byValuationCurrency: countMapSchema, byYear: countMapSchema,
+    }),
+    lineItemSummary: z.object({ byAccountCurrency: countMapSchema, byTopLevelBranch: countMapSchema }),
+    transactions: z.array(z.object({
+      externalId: z.string().min(1), transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      description: z.string().nullable(), valuationCurrencyCode: z.string().min(1),
+      lineItemCount: z.number().int().min(2), status: z.enum(["planned", "existing", "created", "rejected"]),
+      transactionId: z.number().int().positive().nullable(), errors: z.array(importIssueSchema),
+    })),
+    expiresAt: z.string().datetime().optional(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+    summary: transactionImportSummarySchema.optional(), committed: z.boolean().optional(), alreadyCommitted: z.boolean().optional(),
+    requiredAction: z.enum(["REQUEST_USER_CONFIRMATION", "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN"]).optional(),
+    nextAction: z.union([
+      z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
+        onApproval: z.object({ tool: z.literal("commit_transaction_import"), arguments: z.object({ import_plan_id: z.string().uuid() }) }) }),
+      z.object({ type: z.literal("correct_rejected_transactions"), instruction: z.string().min(1),
+        tool: z.literal("import_transactions") }),
+    ]).optional(),
+    retry: retryDescriptorSchema.optional(),
+  });
+  const transactionWorkflowOutput = z.union([
+    transactionImportSchema.extend({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), import: transactionImportSchema,
+      schemaProjection: schemaProjectionSchema, effectReceipt: effectReceiptSchema.optional(),
+    }),
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["ready", "expired", "invalidated", "committed"]),
+      readyToCommit: z.boolean(), importPlanId: z.string().uuid(), expiresAt: z.string().datetime(),
+      previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), summary: transactionImportSummarySchema,
+      invalidationCode: z.string().min(1).optional(), alreadyCommitted: z.boolean().optional(),
+      commitResult: transactionImportSchema.optional(),
+      schemaProjection: schemaProjectionSchema,
+    }),
+    structuredErrorSchema,
+  ]);
+  const deletionSummarySchema = z.object({ accountId: z.number().int().positive(), accountName: z.string().min(1) });
+  const deletionIdentityShape = {
+    deletionPlanId: z.string().uuid(), expiresAt: z.string().datetime(),
+    previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), summary: deletionSummarySchema,
+  };
+  const accountDeletionWorkflowOutput = z.union([
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("ready"), readyToCommit: z.literal(true),
+      ...deletionIdentityShape,
+      preview: z.object({ accountId: z.number().int().positive(), accountName: z.string().min(1),
+        effect: z.literal("permanently_delete_empty_leaf_account") }),
+      requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
+      nextAction: z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
+        onApproval: z.object({ tool: z.literal("commit_delete_account"),
+          arguments: z.object({ deletion_plan_id: z.string().uuid() }) }) }),
+      schemaProjection: schemaProjectionSchema,
+    }),
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["ready", "expired", "invalidated"]),
+      readyToCommit: z.boolean(), ...deletionIdentityShape, invalidationCode: z.string().min(1).optional(),
+      schemaProjection: schemaProjectionSchema,
+    }),
+    z.object({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("committed"), readyToCommit: z.literal(false),
+      ...deletionIdentityShape,
+      deleted: z.object({ deleted: z.literal(true), accountId: z.number().int().positive(), name: z.string().min(1) }),
+      verifiedAbsent: z.literal(true), alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(),
+      schemaProjection: schemaProjectionSchema,
+    }),
+    structuredErrorSchema,
+  ]);
 
   server.registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
-    description: "Return a small Schema Semantic Compiler projection for the accounting concepts named in the request. Use this before choosing accounting tools when the relevant entities or field meanings are unclear.",
+    description: "Use when accounting entities, fields, units, relationships, or invariants are unclear. A successful result proves only the meanings present in the returned bounded compiler projection.",
     inputSchema: {
       request: z.string().trim().min(1).max(2000).describe("Natural-language description of the accounting data or operation to understand."),
     },
+    outputSchema: schemaDescriptionOutput,
     annotations: readOnly,
-  }, async ({ request }) => toolResult(schemaSemantics.route(request)));
+    _meta: toolMetadata("accounting.schema"),
+  }, async ({ request }) => safeToolResult(async () => ({ projection: schemaSemantics.route(request) })));
 
   server.registerTool("list_currencies", {
     title: "List currencies",
-    description: "List global and user-owned accounting units with ids, codes, display names, semantic types, and native-unit scales. Amounts elsewhere are integer native units, not decimal strings.",
-    inputSchema: {},
+    description: "Use to resolve currency or commodity IDs and native-unit scales. A successful page proves which global and owner-scoped units were visible at read time; follow nextCursor until complete.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: currencyListOutput,
     annotations: readOnly,
-  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
-    currencies: await accounting.listCurrencies(pool, personId),
-  }, operations.listCurrencies)));
+    _meta: toolMetadata("accounting.currencies"),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listCurrenciesPage(pool, personId, { limit, afterCurrencyId: cursor });
+    return withSchemaProjection(schemaSemantics, {
+      currencies: page.currencies,
+      resultMetadata: pageMetadata(page.currencies, page.nextCursor, "currencies"),
+    }, operations.listCurrencies);
+  }));
 
   server.registerTool("create_currency", {
     title: "Create currency or security",
-    description: "Create a private accounting unit for the API-token owner. Use security for stocks and mutual funds. Scale is the number of fractional decimal places and cannot safely change after amounts have been recorded. Never guess or choose a default scale: when the source data does not specify it, ask the user for the scale before calling this tool.",
+    description: "Use after the user or authoritative source supplies every field, including scale, to create one private accounting unit. Never guess or choose a default scale. A successful result and receipt prove the owner-scoped unit was created with the returned ID.",
     inputSchema: {
       code: z.string().trim().min(1).max(50).describe("Short user-facing code or ticker, such as VTSAX."),
       display_name: z.string().trim().min(1).max(255),
       currency_type: z.enum(userCurrencyTypes),
       scale: z.number().int().min(0).max(18).describe("Decimal places retained for integer native-unit amounts. This must be supplied by source data or explicitly confirmed by the user; never infer a default."),
     },
+    outputSchema: currencyMutationOutput,
     annotations: writesData,
-  }, async ({ code, display_name, currency_type, scale }) => toolResult(withSchemaProjection(schemaSemantics, {
-    currency: await accounting.createCurrency({
+    _meta: toolMetadata("accounting.currencies"),
+  }, async ({ code, display_name, currency_type, scale }) => safeToolResult(async () => {
+    const args = { code, display_name, currency_type, scale };
+    const currency = await accounting.createCurrency({
       pool,
       personId,
       code,
       displayName: display_name,
       type: currency_type,
       scale,
-    }),
-  }, operations.createCurrency)));
+    });
+    return withSchemaProjection(schemaSemantics, {
+      currency,
+      effectReceipt: effectReceipt("create_currency", args, "created", [{ type: "currency", id: currency.id }]),
+    }, operations.createCurrency);
+  }));
 
   server.registerTool("list_accounts", {
     title: "List accounts",
-    description: "List all accounts belonging to the API-token owner, including descriptions, placeholder state, posted native-unit balances, and archived state.",
-    inputSchema: {},
+    description: "Use to read the owner's chart of accounts and posted native-unit balances. A successful page proves the returned owner-scoped account state at read time; follow nextCursor until complete.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: accountListOutput,
     annotations: readOnly,
-  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
-    accounts: await accounting.listAccounts(pool, personId),
-  }, operations.listAccounts)));
+    _meta: toolMetadata("accounting.accounts"),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
+    return withSchemaProjection(schemaSemantics, {
+      accounts: page.accounts,
+      resultMetadata: pageMetadata(page.accounts, page.nextCursor, "accounts"),
+    }, operations.listAccounts);
+  }));
 
   server.registerTool("create_account", {
     title: "Create account",
-    description: "Create an account for the API-token owner. No root account, account type, or currency is inferred.",
+    description: "Use to create one owner-scoped account after every required accounting choice is known. A successful result and receipt prove creation of the returned account ID; no root, type, or currency is inferred.",
     inputSchema: {
       name: z.string().trim().min(1).describe("Human-facing account name."),
       description: z.string().trim().max(16000).nullable().optional(),
@@ -425,8 +819,11 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
       currency_id: positiveInteger("Currency id returned by list_currencies."),
     },
+    outputSchema: accountCreateOutput,
     annotations: writesData,
-  }, async ({ name, description, placeholder, parent_account_id, account_type, currency_id }) => {
+    _meta: toolMetadata("accounting.accounts", { dependencies: ["list_currencies"] }),
+  }, async ({ name, description, placeholder, parent_account_id, account_type, currency_id }) => safeToolResult(async () => {
+    const args = { name, description, placeholder, parent_account_id, account_type, currency_id };
     const created = await accounting.createAccount({
       personId,
       name,
@@ -436,8 +833,43 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       type: account_type,
       currencyId: currency_id,
     });
-    return toolResult(withSchemaProjection(schemaSemantics, { account: created }, operations.createAccount));
-  });
+    return withSchemaProjection(schemaSemantics, {
+      account: created,
+      effectReceipt: effectReceipt("create_account", args, "created", [{ type: "account", id: created.id }]),
+    }, operations.createAccount);
+  }));
+
+  server.registerTool("update_account", {
+    title: "Update account",
+    description: "Use to change one existing owner-scoped account. A successful result and receipt prove the named account was updated after parent-cycle, ownership, placeholder, currency, transaction, and balance-assertion checks.",
+    inputSchema: {
+      account_id: positiveInteger("Account id owned by the token owner."),
+      name: z.string().trim().min(1),
+      description: z.string().trim().max(16000).nullable().optional(),
+      placeholder: z.boolean().default(false),
+      parent_account_id: positiveInteger("Optional parent account id owned by the same user.").nullable().optional(),
+      account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
+      currency_id: positiveInteger("Currency id returned by list_currencies."),
+    },
+    outputSchema: accountUpdateOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.accounts", { dependencies: ["list_accounts", "list_currencies"] }),
+  }, async (input) => safeToolResult(async () => {
+    const updated = await accounting.updateAccount({
+      personId,
+      accountId: input.account_id,
+      name: input.name,
+      description: input.description,
+      placeholder: input.placeholder,
+      parentAccountId: input.parent_account_id,
+      type: input.account_type,
+      currencyId: input.currency_id,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      account: updated,
+      effectReceipt: effectReceipt("update_account", input, "updated", [{ type: "account", id: updated.accountId }]),
+    }, operations.updateAccount);
+  }));
 
   const importedAccountSchema = z.object({
     full_name: z.string().trim().min(1).max(4096).describe("Complete account path with colon-separated account names, such as Assets:Bank:Checking."),
@@ -462,13 +894,50 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     currenciesReused: z.number().int().nonnegative(),
     rejectedRows: z.number().int().nonnegative(),
   });
+  const accountTreeCurrencyResultSchema = z.object({
+    id: z.number().int().positive().nullable(),
+    ownerPersonId: z.number().int().positive().nullable(),
+    userDefined: z.boolean(),
+    code: z.string().min(1),
+    displayName: z.string().min(1),
+    type: z.enum(["iso_4217", "crypto", "security", "commodity", "custom"]),
+    scale: z.number().int().min(0).max(18),
+    status: z.enum(["planned", "existing", "created"]),
+  });
+  const accountTreeDetailedPreviewSchema = z.object({
+    dryRun: z.boolean(), ledgerChanged: z.boolean(), totalCount: z.number().int().nonnegative(),
+    createdCount: z.number().int().nonnegative(), existingCount: z.number().int().nonnegative(),
+    plannedCount: z.number().int().nonnegative(), currencyCreatedCount: z.number().int().nonnegative(),
+    currencyExistingCount: z.number().int().nonnegative(), currencyPlannedCount: z.number().int().nonnegative(),
+    wouldCreateAccountCount: z.number().int().nonnegative(), wouldReuseAccountCount: z.number().int().nonnegative(),
+    wouldCreateCurrencyCount: z.number().int().nonnegative(), wouldReuseCurrencyCount: z.number().int().nonnegative(),
+    accountSummary: z.object({
+      byStatus: z.object({ planned: z.number().int().nonnegative(), existing: z.number().int().nonnegative(), created: z.number().int().nonnegative() }),
+      byAccountType: countMapSchema, byCurrencyCode: countMapSchema,
+      byPlaceholderStatus: z.object({ placeholder: z.number().int().nonnegative(), postable: z.number().int().nonnegative() }),
+      byTopLevelBranch: countMapSchema,
+    }),
+    currencies: z.array(accountTreeCurrencyResultSchema),
+    accounts: z.array(z.object({
+      fullName: z.string().min(1), accountType: z.enum(["asset", "liability", "equity", "income", "expense"]),
+      currencyCode: z.string().min(1), description: z.string().nullable(), placeholder: z.boolean(),
+      parentFullName: z.string().nullable(), topLevelBranch: z.string().min(1),
+      status: z.enum(["planned", "existing", "created"]), accountId: z.number().int().positive().nullable(),
+    })),
+  });
   const accountTreePlanFailureSchema = z.object({
+    contractVersion: z.literal(MCP_CONTRACT_VERSION),
+    status: z.literal("error"),
     code: z.enum(["IMPORT_PLAN_NOT_FOUND", "IMPORT_PLAN_EXPIRED", "IMPORT_PLAN_INVALIDATED",
       "IMPORT_PLAN_STATE_CONFLICT", "IMPORT_PLAN_OWNER_MISMATCH"]),
+    message: z.string().min(1),
+    details: z.json().nullable(),
     recoverable: z.boolean(),
+    retry: retryDescriptorSchema,
     requiredAction: z.literal("RUN_NEW_DRY_RUN"),
   });
   const accountTreePreviewOutputSchema = z.union([z.object({
+    contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(true),
     importPlanId: z.string().uuid(),
     status: z.literal("ready"),
@@ -484,9 +953,10 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
         arguments: z.object({ import_plan_id: z.string().uuid() }),
       }),
     }),
-    preview: z.record(z.string(), z.unknown()),
-    schemaProjection: z.unknown(),
+    preview: accountTreeDetailedPreviewSchema,
+    schemaProjection: schemaProjectionSchema,
   }), z.object({
+    contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(false),
     status: z.literal("needs_input"),
     code: z.enum(["CURRENCY_SCALES_REQUIRED", "CURRENCY_DETAILS_REQUIRED"]),
@@ -506,55 +976,56 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       exampleAccountPaths: z.array(z.string()),
       userQuestions: z.array(z.string().min(1)).min(1),
     })).min(1),
+    retry: retryDescriptorSchema,
     nextAction: z.object({
       type: z.literal("collect_currency_details"),
       askUser: z.array(z.string().min(1)).min(1),
-      retry: z.object({
-        tool: z.literal("import_account_tree"),
-        preserveEntireBatch: z.literal(true),
-        instruction: z.string().min(1),
-      }),
+      tool: z.literal("import_account_tree"),
+      instruction: z.string().min(1),
     }),
-    schemaProjection: z.unknown(),
+    schemaProjection: schemaProjectionSchema,
   }), z.object({
+    contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(false),
     status: z.literal("blocked"),
     code: z.string().min(1),
     message: z.string().min(1),
-    details: z.unknown().nullable(),
+    details: z.json().nullable(),
     recoverable: z.literal(true),
+    retry: retryDescriptorSchema,
     requiredAction: z.literal("CORRECT_INPUT_AND_RUN_NEW_DRY_RUN"),
     nextAction: z.object({
       type: z.literal("correct_import_batch"),
-      retry: z.object({
-        tool: z.literal("import_account_tree"),
-        preserveEntireBatch: z.literal(true),
-      }),
+      tool: z.literal("import_account_tree"),
     }),
   }), accountTreePlanFailureSchema]);
   const accountTreeCommitOutputSchema = z.union([z.object({
+    contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(false),
     importPlanId: z.string().uuid(),
     status: z.literal("committed"),
     expiresAt: z.string().datetime(),
     previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     summary: accountTreePlanSummarySchema,
-    commitResult: z.record(z.string(), z.unknown()),
-    schemaProjection: z.unknown(),
+    commitResult: accountTreeDetailedPreviewSchema,
+    effectReceipt: effectReceiptSchema,
+    schemaProjection: schemaProjectionSchema,
   }), accountTreePlanFailureSchema]);
   const accountTreePlanStatusOutputSchema = z.union([
-    z.object({ readyToCommit: z.literal(true), status: z.literal("ready"), importPlanId: z.string().uuid(),
+    z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(true), status: z.literal("ready"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema }),
-    z.object({ readyToCommit: z.literal(false), status: z.literal("committed"), importPlanId: z.string().uuid(),
+      summary: accountTreePlanSummarySchema, schemaProjection: schemaProjectionSchema }),
+    z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("committed"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, commitResult: z.record(z.string(), z.unknown()) }),
-    z.object({ readyToCommit: z.literal(false), status: z.literal("expired"), importPlanId: z.string().uuid(),
+      summary: accountTreePlanSummarySchema, commitResult: accountTreeDetailedPreviewSchema,
+      schemaProjection: schemaProjectionSchema }),
+    z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("expired"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema }),
-    z.object({ readyToCommit: z.literal(false), status: z.literal("invalidated"), importPlanId: z.string().uuid(),
+      summary: accountTreePlanSummarySchema, schemaProjection: schemaProjectionSchema }),
+    z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("invalidated"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, invalidationCode: z.string().min(1) }),
+      summary: accountTreePlanSummarySchema, invalidationCode: z.string().min(1),
+      schemaProjection: schemaProjectionSchema }),
     accountTreePlanFailureSchema,
   ]);
   server.registerTool("import_account_tree", {
@@ -566,18 +1037,22 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       dry_run: z.literal(true).default(true).describe("Run the entire intended batch as a dry run and save a durable confirmation plan without changing ledger data. Never reduce a file retry to only previously blocked rows."),
     },
     outputSchema: accountTreePreviewOutputSchema,
-    annotations: idempotentWrite,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.accounts", {
+      dependencies: ["list_currencies"],
+      attachmentHints: ["Submit the complete account-tree batch on every preview retry."],
+    }),
   }, async ({ currencies, accounts }) => accountTreePlanToolResult(async () => {
     const accessibleCurrencies = await accounting.listCurrencies(pool, personId);
     const requirements = accountTreeCurrencyRequirements({ accounts, currencies, accessibleCurrencies });
     if (requirements.length) {
       return accountTreeNeedsInputWorkflow({ accounts, currencies, requirements });
     }
-    const accessibleCodes = new Set(accessibleCurrencies.map((currency) => accountingUnitKey(currency.code)));
+    const accessibleCodes = new Set(accessibleCurrencies.map((currency) => currencyKey(currency.code)));
     const result = await accounting.previewAccountTreeImport({
       pool,
       personId,
-      currencies: currencies.filter((currency) => !accessibleCodes.has(accountingUnitKey(currency.code)))
+      currencies: currencies.filter((currency) => !accessibleCodes.has(currencyKey(currency.code)))
         .map((currency) => ({
           code: currency.code,
           displayName: currency.display_name,
@@ -607,9 +1082,10 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     },
     outputSchema: accountTreePlanStatusOutputSchema,
     annotations: readOnly,
+    _meta: toolMetadata("accounting.accounts"),
   }, async ({ import_plan_id }) => accountTreePlanToolResult(() => accounting.getAccountTreeImportPlan({
     pool, personId, importPlanId: import_plan_id,
-  })));
+  }), { schemaSemantics, operation: operations.importAccountTree }));
 
   server.registerTool("commit_account_tree_import", {
     title: "Commit account tree import",
@@ -619,36 +1095,109 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     },
     outputSchema: accountTreeCommitOutputSchema,
     annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.accounts", { dependencies: ["import_account_tree"] }),
   }, async ({ import_plan_id }) => accountTreePlanToolResult(
-    () => accounting.commitAccountTreeImport({ pool, personId, importPlanId: import_plan_id }),
+    async () => {
+      const result = await accounting.commitAccountTreeImport({ pool, personId, importPlanId: import_plan_id });
+      return {
+        ...result,
+        effectReceipt: effectReceipt("commit_account_tree_import", { import_plan_id }, "committed", [
+          { type: "account_tree_import_plan", id: import_plan_id },
+        ]),
+      };
+    },
     { schemaSemantics, operation: operations.commitAccountTreeImport },
   ));
 
+  server.registerTool("preview_delete_account", {
+    title: "Preview account deletion",
+    description: "Use before deleting an account. A successful result proves the account was owner-scoped, empty, leaf-only, and unreferenced when checked, and returns a 15-minute opaque plan for explicit confirmation; it does not delete data.",
+    inputSchema: { account_id: positiveInteger("Owner-scoped account id to verify for permanent deletion.") },
+    outputSchema: accountDeletionWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.accounts", { dependencies: ["list_accounts"] }),
+  }, async ({ account_id }) => safeWorkflowResult(async () => {
+    const result = await accounting.previewAccountDeletion({ pool, personId, accountId: account_id });
+    return withSchemaProjection(schemaSemantics, {
+      ...result,
+      requiredAction: "REQUEST_USER_CONFIRMATION",
+      nextAction: {
+        type: "request_user_confirmation",
+        instruction: `Ask for explicit confirmation to permanently delete account ${result.summary.accountName}.`,
+        onApproval: {
+          tool: "commit_delete_account",
+          arguments: { deletion_plan_id: result.deletionPlanId },
+        },
+      },
+    }, operations.deleteAccount);
+  }, { defaultStatus: "ready", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
+
+  server.registerTool("get_account_delete_plan", {
+    title: "Get account deletion plan",
+    description: "Use to inspect a durable account-deletion preview across connections. A successful result proves whether the owner-scoped plan is ready, expired, invalidated, or committed and returns the stored commit result when available.",
+    inputSchema: { deletion_plan_id: z.string().trim().uuid() },
+    outputSchema: accountDeletionWorkflowOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.accounts"),
+  }, async ({ deletion_plan_id }) => safeWorkflowResult(async () =>
+    withSchemaProjection(schemaSemantics,
+      await accounting.getAccountDeletionPlan({ pool, personId, deletionPlanId: deletion_plan_id }),
+      operations.deleteAccount),
+  { retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
+
+  server.registerTool("commit_delete_account", {
+    title: "Commit account deletion",
+    description: "Use only after explicit user approval of the exact preview. A successful committed result and receipt prove the plan was owner-scoped, unexpired, revalidated, deleted atomically, and verified absent; repeated calls return the stored result.",
+    inputSchema: { deletion_plan_id: z.string().trim().uuid() },
+    outputSchema: accountDeletionWorkflowOutput,
+    annotations: destructiveWrite,
+    _meta: toolMetadata("accounting.accounts", { dependencies: ["preview_delete_account"] }),
+  }, async ({ deletion_plan_id }) => safeWorkflowResult(async () => {
+    const result = await accounting.commitAccountDeletion({ pool, personId, deletionPlanId: deletion_plan_id });
+    return withSchemaProjection(schemaSemantics, {
+      ...result,
+      effectReceipt: effectReceipt("commit_delete_account", { deletion_plan_id },
+        result.alreadyCommitted ? "unchanged" : "deleted", [
+          { type: "account", id: result.deleted.accountId },
+          { type: "account_delete_plan", id: deletion_plan_id },
+        ]),
+    }, operations.deleteAccount);
+  }, { defaultStatus: "committed", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
+
   server.registerTool("list_transactions", {
     title: "List transactions",
-    description: "List recent transactions belonging to the API-token owner, newest first.",
+    description: "Use to read recent owner-scoped transactions newest first. A successful page proves the returned transaction summaries were visible at read time; follow nextCursor until complete.",
     inputSchema: {
       limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
     },
+    outputSchema: transactionListOutput,
     annotations: readOnly,
-  }, async ({ limit }) => toolResult(withSchemaProjection(schemaSemantics, {
-    transactions: await accounting.listTransactions(pool, personId, limit),
-  }, operations.listTransactions)));
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listTransactionsPage(pool, personId, { limit, beforeTransactionId: cursor });
+    return withSchemaProjection(schemaSemantics, {
+      transactions: page.transactions,
+      resultMetadata: pageMetadata(page.transactions, page.nextCursor, "transactions"),
+    }, operations.listTransactions);
+  }));
 
   server.registerTool("get_transaction", {
     title: "Get transaction",
-    description: "Get one transaction belonging to the API-token owner, including its line items, tags, and transaction exchange rates.",
+    description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line items, tags, and transaction exchange rates for that transaction.",
     inputSchema: { transaction_id: positiveInteger("Transaction id.") },
+    outputSchema: transactionReadOutput,
     annotations: readOnly,
-  }, async ({ transaction_id }) => toolResult(withSchemaProjection(schemaSemantics, {
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ transaction_id }) => safeToolResult(async () => withSchemaProjection(schemaSemantics, {
     transaction: await accounting.getTransaction(pool, personId, transaction_id),
   }, operations.getTransaction)));
 
   const lineItemSchema = z.object({
     account_id: positiveInteger("Account id owned by the token owner."),
     amount_units: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the account currency's native units."),
-    memo: z.string().trim().nullable().optional(),
-    source_id: z.string().trim().nullable().optional(),
+    memo: z.string().trim().max(16000).nullable().optional(),
+    source_id: z.string().trim().max(128).nullable().optional(),
     tags: z.array(z.object({
       key: z.string().trim().min(1).max(50),
       value: z.string().trim().min(1),
@@ -662,9 +1211,9 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   });
   server.registerTool("create_transaction", {
     title: "Create transaction",
-    description: "Atomically create and validate a double-entry transaction using non-placeholder accounts. Values must balance in valuation_currency_id; provide a positive-unit exchange rate for each foreign account currency.",
+    description: "Use to atomically create one complete double-entry transaction. A successful result and receipt prove the owner-scoped accounts, currency, rates, and exact balance were validated and the returned transaction was created in the reported state.",
     inputSchema: {
-      description: z.string().trim().nullable().optional(),
+      description: z.string().trim().max(16000).nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
       valuation_currency_id: positiveInteger("Currency in which transaction balance is evaluated."),
       line_items: z.array(lineItemSchema).min(2),
@@ -673,8 +1222,10 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       source_system: z.string().trim().max(32).nullable().optional(),
       source_id: z.string().trim().max(128).nullable().optional(),
     },
+    outputSchema: transactionMutationOutput,
     annotations: writesData,
-  }, async (input) => {
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["list_accounts", "list_currencies"] }),
+  }, async (input) => safeToolResult(async () => {
     const created = await accounting.createTransaction({
       personId,
       description: input.description,
@@ -697,8 +1248,13 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       sourceSystem: input.source_system,
       sourceId: input.source_id,
     });
-    return toolResult(withSchemaProjection(schemaSemantics, { transaction: created }, operations.createTransaction));
-  });
+    return withSchemaProjection(schemaSemantics, {
+      transaction: created,
+      effectReceipt: effectReceipt("create_transaction", input, "created", [
+        { type: "transaction", id: created.transactionId },
+      ]),
+    }, operations.createTransaction);
+  }));
 
   const importedLineItemSchema = z.object({
     external_id: z.string().trim().min(1).max(128).nullable().optional()
@@ -729,9 +1285,14 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       dry_run: z.literal(true).default(true)
         .describe("Validate the complete batch and save a durable confirmation plan without changing ledger data."),
     },
-    annotations: idempotentWrite,
-  }, async ({ source_system, transactions }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: transactionPreviewWorkflow(await accounting.previewTransactionImport({
+    outputSchema: transactionWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["list_accounts", "list_currencies"],
+      attachmentHints: ["Submit the complete transaction batch on every preview retry."],
+    }),
+  }, async ({ source_system, transactions }) => safeWorkflowResult(async () => {
+    const imported = transactionPreviewWorkflow(await accounting.previewTransactionImport({
       pool,
       personId,
       sourceSystem: source_system,
@@ -748,8 +1309,22 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
           memo: line.memo,
         })),
       })),
-    })),
-  }, operations.importTransactions)));
+    }));
+    return withSchemaProjection(schemaSemantics, { ...imported, import: imported }, operations.importTransactions);
+  }, { retryTool: "import_transactions", preserveEntireBatch: true }));
+
+  server.registerTool("get_transaction_import_plan", {
+    title: "Get transaction import plan",
+    description: "Use to inspect a durable transaction-import plan across connections. A successful result proves whether the owner-scoped plan is ready, expired, invalidated, or committed and returns its preview binding and stored commit result.",
+    inputSchema: { import_plan_id: z.string().trim().uuid() },
+    outputSchema: transactionWorkflowOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ import_plan_id }) => safeWorkflowResult(async () =>
+    withSchemaProjection(schemaSemantics,
+      await accounting.getTransactionImportPlan({ pool, personId, importPlanId: import_plan_id }),
+      operations.commitTransactionImport),
+  { retryTool: "import_transactions", preserveEntireBatch: true }));
 
   server.registerTool("commit_transaction_import", {
     title: "Commit transaction import",
@@ -757,45 +1332,87 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_transactions."),
     },
+    outputSchema: transactionWorkflowOutput,
     annotations: idempotentWrite,
-  }, async ({ import_plan_id }) => toolResult(withSchemaProjection(schemaSemantics, {
-    import: await accounting.commitTransactionImportPlan({ pool, personId, importPlanId: import_plan_id }),
-  }, operations.commitTransactionImport)));
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["import_transactions"] }),
+  }, async ({ import_plan_id }) => safeWorkflowResult(async () => {
+    const imported = await accounting.commitTransactionImportPlan({ pool, personId, importPlanId: import_plan_id });
+    return withSchemaProjection(schemaSemantics, {
+      ...imported,
+      import: imported,
+      effectReceipt: effectReceipt("commit_transaction_import", { import_plan_id },
+        imported.alreadyCommitted ? "unchanged" : "committed", [
+          { type: "transaction_import_plan", id: import_plan_id },
+        ]),
+    }, operations.commitTransactionImport);
+  }, { defaultStatus: "committed", retryTool: "import_transactions", preserveEntireBatch: true }));
 
   server.registerTool("list_balance_assertions", {
     title: "List balance assertions",
-    description: "List known end-of-day balances and their differences from the posted ledger for the API-token owner.",
-    inputSchema: {},
+    description: "Use to inspect owner-scoped known end-of-day balances and ledger differences. A successful page proves the returned reconciliation comparisons at read time; follow nextCursor until complete.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: assertionListOutput,
     annotations: readOnly,
-  }, async () => toolResult(withSchemaProjection(schemaSemantics, {
-    assertions: await accounting.listBalanceAssertions(pool, personId),
-  }, operations.listBalanceAssertions)));
+    _meta: toolMetadata("accounting.reconciliation"),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listBalanceAssertionsPage(pool, personId, { limit, beforeAssertionId: cursor });
+    return withSchemaProjection(schemaSemantics, {
+      assertions: page.assertions,
+      resultMetadata: pageMetadata(page.assertions, page.nextCursor, "balance-assertions"),
+    }, operations.listBalanceAssertions);
+  }));
 
   server.registerTool("save_balance_assertion", {
     title: "Save balance assertion",
-    description: "Create or replace the known end-of-day native-unit balance for one account and date.",
+    description: "Use to create or replace one known owner-scoped end-of-day native-unit balance. A successful result and receipt prove the assertion stored for the exact account and date and show its current ledger difference.",
     inputSchema: {
       account_id: positiveInteger("Account id owned by the token owner."),
       balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       known_balance_units: z.string().regex(/^-?\d+$/).describe("Signed integer native units in the account currency."),
     },
-    annotations: { ...writesData, idempotentHint: true },
-  }, async ({ account_id, balance_date, known_balance_units }) => toolResult(withSchemaProjection(schemaSemantics, {
-    assertion: await accounting.saveBalanceAssertion({
+    outputSchema: assertionMutationOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_accounts"] }),
+  }, async ({ account_id, balance_date, known_balance_units }) => safeToolResult(async () => {
+    const args = { account_id, balance_date, known_balance_units };
+    const assertion = await accounting.saveBalanceAssertion({
       personId,
       accountId: account_id,
       balanceDate: balance_date,
       knownBalanceUnits: known_balance_units,
-    }),
-  }, operations.saveBalanceAssertion)));
+    });
+    return withSchemaProjection(schemaSemantics, {
+      assertion,
+      effectReceipt: effectReceipt("save_balance_assertion", args, "upserted", [
+        { type: "balance_assertion", id: assertion.id },
+      ]),
+    }, operations.saveBalanceAssertion);
+  }));
 
   server.registerTool("verify_ledger", {
     title: "Verify ledger",
-    description: "Check every posted transaction belonging to the API-token owner against the central double-entry and exchange-rate invariants.",
-    inputSchema: {},
+    description: "Use to audit posted transactions against the central double-entry and exchange-rate invariants. A successful page proves the reported transactions were revalidated at read time; follow nextCursor until complete.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: ledgerVerificationOutput,
     annotations: readOnly,
-  }, async () => toolResult(withSchemaProjection(schemaSemantics,
-    await accounting.verifyAllPostedTransactions(pool, personId), operations.verifyLedger)));
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const report = await accounting.verifyPostedTransactionsPage(pool, personId, { limit, afterTransactionId: cursor });
+    const resultMetadata = {
+      complete: report.nextCursor == null,
+      returned: report.checked,
+      nextCursor: report.nextCursor,
+      sourceRefs: report.checkedTransactionIds.map((id) => `accounting://transactions/${id}`),
+    };
+    const { nextCursor: _nextCursor, checkedTransactionIds: _checkedTransactionIds, ...result } = report;
+    return withSchemaProjection(schemaSemantics, { ...result, resultMetadata }, operations.verifyLedger);
+  }));
 
   return server;
 }

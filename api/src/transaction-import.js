@@ -528,6 +528,35 @@ function mariaDbUtcTimestamp(date) {
   return date.toISOString().replace("T", " ").replace("Z", "");
 }
 
+function planIsoTimestamp(value) {
+  if (value instanceof Date) return value.toISOString();
+  const normalized = String(value ?? "").trim().replace(" ", "T");
+  const parsed = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(normalized) ? normalized : `${normalized}Z`);
+  if (Number.isNaN(parsed.getTime())) throw importError("Transaction import plan expiration is invalid.", "IMPORT_PLAN_STATE_CONFLICT", undefined, 500);
+  return parsed.toISOString();
+}
+
+function parsePlanJson(value, label) {
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    throw importError(`Transaction import plan ${label} is invalid.`, "IMPORT_PLAN_STATE_CONFLICT", undefined, 500);
+  }
+}
+
+function transactionPlanIdentity(plan) {
+  const digest = String(plan.preview_sha256 ?? "");
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw importError("Transaction import plan preview digest is invalid.", "IMPORT_PLAN_STATE_CONFLICT", undefined, 500);
+  }
+  return {
+    importPlanId: String(plan.import_plan_id),
+    expiresAt: planIsoTimestamp(plan.expires_at),
+    previewDigest: `sha256:${digest}`,
+    summary: parsePlanJson(plan.summary_json, "summary"),
+  };
+}
+
 export async function previewTransactionImport({ pool, personId, sourceSystem, transactions }) {
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
   return withPoolTransaction(pool, async (connection) => {
@@ -546,15 +575,57 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
       lineItemsReused: preview.wouldReuseLineItemCount,
       rejectedTransactions: preview.rejectedTransactionCount,
     };
+    const previewHash = payloadHash(JSON.stringify(preview));
     await connection.query(
       `INSERT INTO accounting_import_plans
         (import_plan_id, owner_person_id, import_kind, plan_status, source_system,
          payload_sha256, preview_sha256, payload_json, summary_json, expires_at)
        VALUES (?, ?, 'transactions', 'ready', ?, ?, ?, ?, ?, ?)`,
-      [importPlanId, personId, normalized.sourceSystem, payloadHash(payloadJson), payloadHash(JSON.stringify(preview)),
+      [importPlanId, personId, normalized.sourceSystem, payloadHash(payloadJson), previewHash,
         payloadJson, JSON.stringify(transactionSummary), expiresAt],
     );
-    return summarize(normalized, entries, { importPlanId, expiresAt: expiresAtDate.toISOString() });
+    return {
+      ...summarize(normalized, entries, { importPlanId, expiresAt: expiresAtDate.toISOString() }),
+      status: "ready",
+      expiresAt: expiresAtDate.toISOString(),
+      previewDigest: `sha256:${previewHash}`,
+      summary: transactionSummary,
+    };
+  });
+}
+
+export async function getTransactionImportPlan({ pool, personId, importPlanId }) {
+  const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT import_plan_id, plan_status, preview_sha256, summary_json, expires_at,
+              committed_at, invalidated_at, invalidation_code, result_json,
+              expires_at <= UTC_TIMESTAMP(6) AS is_expired
+         FROM accounting_import_plans
+        WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'transactions'`,
+      [resolvedPlanId, personId],
+    );
+    const plan = rows[0];
+    if (!plan) throw importError("Transaction import plan not found.", "IMPORT_PLAN_NOT_FOUND", undefined, 404);
+    const identity = transactionPlanIdentity(plan);
+    if (plan.plan_status === "committed") {
+      if (plan.committed_at == null || !plan.result_json) {
+        throw importError("The committed import plan state is inconsistent.", "IMPORT_PLAN_STATE_CONFLICT", undefined, 500);
+      }
+      return {
+        readyToCommit: false,
+        status: "committed",
+        ...identity,
+        commitResult: { ...parsePlanJson(plan.result_json, "result"), alreadyCommitted: true },
+        alreadyCommitted: true,
+      };
+    }
+    if (plan.plan_status === "invalidated") {
+      return { readyToCommit: false, status: "invalidated", ...identity,
+        invalidationCode: plan.invalidation_code ?? "DATABASE_STATE_CHANGED" };
+    }
+    if (Boolean(plan.is_expired)) return { readyToCommit: false, status: "expired", ...identity };
+    return { readyToCommit: true, status: "ready", ...identity };
   });
 }
 
@@ -594,10 +665,11 @@ async function insertTransaction(connection, personId, sourceSystem, resolved) {
 
 export async function commitTransactionImportPlan({ pool, personId, importPlanId }) {
   const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
-  return withPoolTransaction(pool, async (connection) => {
+  const outcome = await withPoolTransaction(pool, async (connection) => {
     const [planRows] = await connection.query(
-      `SELECT import_plan_id, plan_status, source_system, payload_sha256, payload_json, expires_at,
-              committed_at, result_json, expires_at <= UTC_TIMESTAMP(6) AS is_expired
+      `SELECT import_plan_id, plan_status, source_system, payload_sha256, preview_sha256,
+              payload_json, summary_json, expires_at, committed_at, invalidated_at,
+              invalidation_code, result_json, expires_at <= UTC_TIMESTAMP(6) AS is_expired
          FROM accounting_import_plans
         WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'transactions'
         FOR UPDATE`,
@@ -605,20 +677,40 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     );
     const plan = planRows[0];
     if (!plan) throw importError("Transaction import plan not found.", "IMPORT_PLAN_NOT_FOUND", undefined, 404);
+    const identity = transactionPlanIdentity(plan);
     if (plan.committed_at != null) {
-      if (!plan.result_json) throw importError("The committed import plan has no stored result.", "IMPORT_PLAN_RESULT_MISSING", undefined, 500);
-      return { ...JSON.parse(plan.result_json), alreadyCommitted: true };
+      if (plan.plan_status !== "committed" || !plan.result_json) {
+        throw importError("The committed import plan state is inconsistent.", "IMPORT_PLAN_STATE_CONFLICT", undefined, 500);
+      }
+      return { result: { ...parsePlanJson(plan.result_json, "result"), ...identity, status: "committed", alreadyCommitted: true } };
     }
+    if (plan.plan_status === "invalidated") throw importError("Transaction import plan is invalidated; run a new dry run.", "IMPORT_PLAN_INVALIDATED");
+    if (plan.plan_status !== "ready") throw importError("Transaction import plan is not ready.", "IMPORT_PLAN_STATE_CONFLICT");
     if (Boolean(plan.is_expired)) throw importError("Transaction import plan has expired; run a new dry run.", "IMPORT_PLAN_EXPIRED");
     if (payloadHash(plan.payload_json) !== String(plan.payload_sha256)) {
-      throw importError("Stored transaction import plan failed its integrity check.", "IMPORT_PLAN_INTEGRITY_FAILURE", undefined, 500);
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'PAYLOAD_INTEGRITY_FAILURE'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: importError("Stored transaction import plan failed its integrity check.", "IMPORT_PLAN_INTEGRITY_FAILURE", undefined, 500) };
     }
 
     const normalized = JSON.parse(plan.payload_json);
     const entries = await analyze(connection, personId, normalized, true);
     if (entries.some((entry) => entry.status === "rejected")) {
-      throw importError("Transaction import plan is no longer valid; review a new dry run.", "IMPORT_PLAN_NO_LONGER_VALID",
-        summarize(normalized, entries));
+      const details = summarize(normalized, entries);
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'DATABASE_STATE_CHANGED'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: importError("Transaction import plan is no longer valid; review a new dry run.",
+        "IMPORT_PLAN_NO_LONGER_VALID", details) };
     }
 
     for (const entry of entries) {
@@ -627,7 +719,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
       entry.status = "created";
     }
     const result = { ...summarize(normalized, entries, { ledgerChanged: true }),
-      readyToCommit: false, importPlanId: resolvedPlanId, committed: true, alreadyCommitted: false };
+      ...identity, readyToCommit: false, status: "committed", committed: true, alreadyCommitted: false };
     const resultJson = JSON.stringify(result);
     await connection.query(
       `UPDATE accounting_import_plans
@@ -635,6 +727,8 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
         WHERE import_plan_id = ? AND owner_person_id = ?`,
       [resultJson, resolvedPlanId, personId],
     );
-    return result;
+    return { result };
   });
+  if (outcome.failure) throw outcome.failure;
+  return outcome.result;
 }

@@ -319,7 +319,9 @@ test("an account-tree plan survives a new MCP connection and unrelated tool call
   assert.equal(blocked.structuredContent.status, "blocked");
   assert.equal(blocked.structuredContent.code, "DUPLICATE_ACCOUNT_PATH");
   assert.equal(blocked.structuredContent.requiredAction, "CORRECT_INPUT_AND_RUN_NEW_DRY_RUN");
-  assert.equal(blocked.structuredContent.nextAction.retry.preserveEntireBatch, true);
+  assert.equal(blocked.structuredContent.nextAction.tool, "import_account_tree");
+  assert.equal(blocked.structuredContent.retry.protocol, "agent-slayer.retry-descriptor");
+  assert.equal(blocked.structuredContent.retry.preserve_complete_original_batch, true);
   await firstClient.close();
   await firstServer.close();
 

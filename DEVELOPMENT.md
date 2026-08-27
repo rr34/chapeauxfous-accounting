@@ -97,6 +97,20 @@ small Schema Semantic Compiler projection for the tables and fields used by
 that operation. `describe_accounting_schema` accepts natural language and can
 retrieve a relevant projection before another tool is selected.
 
+The MCP publishes its versioned capability manifest at
+`accounting://manifest/capabilities/v1`. The manifest groups tools into stable
+capabilities, declares dependencies and attachment guidance, and advertises the
+bounded `accounting.currencies.active` and `accounting.accounts.active_paths`
+context views. Every tool publishes an exact output schema and all four effect
+annotations. Bounded read tools return completeness, count, continuation, and
+stable source-reference metadata. Mutations return a server-issued receipt
+binding the tool name to a SHA-256 digest of its exact arguments and the
+observed entity references. Source references returned as MCP resource links
+resolve through owner-scoped resource templates instead of duplicating the
+referenced record in tool text. Recoverable provider errors and incomplete
+workflows use the authoritative `agent-slayer.retry-descriptor` version-1
+field contract.
+
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated
 users see those rows plus only their own units. A unit's integer `scale` must be
@@ -139,7 +153,9 @@ ambiguous paths, numerical create/reuse/reject counts, useful summaries, and—i
 there are no rejections—a durable `importPlanId`. After explicit approval,
 `commit_transaction_import` accepts only that ID, revalidates the batch, and
 atomically creates all planned transactions. Identical confirmation retries
-return the stored commit result.
+return the stored commit result. `get_transaction_import_plan` reports ready,
+expired, invalidated, or committed state across MCP connections, including the
+preview digest, expiration, compact summary, and stored commit result.
 
 New registrations create only the user identity and begin with an empty chart
 of accounts. Clicking an account in the web client opens its editor; the
@@ -149,15 +165,29 @@ assertions must have those references resolved first. Currency changes and
 conversion to a placeholder are also blocked once native-unit amounts or
 balance assertions depend on the account.
 
+The MCP exposes the same account update service as the HTTP adapter. Permanent
+MCP deletion is a provider-owned workflow: `preview_delete_account` verifies an
+owner-scoped account is an empty, unreferenced leaf and saves a durable
+15-minute plan; after explicit approval, `commit_delete_account` locks and
+revalidates that exact plan, deletes atomically, verifies the account is absent,
+and returns a receipt. `get_account_delete_plan` reads its durable status.
+
 Timestamped security, mutual-fund, commodity, and FX price history belongs in
 owned `xrates` rows with `xrate_type = 'reference'`. Posted accounting continues
 to use only the exact `transaction` rate copied into each transaction.
 
 ### Deployment order
 
+Migration 0011 is prepared, but the tracked semantic form has intentionally not
+been regenerated. Decide first whether the operational
+`accounting_import_plans` table belongs in the compiler's exposed accounting
+schema and supply its human-owned meanings if it does. Refresh and review the
+tracked semantic form against a migrated development database before deploying
+the corresponding application code; do not generate it from production.
+
 1. Install the pinned dependencies from `package-lock.json`.
 2. Create and verify a recoverable database backup.
-3. Stop API writers and apply all pending migrations through 0010 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
+3. Stop API writers and apply all pending migrations through 0011 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:verify`, then restart the API service.
 
 `schema:semantics:sync` is a development command that rewrites the tracked

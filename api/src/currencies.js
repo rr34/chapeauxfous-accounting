@@ -57,6 +57,43 @@ export async function listCurrencies(pool, personId) {
   return rows.map(mapCurrency);
 }
 
+export async function listCurrenciesPage(pool, personId, { limit = 100, afterCurrencyId = null } = {}) {
+  const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const cursor = afterCurrencyId == null ? 0 : Number(afterCurrencyId);
+  if (!Number.isInteger(cursor) || cursor < 0) {
+    throw currencyError("Currency cursor is invalid.", 400, "INVALID_CURSOR");
+  }
+  const [rows] = await pool.query(
+    `SELECT currency_id, owner_person_id, CurrencyAbbreviation, display_name,
+            currency_type, scale
+       FROM currencies
+      WHERE (owner_person_id IS NULL OR owner_person_id = ?)
+        AND currency_id > ?
+      ORDER BY currency_id
+      LIMIT ?`,
+    [personId, cursor, resolvedLimit + 1],
+  );
+  const hasMore = rows.length > resolvedLimit;
+  const currencies = rows.slice(0, resolvedLimit).map(mapCurrency);
+  return { currencies, nextCursor: hasMore ? String(currencies.at(-1).id) : null };
+}
+
+export async function getCurrency(pool, personId, currencyId) {
+  const resolvedCurrencyId = Number(currencyId);
+  if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) {
+    throw currencyError("Currency not found.", 404, "CURRENCY_NOT_FOUND");
+  }
+  const [rows] = await pool.query(
+    `SELECT currency_id, owner_person_id, CurrencyAbbreviation, display_name,
+            currency_type, scale
+       FROM currencies
+      WHERE currency_id = ? AND (owner_person_id IS NULL OR owner_person_id = ?)`,
+    [resolvedCurrencyId, personId],
+  );
+  if (!rows.length) throw currencyError("Currency not found.", 404, "CURRENCY_NOT_FOUND");
+  return mapCurrency(rows[0]);
+}
+
 export async function loadAccessibleCurrencies(connection, personId, { lock = false } = {}) {
   const [rows] = await connection.query(
     `SELECT currency_id, owner_person_id, CurrencyAbbreviation, display_name,

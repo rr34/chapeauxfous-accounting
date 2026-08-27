@@ -72,6 +72,39 @@ export async function listBalanceAssertions(pool, personId) {
   return rows.map(mapAssertion);
 }
 
+export async function listBalanceAssertionsPage(pool, personId, { limit = 100, beforeAssertionId = null } = {}) {
+  const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const cursor = beforeAssertionId == null ? null : Number(beforeAssertionId);
+  if (cursor != null && (!Number.isInteger(cursor) || cursor <= 0)) {
+    throw applicationError("Balance-assertion cursor is invalid.", 400, "INVALID_CURSOR");
+  }
+  const cursorSql = cursor == null ? "" : " AND aba.account_balance_assertion_id < ?";
+  const [rows] = await pool.query(
+    `${assertionSelect}
+      WHERE aba.owner_person_id = ?${cursorSql}
+      ORDER BY aba.account_balance_assertion_id DESC
+      LIMIT ?`,
+    cursor == null ? [personId, resolvedLimit + 1] : [personId, cursor, resolvedLimit + 1],
+  );
+  const hasMore = rows.length > resolvedLimit;
+  const assertions = rows.slice(0, resolvedLimit).map(mapAssertion);
+  return { assertions, nextCursor: hasMore ? String(assertions.at(-1).id) : null };
+}
+
+export async function getBalanceAssertion(pool, personId, assertionId) {
+  const resolvedAssertionId = Number(assertionId);
+  if (!Number.isInteger(resolvedAssertionId) || resolvedAssertionId <= 0) {
+    throw applicationError("Balance assertion not found.", 404, "BALANCE_ASSERTION_NOT_FOUND");
+  }
+  const [rows] = await pool.query(
+    `${assertionSelect}
+      WHERE aba.account_balance_assertion_id = ? AND aba.owner_person_id = ?`,
+    [resolvedAssertionId, personId],
+  );
+  if (!rows.length) throw applicationError("Balance assertion not found.", 404, "BALANCE_ASSERTION_NOT_FOUND");
+  return mapAssertion(rows[0]);
+}
+
 export async function saveBalanceAssertion({ personId, accountId, balanceDate, knownBalanceUnits }) {
   const resolvedAccountId = Number(accountId);
   if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {

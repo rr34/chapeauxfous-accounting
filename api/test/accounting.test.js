@@ -6,7 +6,25 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { deleteAccount, updateAccount, validateTransaction } = await import("../src/accounting.js");
+const { createTransaction, deleteAccount, updateAccount, validateTransaction } = await import("../src/accounting.js");
+
+test("transaction creation rejects impossible dates before opening a transaction", async () => {
+  let opened = false;
+  await assert.rejects(
+    createTransaction({ personId: 7, transactionDate: "2026-02-30", valuationCurrencyId: 1,
+      lineItems: [{}, {}] }, async () => { opened = true; }),
+    (error) => error.code === "INVALID_TRANSACTION_DATE",
+  );
+  assert.equal(opened, false);
+});
+
+test("transaction source identity must be complete", async () => {
+  await assert.rejects(
+    createTransaction({ personId: 7, transactionDate: "2026-02-28", valuationCurrencyId: 1,
+      sourceSystem: "bank", lineItems: [{}, {}] }, async () => assert.fail("transaction should not open")),
+    (error) => error.code === "INCOMPLETE_SOURCE_IDENTITY",
+  );
+});
 
 function fakeConnection({ lines, rates }) {
   return {

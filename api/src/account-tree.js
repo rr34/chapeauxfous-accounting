@@ -302,7 +302,13 @@ function planError(code, message) {
 export function accountTreeImportPlanFailure(error) {
   const metadata = planFailureMetadata[error?.code];
   if (!metadata) return null;
-  return { code: error.code, recoverable: metadata.recoverable, requiredAction: metadata.requiredAction };
+  return {
+    code: error.code,
+    message: error.message,
+    details: error.details ?? null,
+    recoverable: metadata.recoverable,
+    requiredAction: metadata.requiredAction,
+  };
 }
 
 function accountTreePlanSummary(preview) {

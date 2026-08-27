@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -60,4 +60,7 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(durablePlanWorkflowMigration.sql, /DROP COLUMN IF EXISTS item_count/);
   assert.match(durablePlanWorkflowMigration.sql, /SCHEMA_UPGRADE_REQUIRES_NEW_DRY_RUN/);
   assert.doesNotMatch(durablePlanWorkflowMigration.sql, /GENERATED ALWAYS/i);
+  const accountDeletionPlanMigration = migrations.find((migration) => migration.version === 11);
+  assert.match(accountDeletionPlanMigration.sql, /account_delete/);
+  assert.doesNotMatch(accountDeletionPlanMigration.sql, /GENERATED ALWAYS/i);
 });

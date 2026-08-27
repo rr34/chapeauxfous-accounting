@@ -12,6 +12,28 @@ function integerString(value, field) {
   return normalized;
 }
 
+function calendarDate(value, field = "Transaction date") {
+  const normalized = String(value ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw applicationError(`${field} must be YYYY-MM-DD.`, 400, "INVALID_TRANSACTION_DATE");
+  }
+  const parsed = new Date(`${normalized}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) {
+    throw applicationError(`${field} is not a valid calendar date.`, 400, "INVALID_TRANSACTION_DATE");
+  }
+  return normalized;
+}
+
+function optionalBoundedText(value, field, maximum) {
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  if ([...normalized].length > maximum) {
+    throw applicationError(`${field} cannot exceed ${maximum} characters.`, 400, `INVALID_${field.toUpperCase().replaceAll(" ", "_")}`);
+  }
+  return normalized;
+}
+
 export async function listAccounts(pool, personId) {
   const [rows] = await pool.query(
     `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
@@ -37,6 +59,53 @@ export async function listAccounts(pool, personId) {
     type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
     scale: Number(row.scale), balanceUnits: String(row.balance_units), archivedAt: row.archived_at,
   }));
+}
+
+export async function listAccountsPage(pool, personId, { limit = 100, afterAccountId = null } = {}) {
+  const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const cursor = afterAccountId == null ? 0 : Number(afterAccountId);
+  if (!Number.isInteger(cursor) || cursor < 0) throw applicationError("Account cursor is invalid.", 400, "INVALID_CURSOR");
+  const [rows] = await pool.query(
+    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
+            a.parent_account_id, a.AccountType,
+            a.account_currency_id, c.CurrencyAbbreviation, c.scale,
+            COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
+            a.archived_at
+       FROM accounts a
+       JOIN currencies c ON c.currency_id = a.account_currency_id
+       LEFT JOIN line_items li ON li.account_id = a.account_id
+       LEFT JOIN transactions t ON t.transaction_id = li.transaction_id AND t.owner_person_id = a.owner_person_id
+      WHERE a.owner_person_id = ? AND a.account_id > ?
+      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder,
+               a.parent_account_id, a.AccountType,
+               a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
+      ORDER BY a.account_id
+      LIMIT ?`,
+    [personId, cursor, resolvedLimit + 1],
+  );
+  const hasMore = rows.length > resolvedLimit;
+  const pageRows = rows.slice(0, resolvedLimit);
+  const accounts = pageRows.map((row) => ({
+    id: Number(row.account_id), name: row.AccountName, description: row.description,
+    placeholder: Boolean(row.is_placeholder),
+    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
+    type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
+    scale: Number(row.scale), balanceUnits: String(row.balance_units), archivedAt: row.archived_at,
+  }));
+  return { accounts, nextCursor: hasMore ? String(accounts.at(-1).id) : null };
+}
+
+export async function getAccount(pool, personId, accountId) {
+  const resolvedAccountId = Number(accountId);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+  const page = await listAccountsPage(pool, personId, { limit: 1, afterAccountId: resolvedAccountId - 1 });
+  const account = page.accounts[0];
+  if (!account || account.id !== resolvedAccountId) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+  return account;
 }
 
 export async function createAccount({ personId, name, description, placeholder = false, parentAccountId, type, currencyId }) {
@@ -153,6 +222,47 @@ export async function updateAccount({ personId, accountId, name, description, pl
   });
 }
 
+async function requireDeletableAccount(connection, personId, resolvedAccountId, { lock = true } = {}) {
+  const lockSql = lock ? " FOR UPDATE" : "";
+  const [accountRows] = await connection.query(
+    `SELECT account_id, AccountName
+       FROM accounts
+      WHERE account_id = ? AND owner_person_id = ?${lockSql}`,
+    [resolvedAccountId, personId],
+  );
+  const account = accountRows[0];
+  if (!account) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+
+  const [children] = await connection.query(
+    `SELECT account_id FROM accounts WHERE parent_account_id = ? LIMIT 1${lockSql}`,
+    [resolvedAccountId],
+  );
+  if (children.length) throw applicationError("Move or delete this account's child accounts first.", 409, "ACCOUNT_HAS_CHILDREN");
+
+  const [lineItems] = await connection.query(
+    `SELECT line_item_id FROM line_items WHERE account_id = ? LIMIT 1${lockSql}`,
+    [resolvedAccountId],
+  );
+  if (lineItems.length) throw applicationError("Account cannot be deleted because transactions reference it.", 409, "ACCOUNT_HAS_TRANSACTIONS");
+
+  const [assertions] = await connection.query(
+    `SELECT account_balance_assertion_id FROM account_balance_assertions WHERE account_id = ? LIMIT 1${lockSql}`,
+    [resolvedAccountId],
+  );
+  if (assertions.length) {
+    throw applicationError("Delete this account's balance assertions before deleting the account.", 409, "ACCOUNT_HAS_BALANCE_ASSERTIONS");
+  }
+  return { accountId: resolvedAccountId, name: account.AccountName };
+}
+
+export async function inspectAccountDeletion({ personId, accountId }, runInTransaction = withTransaction) {
+  const resolvedAccountId = Number(accountId);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+  return runInTransaction((connection) => requireDeletableAccount(connection, personId, resolvedAccountId, { lock: false }));
+}
+
 export async function deleteAccount({ personId, accountId }, runInTransaction = withTransaction) {
   const resolvedAccountId = Number(accountId);
   if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
@@ -160,39 +270,7 @@ export async function deleteAccount({ personId, accountId }, runInTransaction = 
   }
 
   return runInTransaction(async (connection) => {
-    const [accountRows] = await connection.query(
-      `SELECT account_id, AccountName
-         FROM accounts
-        WHERE account_id = ? AND owner_person_id = ?
-        FOR UPDATE`,
-      [resolvedAccountId, personId],
-    );
-    const account = accountRows[0];
-    if (!account) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
-
-    const [children] = await connection.query(
-      "SELECT account_id FROM accounts WHERE parent_account_id = ? LIMIT 1 FOR UPDATE",
-      [resolvedAccountId],
-    );
-    if (children.length) {
-      throw applicationError("Move or delete this account's child accounts first.", 409, "ACCOUNT_HAS_CHILDREN");
-    }
-
-    const [lineItems] = await connection.query(
-      "SELECT line_item_id FROM line_items WHERE account_id = ? LIMIT 1 FOR UPDATE",
-      [resolvedAccountId],
-    );
-    if (lineItems.length) {
-      throw applicationError("Account cannot be deleted because transactions reference it.", 409, "ACCOUNT_HAS_TRANSACTIONS");
-    }
-
-    const [assertions] = await connection.query(
-      "SELECT account_balance_assertion_id FROM account_balance_assertions WHERE account_id = ? LIMIT 1 FOR UPDATE",
-      [resolvedAccountId],
-    );
-    if (assertions.length) {
-      throw applicationError("Delete this account's balance assertions before deleting the account.", 409, "ACCOUNT_HAS_BALANCE_ASSERTIONS");
-    }
+    const account = await requireDeletableAccount(connection, personId, resolvedAccountId);
 
     try {
       const [result] = await connection.query(
@@ -209,7 +287,7 @@ export async function deleteAccount({ personId, accountId }, runInTransaction = 
       throw error;
     }
 
-    return { deleted: true, accountId: resolvedAccountId, name: account.AccountName };
+    return { deleted: true, accountId: resolvedAccountId, name: account.name };
   });
 }
 
@@ -304,58 +382,86 @@ export async function validateTransaction(connection, transactionId, personId, {
   return { valid: true, lineItemCount: lines.length, valuationCurrencyId, foreignCurrencyIds: [...usedForeignCurrencies] };
 }
 
-export async function createTransaction({ personId, description, transactionDate, valuationCurrencyId, lineItems, rates, post = true, sourceSystem, sourceId }) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(transactionDate ?? ""))) throw applicationError("Transaction date must be YYYY-MM-DD.");
+export async function createTransaction({ personId, description, transactionDate, valuationCurrencyId, lineItems, rates, post = true, sourceSystem, sourceId }, runInTransaction = withTransaction) {
+  const resolvedTransactionDate = calendarDate(transactionDate);
   if (!Array.isArray(lineItems) || lineItems.length < 2) throw applicationError("At least two line items are required.");
-  return withTransaction(async (connection) => {
-    await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
-    const [result] = await connection.query(
-      `INSERT INTO transactions
-        (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate, source_system, source_id)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
-      [personId, String(description ?? "").trim() || null, valuationCurrencyId, transactionDate, sourceSystem ?? null, sourceId ?? null],
-    );
-    const transactionId = Number(result.insertId);
-    for (const line of lineItems) {
-      const accountId = Number(line.accountId);
-      const amountUnits = integerString(line.amountUnits, "amountUnits");
-      const [accountRows] = await connection.query(
-        "SELECT account_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
-        [accountId, personId],
+  const resolvedDescription = optionalBoundedText(description, "transaction description", 16000);
+  const resolvedSourceSystem = optionalBoundedText(sourceSystem, "source system", 32);
+  const resolvedSourceId = optionalBoundedText(sourceId, "source id", 128);
+  if ((resolvedSourceSystem == null) !== (resolvedSourceId == null)) {
+    throw applicationError("sourceSystem and sourceId must be supplied together.", 400, "INCOMPLETE_SOURCE_IDENTITY");
+  }
+  try {
+    return await runInTransaction(async (connection) => {
+      await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
+      const [result] = await connection.query(
+        `INSERT INTO transactions
+          (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate, source_system, source_id)
+         VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
+        [personId, resolvedDescription, valuationCurrencyId, resolvedTransactionDate, resolvedSourceSystem, resolvedSourceId],
       );
-      if (!accountRows.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
-      if (Boolean(accountRows[0].is_placeholder)) {
-        throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
+      const transactionId = Number(result.insertId);
+      for (const line of lineItems) {
+        const accountId = Number(line.accountId);
+        const amountUnits = integerString(line.amountUnits, "amountUnits");
+        const [accountRows] = await connection.query(
+          "SELECT account_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
+          [accountId, personId],
+        );
+        if (!accountRows.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+        if (Boolean(accountRows[0].is_placeholder)) {
+          throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
+        }
+        const [lineResult] = await connection.query(
+          `INSERT INTO line_items (transaction_id, amount_units, memo, account_id, source_id)
+           VALUES (?, ?, ?, ?, ?)`,
+          [transactionId, amountUnits, optionalBoundedText(line.memo, "line memo", 16000), accountId,
+            optionalBoundedText(line.sourceId, "line source id", 128)],
+        );
+        await attachTags(connection, personId, Number(lineResult.insertId), line.tags);
       }
-      const [lineResult] = await connection.query(
-        `INSERT INTO line_items (transaction_id, amount_units, memo, account_id, source_id)
-         VALUES (?, ?, ?, ?, ?)`,
-        [transactionId, amountUnits, String(line.memo ?? "").trim() || null, accountId, line.sourceId ?? null],
-      );
-      await attachTags(connection, personId, Number(lineResult.insertId), line.tags);
+      for (const rate of Array.isArray(rates) ? rates : []) {
+        await connection.query(
+          `INSERT INTO xrates
+            (owner_person_id, xrate_type, ValidAt, transaction_id, from_units, from_currency_id, to_units, to_currency_id)
+           VALUES (?, 'transaction', NULL, ?, ?, ?, ?, ?)`,
+          [personId, transactionId, integerString(rate.fromUnits, "fromUnits"), Number(rate.fromCurrencyId),
+            integerString(rate.toUnits, "toUnits"), Number(rate.toCurrencyId)],
+        );
+      }
+      const validation = await validateTransaction(connection, transactionId, personId, { lock: true });
+      if (post) {
+        await connection.query(
+          "UPDATE transactions SET TransactionState = 'posted', UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
+          [transactionId, personId],
+        );
+      }
+      return { transactionId, state: post ? "posted" : "draft", validation };
+    });
+  } catch (error) {
+    if (error?.code === "ER_DUP_ENTRY" && resolvedSourceSystem && resolvedSourceId) {
+      throw applicationError("A transaction with this source identity already exists.", 409, "SOURCE_TRANSACTION_CONFLICT", {
+        sourceSystem: resolvedSourceSystem,
+        sourceId: resolvedSourceId,
+      });
     }
-    for (const rate of Array.isArray(rates) ? rates : []) {
-      await connection.query(
-        `INSERT INTO xrates
-          (owner_person_id, xrate_type, ValidAt, transaction_id, from_units, from_currency_id, to_units, to_currency_id)
-         VALUES (?, 'transaction', NULL, ?, ?, ?, ?, ?)`,
-        [personId, transactionId, integerString(rate.fromUnits, "fromUnits"), Number(rate.fromCurrencyId),
-          integerString(rate.toUnits, "toUnits"), Number(rate.toCurrencyId)],
-      );
-    }
-    const validation = await validateTransaction(connection, transactionId, personId, { lock: true });
-    if (post) {
-      await connection.query(
-        "UPDATE transactions SET TransactionState = 'posted', UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
-        [transactionId, personId],
-      );
-    }
-    return { transactionId, state: post ? "posted" : "draft", validation };
-  });
+    throw error;
+  }
 }
 
-export async function listTransactions(pool, personId, limit = 100) {
+export async function listTransactionsPage(pool, personId, { limit = 100, beforeTransactionId = null } = {}) {
   const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const cursor = beforeTransactionId == null ? null : Number(beforeTransactionId);
+  if (cursor != null && (!Number.isInteger(cursor) || cursor <= 0)) {
+    throw applicationError("Transaction cursor is invalid.", 400, "INVALID_CURSOR");
+  }
+  const cursorSql = cursor == null ? "" : ` AND (
+        t.TransactionDate < (SELECT TransactionDate FROM transactions WHERE transaction_id = ? AND owner_person_id = ?)
+        OR (t.TransactionDate = (SELECT TransactionDate FROM transactions WHERE transaction_id = ? AND owner_person_id = ?)
+            AND t.transaction_id < ?))`;
+  const params = cursor == null
+    ? [personId, resolvedLimit + 1]
+    : [personId, cursor, personId, cursor, personId, cursor, resolvedLimit + 1];
   const [rows] = await pool.query(
     `SELECT t.transaction_id, t.TransactionDate, t.description, t.TransactionState,
             t.valuation_currency_id, c.CurrencyAbbreviation, c.scale,
@@ -363,18 +469,24 @@ export async function listTransactions(pool, personId, limit = 100) {
        FROM transactions t
        JOIN currencies c ON c.currency_id = t.valuation_currency_id
        LEFT JOIN line_items li ON li.transaction_id = t.transaction_id
-      WHERE t.owner_person_id = ?
+      WHERE t.owner_person_id = ?${cursorSql}
       GROUP BY t.transaction_id, t.TransactionDate, t.description, t.TransactionState,
                t.valuation_currency_id, c.CurrencyAbbreviation, c.scale
       ORDER BY t.TransactionDate DESC, t.transaction_id DESC
       LIMIT ?`,
-    [personId, resolvedLimit],
+    params,
   );
-  return rows.map((row) => ({
+  const hasMore = rows.length > resolvedLimit;
+  const transactions = rows.slice(0, resolvedLimit).map((row) => ({
     id: Number(row.transaction_id), date: row.TransactionDate, description: row.description, state: row.TransactionState,
     valuationCurrencyId: Number(row.valuation_currency_id), valuationCurrencyCode: row.CurrencyAbbreviation.trim(),
     scale: Number(row.scale), lineItemCount: Number(row.line_item_count),
   }));
+  return { transactions, nextCursor: hasMore ? String(transactions.at(-1).id) : null };
+}
+
+export async function listTransactions(pool, personId, limit = 100) {
+  return (await listTransactionsPage(pool, personId, { limit })).transactions;
 }
 
 export async function getTransaction(pool, personId, transactionId) {
@@ -442,4 +554,41 @@ export async function verifyAllPostedTransactions(pool, personId = null) {
     connection.release();
   }
   return { valid: failures.length === 0, checked: rows.length, failures };
+}
+
+export async function verifyPostedTransactionsPage(pool, personId, { limit = 100, afterTransactionId = null } = {}) {
+  const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const cursor = afterTransactionId == null ? 0 : Number(afterTransactionId);
+  if (!Number.isInteger(cursor) || cursor < 0) throw applicationError("Verification cursor is invalid.", 400, "INVALID_CURSOR");
+  const [rows] = await pool.query(
+    `SELECT transaction_id, owner_person_id
+       FROM transactions
+      WHERE TransactionState = 'posted' AND owner_person_id = ? AND transaction_id > ?
+      ORDER BY transaction_id
+      LIMIT ?`,
+    [personId, cursor, resolvedLimit + 1],
+  );
+  const hasMore = rows.length > resolvedLimit;
+  const pageRows = rows.slice(0, resolvedLimit);
+  const failures = [];
+  const connection = await pool.getConnection();
+  try {
+    for (const row of pageRows) {
+      try {
+        await validateTransaction(connection, Number(row.transaction_id), personId);
+      } catch (error) {
+        failures.push({ transactionId: Number(row.transaction_id), code: error.code ?? "VALIDATION_ERROR",
+          message: error.message, details: error.details });
+      }
+    }
+  } finally {
+    connection.release();
+  }
+  return {
+    valid: failures.length === 0,
+    checked: pageRows.length,
+    checkedTransactionIds: pageRows.map((row) => Number(row.transaction_id)),
+    failures,
+    nextCursor: hasMore ? String(pageRows.at(-1).transaction_id) : null,
+  };
 }
