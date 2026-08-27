@@ -7,6 +7,55 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0010: complete-durable-import-plan-workflow
+-- writer downtime: not required; import plans are short-lived operational
+-- records, but importing should be paused while this migration runs.
+-- deployment order: apply this migration before restarting API versions that
+-- return durable dry-run summaries and invalidation states.
+-- locking: the plan table is altered twice and requires brief metadata locks.
+-- recovery: restore the verified pre-migration backup if rollback is needed.
+
+ALTER TABLE accounting_import_plans
+  ADD COLUMN IF NOT EXISTS plan_status
+    ENUM('ready','committed','invalidated') NULL AFTER import_kind,
+  ADD COLUMN IF NOT EXISTS preview_sha256 CHAR(64) NULL AFTER payload_sha256,
+  ADD COLUMN IF NOT EXISTS summary_json LONGTEXT NULL AFTER payload_json,
+  ADD COLUMN IF NOT EXISTS invalidated_at DATETIME(6) NULL AFTER committed_at,
+  ADD COLUMN IF NOT EXISTS invalidation_code VARCHAR(64) NULL AFTER invalidated_at;
+
+UPDATE accounting_import_plans
+   SET invalidated_at = CASE
+         WHEN committed_at IS NULL THEN COALESCE(invalidated_at, CURRENT_TIMESTAMP(6))
+         ELSE invalidated_at
+       END,
+       invalidation_code = CASE
+         WHEN committed_at IS NULL THEN COALESCE(invalidation_code, 'SCHEMA_UPGRADE_REQUIRES_NEW_DRY_RUN')
+         ELSE invalidation_code
+       END,
+       plan_status = CASE
+         WHEN committed_at IS NULL THEN 'invalidated'
+         ELSE 'committed'
+       END
+ WHERE plan_status IS NULL;
+
+UPDATE accounting_import_plans
+   SET preview_sha256 = COALESCE(preview_sha256, payload_sha256),
+       summary_json = COALESCE(summary_json, CASE import_kind
+         WHEN 'account_tree' THEN
+           '{"accountsCreated":0,"accountsReused":0,"currenciesCreated":0,"currenciesReused":0,"rejectedRows":0}'
+         ELSE
+           '{"transactionsCreated":0,"transactionsReused":0,"lineItemsCreated":0,"lineItemsReused":0,"rejectedTransactions":0}'
+       END)
+ WHERE preview_sha256 IS NULL OR summary_json IS NULL;
+
+ALTER TABLE accounting_import_plans
+  MODIFY plan_status ENUM('ready','committed','invalidated') NOT NULL,
+  MODIFY preview_sha256 CHAR(64) NOT NULL,
+  MODIFY summary_json LONGTEXT NOT NULL,
+  DROP COLUMN IF EXISTS item_count;
+
+-- end migration 0010
+
 -- migration 0009: add-durable-import-plans
 -- writer downtime: not required; the transaction fingerprint is nullable for
 -- existing rows and the plan table is independent operational metadata.
@@ -24,16 +73,12 @@ CREATE TABLE IF NOT EXISTS accounting_import_plans (
   import_plan_id CHAR(36) NOT NULL,
   owner_person_id INT NOT NULL,
   import_kind ENUM('account_tree','transactions') NOT NULL,
-  plan_status ENUM('ready','committed','invalidated') NOT NULL,
   source_system VARCHAR(32) NULL,
   payload_sha256 CHAR(64) NOT NULL,
-  preview_sha256 CHAR(64) NOT NULL,
   payload_json LONGTEXT NOT NULL,
-  summary_json LONGTEXT NOT NULL,
+  item_count INT UNSIGNED NOT NULL,
   expires_at DATETIME(6) NOT NULL,
   committed_at DATETIME(6) NULL,
-  invalidated_at DATETIME(6) NULL,
-  invalidation_code VARCHAR(64) NULL,
   result_json LONGTEXT NULL,
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (import_plan_id),

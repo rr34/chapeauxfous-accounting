@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -48,8 +48,16 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(transactionImportMigration.sql, /source_fingerprint CHAR\(64\)/);
   assert.match(transactionImportMigration.sql, /CREATE TABLE IF NOT EXISTS accounting_import_plans/);
   assert.match(transactionImportMigration.sql, /ENUM\('account_tree','transactions'\)/);
-  assert.match(transactionImportMigration.sql, /plan_status ENUM\('ready','committed','invalidated'\)/);
-  assert.match(transactionImportMigration.sql, /preview_sha256 CHAR\(64\)/);
-  assert.match(transactionImportMigration.sql, /summary_json LONGTEXT/);
+  assert.match(transactionImportMigration.sql, /item_count INT UNSIGNED NOT NULL/);
+  assert.doesNotMatch(transactionImportMigration.sql, /plan_status/);
   assert.doesNotMatch(transactionImportMigration.sql, /GENERATED ALWAYS/i);
+  const durablePlanWorkflowMigration = migrations.find((migration) => migration.version === 10);
+  assert.match(durablePlanWorkflowMigration.sql, /ADD COLUMN IF NOT EXISTS plan_status/);
+  assert.match(durablePlanWorkflowMigration.sql, /ADD COLUMN IF NOT EXISTS preview_sha256 CHAR\(64\)/);
+  assert.match(durablePlanWorkflowMigration.sql, /ADD COLUMN IF NOT EXISTS summary_json LONGTEXT/);
+  assert.match(durablePlanWorkflowMigration.sql, /ADD COLUMN IF NOT EXISTS invalidated_at DATETIME\(6\)/);
+  assert.match(durablePlanWorkflowMigration.sql, /ADD COLUMN IF NOT EXISTS invalidation_code VARCHAR\(64\)/);
+  assert.match(durablePlanWorkflowMigration.sql, /DROP COLUMN IF EXISTS item_count/);
+  assert.match(durablePlanWorkflowMigration.sql, /SCHEMA_UPGRADE_REQUIRES_NEW_DRY_RUN/);
+  assert.doesNotMatch(durablePlanWorkflowMigration.sql, /GENERATED ALWAYS/i);
 });
