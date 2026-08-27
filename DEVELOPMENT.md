@@ -16,8 +16,78 @@ cp api/.env.example api/.env
 Edit `api/.env` with the local or server database credentials and a strong,
 random `JWT_SECRET`.
 
-Before applying pending migrations, create and verify a recoverable database
-backup. Then run:
+### Back up and prove the backup restores
+
+Do this before applying migrations to any database that contains user data.
+Run the commands from the repository root. Set the first three values to the
+matching `MYSQL_*` values in `api/.env`; the commands deliberately prompt for
+the password so it is not stored in shell history or exposed in the process
+arguments.
+
+Store the dump outside the Git checkout so a deployment cannot replace it:
+
+```bash
+db_host=127.0.0.1
+db_user=nate
+db_name=cfaccounting
+backup_dir=/srv/backups/chapeauxfous-accounting
+
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" "$backup_dir"
+backup_file="$backup_dir/$db_name-$(date -u +%Y%m%dT%H%M%SZ).sql"
+
+mariadb-dump \
+  --host="$db_host" \
+  --user="$db_user" \
+  --password \
+  --single-transaction \
+  --quick \
+  --routines \
+  --events \
+  --triggers \
+  --hex-blob \
+  "$db_name" > "$backup_file"
+
+test -s "$backup_file"
+sha256sum "$backup_file" > "$backup_file.sha256"
+sha256sum --check "$backup_file.sha256"
+```
+
+A checksum and a nonempty file are not enough. Restore the dump into a new,
+isolated database and compare its base-table count with the live database:
+
+```bash
+verify_db="${db_name}_backup_verify_$(date -u +%Y%m%d%H%M%S)"
+
+mariadb --host="$db_host" --user="$db_user" --password \
+  --execute="CREATE DATABASE \`$verify_db\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+
+mariadb --host="$db_host" --user="$db_user" --password \
+  "$verify_db" < "$backup_file"
+
+live_table_count=$(mariadb --host="$db_host" --user="$db_user" --password \
+  --batch --skip-column-names \
+  --execute="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$db_name' AND table_type = 'BASE TABLE'")
+
+restored_table_count=$(mariadb --host="$db_host" --user="$db_user" --password \
+  --batch --skip-column-names \
+  --execute="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$verify_db' AND table_type = 'BASE TABLE'")
+
+test "$live_table_count" -gt 0
+test "$restored_table_count" -eq "$live_table_count"
+
+mariadb --host="$db_host" --user="$db_user" --password \
+  --execute="DROP DATABASE \`$verify_db\`"
+
+echo "Verified recoverable backup: $backup_file ($restored_table_count tables)"
+```
+
+Every command above must succeed. If the restore or comparison fails, do not
+set the migration confirmation flag and do not migrate. Leave the isolated
+verification database in place for diagnosis if failure occurs before its
+`DROP DATABASE` command. The `.sql` file and its `.sha256` file are the backup;
+keep both until the migrated application and ledger have been verified.
+
+After the backup has printed `Verified recoverable backup`, run:
 
 ```bash
 ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate
@@ -197,7 +267,7 @@ are private financial data excluded from generic search and ordinary context;
 only exact provider workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
-2. Create and verify a recoverable database backup.
+2. Complete **Back up and prove the backup restores** above and retain both backup files.
 3. Stop API writers and apply all pending migrations through 0011 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
 4. Run `npm run schema:verify`, then restart the API service.
 

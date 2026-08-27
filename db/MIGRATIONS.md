@@ -9,18 +9,8 @@ schema represented by `schema.sql`. Migration `0002` adds the minimal TLOM-style
 person identity, one-ledger-per-person ownership, import identities, and the
 indexes required by the API.
 
-MariaDB DDL may commit implicitly. Before production migrations, create and
-verify a recoverable database backup, stop application writers when a migration
-requires it, and never blindly rerun a partially failed migration.
-
-Local commands, from the repository root:
-
-```bash
-npm run schema:migrate
-npm run schema:verify
-```
-
-The migrator requires `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1` whenever
-pending migrations exist. This flag is an operator assertion; it does not make
-a backup by itself.
-
+The complete operator procedure, including the MariaDB dump, isolated test
+restore, checksum, migration, and verification commands, is in
+`DEVELOPMENT.md` under **Back up and prove the backup restores**. Follow that
+procedure for every database containing user data. MariaDB DDL may commit
+implicitly, so never blindly rerun a partially failed migration.

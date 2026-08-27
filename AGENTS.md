@@ -38,7 +38,8 @@ These instructions apply to the entire repository.
   user explicitly asks to replace the bootstrap snapshot.
 - Before applying a migration to a database containing user data, create and
   verify a recoverable backup. Use the repository migration and verification
-  commands documented in `db/MIGRATIONS.md`.
+  procedure documented in `DEVELOPMENT.md` under **Back up and prove the backup
+  restores**.
 - Keep the database schema conventional: ordinary tables with explicitly
   stored fields, primary keys, straightforward single-column foreign keys, and
   enum fields where a closed set of values is appropriate.
