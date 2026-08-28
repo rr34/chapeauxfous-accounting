@@ -1547,9 +1547,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
     memo: z.string().max(16000).nullable().optional(),
   }).describe(`One record conforming exactly to ${TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI}.`);
+  // Keep the repeated workflow control plane compact. The canonical schema is
+  // fetched once above, and the job resource retains the database projection.
   const transactionImportJobOutput = successOutputSchema({
     job: z.json(),
-    schemaProjection: schemaProjectionSchema,
   }, ["success", "receiving", "review_ready", "committed"]);
   const transactionImportSchemaOutput = successOutputSchema({
     schema_uri: z.literal(TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI),
@@ -1583,12 +1584,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["get_transaction_import_schema"] }),
-  }, async (input) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async (input) => safeWorkflowResult(async () => ({
     job: await accounting.createTransactionImportJob({ pool, personId,
       sourceSystem: input.source_system, sourceFileSha256: input.source_file_sha256,
       sourceFileName: input.source_file_name, expectedRecordCount: input.expected_record_count,
       clientRequestId: input.client_request_id }),
-  }, operations.transactionImportJob), { retryTool: "create_transaction_import_job" }));
+  }), { retryTool: "create_transaction_import_job" }));
 
   server.registerTool("stage_transaction_import_artifact", {
     title: "Stage a complete canonical transaction artifact",
@@ -1603,10 +1604,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       dependencies: ["create_transaction_import_job"],
       artifactUpload: transactionImportArtifactUpload,
     }),
-  }, async ({ import_job_id, artifact_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id, artifact_id }) => safeWorkflowResult(async () => ({
     job: await accounting.stageTransactionImportArtifact({ pool, artifactRoot, personId,
       importJobId: import_job_id, artifactId: artifact_id }),
-  }, operations.transactionImportJob), { retryTool: "stage_transaction_import_artifact" }));
+  }), { retryTool: "stage_transaction_import_artifact" }));
 
   server.registerTool("stage_transaction_import_chunk", {
     title: "Stage canonical transaction records",
@@ -1619,9 +1620,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["create_transaction_import_job"] }),
-  }, async ({ import_job_id, chunk_id, records }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id, chunk_id, records }) => safeWorkflowResult(async () => ({
     job: await accounting.stageTransactionImportChunk({ pool, personId, importJobId: import_job_id, chunkId: chunk_id, records }),
-  }, operations.transactionImportJob), { retryTool: "stage_transaction_import_chunk" }));
+  }), { retryTool: "stage_transaction_import_chunk" }));
 
   server.registerTool("retry_transaction_import_exception", {
     title: "Retry one corrected import exception",
@@ -1635,11 +1636,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["stage_transaction_import_chunk"] }),
-  }, async ({ import_job_id, retry_id, transaction_external_id, records }) => safeWorkflowResult(async () =>
-    withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id, retry_id, transaction_external_id, records }) => safeWorkflowResult(async () => ({
       job: await accounting.retryTransactionImportException({ pool, personId, importJobId: import_job_id,
         retryId: retry_id, transactionExternalId: transaction_external_id, records }),
-    }, operations.transactionImportJob), { retryTool: "retry_transaction_import_exception" }));
+    }), { retryTool: "retry_transaction_import_exception" }));
 
   server.registerTool("get_transaction_import_job", {
     title: "Get transaction import job",
@@ -1648,9 +1648,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: readOnly,
     _meta: toolMetadata("accounting.transactions"),
-  }, async ({ import_job_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id }) => safeWorkflowResult(async () => ({
     job: await accounting.getTransactionImportJob({ pool, personId, importJobId: import_job_id }),
-  }, operations.transactionImportJob)));
+  })));
 
   server.registerTool("list_transaction_import_exceptions", {
     title: "List transaction import exceptions",
@@ -1663,10 +1663,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: readOnly,
     _meta: toolMetadata("accounting.transactions"),
-  }, async ({ import_job_id, limit, cursor }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id, limit, cursor }) => safeWorkflowResult(async () => ({
     job: await accounting.listTransactionImportExceptions({ pool, personId, importJobId: import_job_id,
       limit, afterExternalId: cursor }),
-  }, operations.transactionImportJob)));
+  })));
 
   server.registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
@@ -1675,9 +1675,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["stage_transaction_import_chunk"] }),
-  }, async ({ import_job_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id }) => safeWorkflowResult(async () => ({
     job: await accounting.previewTransactionImportJob({ pool, personId, importJobId: import_job_id }),
-  }, operations.transactionImportJob), { retryTool: "preview_transaction_import_job" }));
+  }), { retryTool: "preview_transaction_import_job" }));
 
   server.registerTool("commit_transaction_import_job", {
     title: "Commit final transaction import preview",
@@ -1689,10 +1689,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["preview_transaction_import_job"] }),
-  }, async ({ import_job_id, preview_digest }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ import_job_id, preview_digest }) => safeWorkflowResult(async () => ({
     job: await accounting.commitTransactionImportJob({ pool, personId, importJobId: import_job_id,
       previewDigest: preview_digest }),
-  }, operations.transactionImportJob), { defaultStatus: "committed", retryTool: "get_transaction_import_job" }));
+  }), { defaultStatus: "committed", retryTool: "get_transaction_import_job" }));
 
   const importedLineItemSchema = z.object({
     external_id: z.string().trim().min(1).max(128).nullable().optional()

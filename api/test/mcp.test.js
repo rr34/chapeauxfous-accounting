@@ -24,6 +24,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let previewedTransactionDeletion;
   let committedTransactionDeletion;
   let createdCurrency;
+  let createdImportJob;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
     dryRun: !ledgerChanged,
@@ -60,6 +61,24 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       transactionId: ledgerChanged ? 91 : null, errors: [] }],
   });
   const services = {
+    async createTransactionImportJob(input) {
+      createdImportJob = input;
+      return {
+        import_job_id: "0ed8cb57-efb5-419e-b4e5-59b73724f224",
+        source_system: input.sourceSystem,
+        source_file: { sha256: input.sourceFileSha256.replace(/^sha256:/, ""), name: input.sourceFileName },
+        expected_record_count: input.expectedRecordCount,
+        job_status: "receiving",
+        progress: {
+          expected_source_records: input.expectedRecordCount,
+          newly_staged_records: 0,
+          previously_staged_or_reused_records: 0,
+          exception_records: 0,
+          remaining_records: input.expectedRecordCount,
+          equation: `${input.expectedRecordCount} = 0 + 0 + 0 + ${input.expectedRecordCount}`,
+        },
+      };
+    },
     async listCurrencies(_pool, personId) {
       seen.push(`currencies:${personId}`);
       return [
@@ -343,6 +362,25 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const canonicalSchemaToolResult = await client.callTool({ name: "get_transaction_import_schema", arguments: {} });
   assert.deepEqual(canonicalSchemaToolResult.structuredContent.artifact_upload,
     artifactImportTool._meta["agent-slayer/artifactUpload"]);
+  const importJobResult = await client.callTool({
+    name: "create_transaction_import_job",
+    arguments: {
+      source_system: "gnucash_csv_20260827",
+      source_file_sha256: `sha256:${"7".repeat(64)}`,
+      source_file_name: "canonical.jsonl",
+      expected_record_count: 17275,
+      client_request_id: "file-216-import-v1",
+    },
+  });
+  assert.equal(importJobResult.structuredContent.job.import_job_id,
+    "0ed8cb57-efb5-419e-b4e5-59b73724f224");
+  assert.equal(Object.hasOwn(importJobResult.structuredContent, "schemaProjection"), false);
+  assert.ok(JSON.stringify(importJobResult.structuredContent).length < 2000);
+  assert.deepEqual(createdImportJob, {
+    pool: {}, personId: 7, sourceSystem: "gnucash_csv_20260827",
+    sourceFileSha256: `sha256:${"7".repeat(64)}`, sourceFileName: "canonical.jsonl",
+    expectedRecordCount: 17275, clientRequestId: "file-216-import-v1",
+  });
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,

@@ -266,6 +266,13 @@ binds a completed artifact to no more than one import job. The API service user
 must have exclusive read/write access to this directory, and it should be
 included in operational backups while imports are in progress.
 
+Transaction-import job tools return compact control state—job and artifact
+identifiers, progress, exceptions, preview, and commit results—without
+repeating the database schema-semantic projection on every workflow call. The
+agent fetches the authoritative canonical schema once with
+`get_transaction_import_schema`; the owner-scoped job resource remains
+available when its database projection is specifically needed.
+
 Accounting waits for the complete verified artifact, groups records across the
 whole file by stable transaction external ID, validates accounts, currencies,
 decimals, exchange rates, and balance, deduplicates, and applies internal
