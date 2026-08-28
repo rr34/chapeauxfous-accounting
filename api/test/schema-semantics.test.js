@@ -6,7 +6,7 @@ import { AccountingSchemaSemantics } from "../src/schema-semantics.js";
 test("the tracked accounting semantic form is complete", () => {
   const semantics = new AccountingSchemaSemantics();
   const report = inspectSemanticForm(semantics.form);
-  assert.equal(report.activeSchemaObjectCount, 9);
+  assert.equal(report.activeSchemaObjectCount, 12);
   assert.equal(report.retiredSchemaObjectCount, 0);
   assert.equal(report.unresolvedCount, 0);
   assert.equal(semantics.form.database.schemaVersion, 13);
@@ -24,6 +24,10 @@ test("the tracked accounting semantic form is complete", () => {
   );
   assert.equal(semantics.form.schemaObjects.transactions.fields.source_fingerprint.mechanics.generated, false);
   assert.match(semantics.form.schemaObjects.transactions.fields.source_fingerprint.semantics.meaning, /conflicting retries/);
+  assert.match(
+    semantics.form.schemaObjects.accounting_transaction_import_items.fields.canonical_json.semantics.meaning,
+    /Exact canonical line records/,
+  );
 });
 
 test("request routing can explain provider-owned accounting plan state", () => {

@@ -6,6 +6,8 @@ const failureMetadata = Object.freeze({
   TRANSACTION_DELETE_PLAN_NOT_FOUND: { status: 404, recoverable: true, requiredAction: "RUN_NEW_DELETE_PREVIEW" },
   TRANSACTION_DELETE_PLAN_EXPIRED: { status: 410, recoverable: true, requiredAction: "RUN_NEW_DELETE_PREVIEW" },
   TRANSACTION_DELETE_PLAN_INVALIDATED: { status: 409, recoverable: true, requiredAction: "RUN_NEW_DELETE_PREVIEW" },
+  TRANSACTION_DELETE_PREVIEW_MISMATCH: { status: 409, recoverable: true, requiredAction: "USE_BOUND_PREVIEW_ARGUMENTS" },
+  TRANSACTION_DELETE_PLAN_REFRESH_NOT_ALLOWED: { status: 409, recoverable: true, requiredAction: "USE_EXISTING_DELETE_PLAN" },
   TRANSACTION_DELETE_PLAN_STATE_CONFLICT: { status: 409, recoverable: true, requiredAction: "RUN_NEW_DELETE_PREVIEW" },
   TRANSACTIONS_REQUIRED: { status: 404, recoverable: true, requiredAction: "SELECT_TRANSACTIONS" },
 });
@@ -44,10 +46,6 @@ function parseJson(value, label) {
   } catch {
     throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", `Transaction-deletion plan ${label} is invalid.`);
   }
-}
-
-function placeholders(values) {
-  return values.map(() => "?").join(", ");
 }
 
 function normalizeIds(values) {
@@ -193,7 +191,7 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
     if (!ids.length) throw planError("TRANSACTIONS_REQUIRED", "There are no owner-scoped transactions to delete.");
     const summary = summarize(normalizedScope, selected);
     const payload = { scope: normalizedScope, transactionIds: ids, snapshotSha256: snapshotHash(selected) };
-    const preview = { ...summary, transactionIds: ids,
+    const preview = { ...summary, targetDigest: `sha256:${sha256(JSON.stringify(ids))}`,
       effect: "permanently_delete_exact_transactions_and_dependent_postings",
       accountsPreserved: true, accountTreeChanged: false };
     const planId = randomUUID();
@@ -213,6 +211,25 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
   });
 }
 
+export async function refreshTransactionDeletionPlan({ pool, personId, deletionPlanId }) {
+  const planId = String(deletionPlanId ?? "").trim();
+  if (!planId) throw planError("TRANSACTION_DELETE_PLAN_NOT_FOUND", "Transaction-deletion plan not found.");
+  const request = await withPoolTransaction(pool, async (connection) => {
+    const row = await loadPlan(connection, personId, planId);
+    if (row.plan_status === "committed" || (row.plan_status === "ready" && !Boolean(row.is_expired))) {
+      throw planError("TRANSACTION_DELETE_PLAN_REFRESH_NOT_ALLOWED",
+        "Only an expired or invalidated transaction-deletion plan can be refreshed.");
+    }
+    const payload = parseJson(row.payload_json, "payload");
+    const transactionIds = normalizeIds(payload.transactionIds);
+    if (!["all", "selected"].includes(payload.scope) || !transactionIds.length) {
+      throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Transaction-deletion plan payload is invalid.");
+    }
+    return { scope: payload.scope, transactionIds: payload.scope === "selected" ? transactionIds : [] };
+  });
+  return previewTransactionDeletion({ pool, personId, ...request });
+}
+
 export async function getTransactionDeletionPlan({ pool, personId, deletionPlanId }) {
   const planId = String(deletionPlanId ?? "").trim();
   if (!planId) throw planError("TRANSACTION_DELETE_PLAN_NOT_FOUND", "Transaction-deletion plan not found.");
@@ -230,14 +247,30 @@ export async function getTransactionDeletionPlan({ pool, personId, deletionPlanI
   });
 }
 
-async function updateImportReferences(connection, transactionIds) {
+async function createTargetTable(connection, transactionIds) {
+  await connection.query("DROP TEMPORARY TABLE IF EXISTS transaction_delete_targets");
+  await connection.query(
+     `CREATE TEMPORARY TABLE transaction_delete_targets (
+       transaction_id BIGINT UNSIGNED NOT NULL PRIMARY KEY
+     ) ENGINE=InnoDB`,
+  );
+  for (let offset = 0; offset < transactionIds.length; offset += 500) {
+    const batch = transactionIds.slice(offset, offset + 500);
+    await connection.query(
+      `INSERT INTO transaction_delete_targets (transaction_id) VALUES ${batch.map(() => "(?)").join(", ")}`,
+      batch,
+    );
+  }
+}
+
+async function updateImportReferences(connection) {
   const [rows] = await connection.query(
     `SELECT i.import_job_id, i.transaction_external_id, i.ledger_transaction_id,
             j.job_status
        FROM accounting_transaction_import_items i
        JOIN accounting_transaction_import_jobs j ON j.import_job_id = i.import_job_id
-      WHERE i.ledger_transaction_id IN (${placeholders(transactionIds)}) FOR UPDATE`,
-    transactionIds,
+       JOIN transaction_delete_targets d ON d.transaction_id = i.ledger_transaction_id
+      FOR UPDATE`,
   );
   const reopenedJobs = new Set();
   let deletedAuditReferences = 0;
@@ -275,6 +308,9 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
   const suppliedDigest = String(previewDigest ?? "").trim().replace(/^sha256:/, "");
   const outcome = await withPoolTransaction(pool, async (connection) => {
     const row = await loadPlan(connection, personId, planId, true);
+    if (suppliedDigest !== String(row.preview_sha256)) {
+      return { failure: planError("TRANSACTION_DELETE_PREVIEW_MISMATCH", "The supplied preview digest does not match this deletion plan.") };
+    }
     if (row.committed_at != null) {
       if (row.plan_status !== "committed" || !row.result_json) {
         return { failure: planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Committed deletion plan is inconsistent.") };
@@ -283,9 +319,6 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     }
     if (row.plan_status !== "ready") return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "Transaction-deletion plan is no longer ready.") };
     if (Boolean(row.is_expired)) return { failure: planError("TRANSACTION_DELETE_PLAN_EXPIRED", "Transaction-deletion plan has expired.") };
-    if (suppliedDigest !== String(row.preview_sha256)) {
-      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The supplied preview digest does not match this deletion plan.") };
-    }
     if (sha256(row.payload_json) !== String(row.payload_sha256)) {
       await invalidate(connection, planId, personId, "INTEGRITY_FAILURE");
       return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "Transaction-deletion plan failed its integrity check.") };
@@ -314,65 +347,77 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
         { transactionIds: externalReversals.map((item) => Number(item.transaction_id)) }) };
     }
     const accountsBefore = await accountFingerprint(connection, personId, true);
-    const importReferences = await updateImportReferences(connection, transactionIds);
-    const idSql = placeholders(transactionIds);
-    const [tagDelete] = await connection.query(
-      `DELETE j FROM lineitems_tags_join j
-        JOIN line_items li ON li.line_item_id = j.tagged_line_item_id
-        JOIN transactions t ON t.transaction_id = li.transaction_id
-       WHERE t.owner_person_id = ? AND t.transaction_id IN (${idSql})`,
-      [personId, ...transactionIds],
-    );
-    const [lineDelete] = await connection.query(
-      `DELETE li FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
-        WHERE t.owner_person_id = ? AND t.transaction_id IN (${idSql})`,
-      [personId, ...transactionIds],
-    );
-    const [rateDelete] = await connection.query(
-      `DELETE FROM xrates WHERE owner_person_id = ? AND transaction_id IN (${idSql})`,
-      [personId, ...transactionIds],
-    );
-    await connection.query(
-      `UPDATE transactions SET reversal_of_transaction_id = NULL
-        WHERE owner_person_id = ? AND transaction_id IN (${idSql})`, [personId, ...transactionIds],
-    );
-    const [transactionDelete] = await connection.query(
-      `DELETE FROM transactions WHERE owner_person_id = ? AND transaction_id IN (${idSql})`,
-      [personId, ...transactionIds],
-    );
-    if (Number(transactionDelete.affectedRows) !== transactionIds.length
-      || Number(lineDelete.affectedRows) !== selected.lines.length
-      || Number(rateDelete.affectedRows) !== selected.rates.length
-      || Number(tagDelete.affectedRows) !== selected.tags.length) {
-      throw new Error("Transaction deletion affected counts did not match the bound preview.");
+    await createTargetTable(connection, transactionIds);
+    try {
+      const importReferences = await updateImportReferences(connection);
+      const [tagDelete] = await connection.query(
+        `DELETE j FROM lineitems_tags_join j
+          JOIN line_items li ON li.line_item_id = j.tagged_line_item_id
+          JOIN transactions t ON t.transaction_id = li.transaction_id
+          JOIN transaction_delete_targets d ON d.transaction_id = t.transaction_id
+         WHERE t.owner_person_id = ?`,
+        [personId],
+      );
+      const [lineDelete] = await connection.query(
+        `DELETE li FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
+          JOIN transaction_delete_targets d ON d.transaction_id = t.transaction_id
+          WHERE t.owner_person_id = ?`,
+        [personId],
+      );
+      const [rateDelete] = await connection.query(
+        `DELETE x FROM xrates x
+          JOIN transaction_delete_targets d ON d.transaction_id = x.transaction_id
+         WHERE x.owner_person_id = ?`,
+        [personId],
+      );
+      await connection.query(
+        `UPDATE transactions t JOIN transaction_delete_targets d ON d.transaction_id = t.transaction_id
+            SET t.reversal_of_transaction_id = NULL
+          WHERE t.owner_person_id = ?`, [personId],
+      );
+      const [transactionDelete] = await connection.query(
+        `DELETE t FROM transactions t
+          JOIN transaction_delete_targets d ON d.transaction_id = t.transaction_id
+         WHERE t.owner_person_id = ?`,
+        [personId],
+      );
+      if (Number(transactionDelete.affectedRows) !== transactionIds.length
+        || Number(lineDelete.affectedRows) !== selected.lines.length
+        || Number(rateDelete.affectedRows) !== selected.rates.length
+        || Number(tagDelete.affectedRows) !== selected.tags.length) {
+        throw new Error("Transaction deletion affected counts did not match the bound preview.");
+      }
+      const [remaining] = await connection.query(
+        `SELECT t.transaction_id FROM transactions t
+          JOIN transaction_delete_targets d ON d.transaction_id = t.transaction_id
+         WHERE t.owner_person_id = ?`, [personId],
+      );
+      if (remaining.length) throw new Error("Deleted transactions remained visible after deletion.");
+      const accountsAfter = await accountFingerprint(connection, personId);
+      if (accountsAfter.count !== accountsBefore.count || accountsAfter.sha256 !== accountsBefore.sha256) {
+        throw new Error("Account tree changed during transaction deletion.");
+      }
+      const planIdentity = identity(row);
+      const result = {
+        readyToCommit: false, status: "committed", ...planIdentity,
+        deleted: { transactionCount: Number(transactionDelete.affectedRows),
+          lineItemCount: Number(lineDelete.affectedRows), exchangeRateCount: Number(rateDelete.affectedRows),
+          tagAssignmentCount: Number(tagDelete.affectedRows) },
+        importReferences,
+        verification: { targetTransactionsAbsent: true, accountTreeUnchanged: true,
+          accountCount: accountsAfter.count },
+        alreadyCommitted: false,
+      };
+      await connection.query(
+        `UPDATE accounting_import_plans SET plan_status = 'committed',
+                committed_at = UTC_TIMESTAMP(6), result_json = ?
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [JSON.stringify(result), planId, personId],
+      );
+      return { result };
+    } finally {
+      await connection.query("DROP TEMPORARY TABLE IF EXISTS transaction_delete_targets");
     }
-    const [remaining] = await connection.query(
-      `SELECT transaction_id FROM transactions WHERE owner_person_id = ?
-        AND transaction_id IN (${idSql})`, [personId, ...transactionIds],
-    );
-    if (remaining.length) throw new Error("Deleted transactions remained visible after deletion.");
-    const accountsAfter = await accountFingerprint(connection, personId);
-    if (accountsAfter.count !== accountsBefore.count || accountsAfter.sha256 !== accountsBefore.sha256) {
-      throw new Error("Account tree changed during transaction deletion.");
-    }
-    const planIdentity = identity(row);
-    const result = {
-      readyToCommit: false, status: "committed", ...planIdentity,
-      deleted: { transactionCount: Number(transactionDelete.affectedRows),
-        lineItemCount: Number(lineDelete.affectedRows), exchangeRateCount: Number(rateDelete.affectedRows),
-        tagAssignmentCount: Number(tagDelete.affectedRows) },
-      importReferences,
-      verification: { targetTransactionsAbsent: true, accountTreeUnchanged: true,
-        accountCount: accountsAfter.count },
-      alreadyCommitted: false,
-    };
-    await connection.query(
-      `UPDATE accounting_import_plans SET plan_status = 'committed',
-              committed_at = UTC_TIMESTAMP(6), result_json = ?
-        WHERE import_plan_id = ? AND owner_person_id = ?`,
-      [JSON.stringify(result), planId, personId],
-    );
-    return { result };
   });
   if (outcome.failure) throw outcome.failure;
   return outcome.result;

@@ -77,6 +77,7 @@ export const structuredErrorSchema = z.object({
   details: z.json().nullable(),
   recoverable: z.boolean(),
   retry: retryDescriptorSchema.nullable(),
+  requiredAction: z.string().min(1).optional(),
 });
 
 export function successOutputSchema(shape, statuses = ["success"]) {
@@ -214,14 +215,14 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.transactions",
       title: "Double-entry transactions",
-      summary: "Read, create, import, and verify owner-scoped double-entry transactions.",
+      summary: "Read, create, import, permanently delete, and verify owner-scoped double-entry transactions.",
       aliases: ["transactions", "journal entries", "ledger entries"],
       guidance: "Every posted transaction must balance in its valuation currency. Permanent deletion requires a provider-owned preview, explicit confirmation, and the exact matching commit operation.",
       tools: ["list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
         "create_transaction_import_job", "stage_transaction_import_chunk", "retry_transaction_import_exception",
         "get_transaction_import_job", "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
-        "commit_transaction_import", "preview_delete_transactions", "get_transaction_delete_plan",
+        "commit_transaction_import", "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
         "commit_delete_transactions", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [

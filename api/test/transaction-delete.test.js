@@ -6,7 +6,8 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { commitTransactionDeletion, getTransactionDeletionPlan, previewTransactionDeletion } =
+const { commitTransactionDeletion, getTransactionDeletionPlan, previewTransactionDeletion,
+  refreshTransactionDeletionPlan } =
   await import("../src/transaction-delete.js");
 
 function deletionPool() {
@@ -50,6 +51,8 @@ function deletionPool() {
         item_status: "reused", errors_json: null },
     ],
     plans: new Map(),
+    targetIds: new Set(),
+    maxParameterCount: 0,
   };
   return {
     state,
@@ -57,6 +60,7 @@ function deletionPool() {
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params = []) {
+          state.maxParameterCount = Math.max(state.maxParameterCount, params.length);
           if (sql.startsWith("DELETE FROM accounting_import_plans")) return [{ affectedRows: 0 }];
           if (sql.includes("INSERT INTO accounting_import_plans")) {
             const [id, owner, payloadHash, previewHash, payload, summary, expiresAt] = params;
@@ -88,9 +92,17 @@ function deletionPool() {
           if (sql.includes("SELECT xrate_id, transaction_id")) return [state.rates.map((row) => ({ ...row }))];
           if (sql.includes("SELECT j.tagged_line_item_id")) return [state.tags.map((row) => ({ ...row }))];
           if (sql.includes("SELECT account_id, AccountName")) return [state.accounts.map((row) => ({ ...row }))];
+          if (sql.startsWith("DROP TEMPORARY TABLE")) {
+            state.targetIds = new Set();
+            return [{ affectedRows: 0 }];
+          }
+          if (sql.startsWith("CREATE TEMPORARY TABLE")) return [{ affectedRows: 0 }];
+          if (sql.startsWith("INSERT INTO transaction_delete_targets")) {
+            params.forEach((id) => state.targetIds.add(Number(id)));
+            return [{ affectedRows: params.length }];
+          }
           if (sql.includes("FROM accounting_transaction_import_items i")) {
-            const ids = new Set(params.map(Number));
-            return [state.importItems.filter((row) => ids.has(Number(row.ledger_transaction_id))).map((row) => ({
+            return [state.importItems.filter((row) => state.targetIds.has(Number(row.ledger_transaction_id))).map((row) => ({
               ...row, job_status: state.importJobs.get(row.import_job_id),
             }))];
           }
@@ -113,33 +125,28 @@ function deletionPool() {
             return [{ affectedRows: 1 }];
           }
           if (sql.startsWith("DELETE j FROM lineitems_tags_join")) {
-            const ids = new Set(params.slice(1).map(Number));
             const before = state.tags.length;
-            state.tags = state.tags.filter((row) => !ids.has(Number(row.transaction_id)));
+            state.tags = state.tags.filter((row) => !state.targetIds.has(Number(row.transaction_id)));
             return [{ affectedRows: before - state.tags.length }];
           }
           if (sql.startsWith("DELETE li FROM line_items")) {
-            const ids = new Set(params.slice(1).map(Number));
             const before = state.lines.length;
-            state.lines = state.lines.filter((row) => !ids.has(Number(row.transaction_id)));
+            state.lines = state.lines.filter((row) => !state.targetIds.has(Number(row.transaction_id)));
             return [{ affectedRows: before - state.lines.length }];
           }
-          if (sql.startsWith("DELETE FROM xrates")) {
-            const ids = new Set(params.slice(1).map(Number));
+          if (sql.startsWith("DELETE x FROM xrates")) {
             const before = state.rates.length;
-            state.rates = state.rates.filter((row) => !ids.has(Number(row.transaction_id)));
+            state.rates = state.rates.filter((row) => !state.targetIds.has(Number(row.transaction_id)));
             return [{ affectedRows: before - state.rates.length }];
           }
-          if (sql.startsWith("UPDATE transactions SET reversal_of_transaction_id")) return [{ affectedRows: 0 }];
-          if (sql.startsWith("DELETE FROM transactions")) {
-            const ids = new Set(params.slice(1).map(Number));
+          if (sql.startsWith("UPDATE transactions t JOIN")) return [{ affectedRows: 0 }];
+          if (sql.startsWith("DELETE t FROM transactions")) {
             const before = state.transactions.length;
-            state.transactions = state.transactions.filter((row) => !ids.has(Number(row.transaction_id)));
+            state.transactions = state.transactions.filter((row) => !state.targetIds.has(Number(row.transaction_id)));
             return [{ affectedRows: before - state.transactions.length }];
           }
-          if (sql.includes("SELECT transaction_id FROM transactions")) {
-            const ids = new Set(params.slice(1).map(Number));
-            return [state.transactions.filter((row) => ids.has(Number(row.transaction_id)))];
+          if (sql.includes("SELECT t.transaction_id FROM transactions")) {
+            return [state.transactions.filter((row) => state.targetIds.has(Number(row.transaction_id)))];
           }
           throw new Error(`Unexpected query: ${sql}`);
         },
@@ -155,7 +162,8 @@ test("all-transaction deletion freezes scope, deletes dependencies, and proves a
   assert.equal(preview.summary.lineItemCount, 5);
   assert.equal(preview.summary.exchangeRateCount, 1);
   assert.equal(preview.summary.tagAssignmentCount, 1);
-  assert.deepEqual(preview.preview.transactionIds, [10, 11]);
+  assert.equal(preview.preview.targetDigest.startsWith("sha256:"), true);
+  assert.equal("transactionIds" in preview.preview, false);
 
   const ready = await getTransactionDeletionPlan({ pool, personId: 7, deletionPlanId: preview.deletionPlanId });
   assert.equal(ready.readyToCommit, true);
@@ -176,6 +184,57 @@ test("all-transaction deletion freezes scope, deletes dependencies, and proves a
   const retry = await commitTransactionDeletion({ pool, personId: 7,
     deletionPlanId: preview.deletionPlanId, previewDigest: preview.previewDigest });
   assert.equal(retry.alreadyCommitted, true);
+  await assert.rejects(
+    commitTransactionDeletion({ pool, personId: 7, deletionPlanId: preview.deletionPlanId,
+      previewDigest: `sha256:${"0".repeat(64)}` }),
+    (error) => error.code === "TRANSACTION_DELETE_PREVIEW_MISMATCH",
+  );
+});
+
+test("preview digest mismatch preserves the ready plan and names the bound-argument recovery", async () => {
+  const pool = deletionPool();
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "all" });
+  await assert.rejects(
+    commitTransactionDeletion({ pool, personId: 7, deletionPlanId: preview.deletionPlanId,
+      previewDigest: `sha256:${"0".repeat(64)}` }),
+    (error) => error.code === "TRANSACTION_DELETE_PREVIEW_MISMATCH"
+      && error.requiredAction === "USE_BOUND_PREVIEW_ARGUMENTS",
+  );
+  assert.equal(pool.state.plans.get(preview.deletionPlanId).plan_status, "ready");
+});
+
+test("an invalidated plan can be refreshed without exposing its frozen target IDs", async () => {
+  const pool = deletionPool();
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "selected", transactionIds: [10] });
+  pool.state.plans.get(preview.deletionPlanId).plan_status = "invalidated";
+  const refreshed = await refreshTransactionDeletionPlan({ pool, personId: 7,
+    deletionPlanId: preview.deletionPlanId });
+  assert.notEqual(refreshed.deletionPlanId, preview.deletionPlanId);
+  assert.equal(refreshed.summary.transactionCount, 1);
+  assert.equal("transactionIds" in refreshed.preview, false);
+});
+
+test("a still-ready plan cannot be refreshed into a second confirmation", async () => {
+  const pool = deletionPool();
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "all" });
+  await assert.rejects(
+    refreshTransactionDeletionPlan({ pool, personId: 7, deletionPlanId: preview.deletionPlanId }),
+    (error) => error.code === "TRANSACTION_DELETE_PLAN_REFRESH_NOT_ALLOWED"
+      && error.requiredAction === "USE_EXISTING_DELETE_PLAN",
+  );
+});
+
+test("all scope uses bounded internal target batches", async () => {
+  const pool = deletionPool();
+  for (let id = 12; id <= 1212; id += 1) {
+    pool.state.transactions.push({ ...pool.state.transactions[0], transaction_id: id,
+      source_id: `transaction-${id}` });
+  }
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "all" });
+  const result = await commitTransactionDeletion({ pool, personId: 7,
+    deletionPlanId: preview.deletionPlanId, previewDigest: preview.previewDigest });
+  assert.equal(result.deleted.transactionCount, 1203);
+  assert.equal(pool.state.maxParameterCount <= 500, true);
 });
 
 test("all-transaction deletion invalidates when the owner transaction set changes", async () => {

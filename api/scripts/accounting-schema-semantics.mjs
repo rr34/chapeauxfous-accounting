@@ -10,6 +10,9 @@ export const semanticFormFilename = path.resolve(here, "../../db/schema-semantic
 const publicSchemaObjects = new Set([
   "account_balance_assertions",
   "accounting_import_plans",
+  "accounting_transaction_import_items",
+  "accounting_transaction_import_jobs",
+  "accounting_transaction_import_requests",
   "accounts",
   "currencies",
   "line_items",
