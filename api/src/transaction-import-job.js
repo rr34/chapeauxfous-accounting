@@ -617,6 +617,8 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
       commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
+        type: "request_user_confirmation",
+        instruction: "Ask the user to explicitly confirm committing all staged transactions from this exact preview. Reused transactions remain unchanged and exceptions remain uncommitted.",
         onApproval: {
           tool: "commit_transaction_import_job",
           arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },

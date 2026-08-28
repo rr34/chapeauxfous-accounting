@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   groupCanonicalTransactionRecords,
+  previewTransactionImportJob,
   TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
   transactionImportCanonicalJsonSchema,
 } from "../src/transaction-import-job.js";
@@ -91,4 +92,56 @@ test("records outside the authoritative schema become transaction exceptions", (
   ]);
   assert.equal(groups[0].errors.some((error) => error.code === "UNEXPECTED_CANONICAL_FIELDS"), true);
   assert.deepEqual(groups[1].errors, []);
+});
+
+test("the final job preview publishes an executable confirmation handoff", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async query(sql) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[{
+        import_job_id: importJobId,
+        owner_person_id: 7,
+        source_system: "source_app",
+        source_file_sha256: "7".repeat(64),
+        source_file_name: "source.csv",
+        expected_record_count: 4,
+        job_status: "receiving",
+        preview_sha256: null,
+        result_json: null,
+      }]];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        staged_records: 2,
+        reused_records: 1,
+        exception_records: 1,
+        received_records: 4,
+        staged_transactions: 1,
+        reused_transactions: 1,
+        exception_transactions: 1,
+      }]];
+      if (sql.includes("SELECT transaction_external_id, canonical_sha256, item_status")) return [[
+        { transaction_external_id: "tx-1", canonical_sha256: "a".repeat(64), item_status: "staged" },
+        { transaction_external_id: "tx-2", canonical_sha256: "b".repeat(64), item_status: "reused" },
+        { transaction_external_id: "tx-3", canonical_sha256: "c".repeat(64), item_status: "exception" },
+      ]];
+      if (sql.includes("UPDATE accounting_transaction_import_jobs")) return [{ affectedRows: 1 }];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const result = await previewTransactionImportJob({
+    pool: { async getConnection() { return connection; } },
+    personId: 7,
+    importJobId,
+  });
+
+  assert.equal(result.requiredAction, "REQUEST_USER_CONFIRMATION");
+  assert.equal(result.nextAction.type, "request_user_confirmation");
+  assert.match(result.nextAction.instruction, /explicitly confirm/);
+  assert.deepEqual(result.nextAction.onApproval, {
+    tool: "commit_transaction_import_job",
+    arguments: { import_job_id: importJobId, preview_digest: result.preview_digest },
+  });
 });

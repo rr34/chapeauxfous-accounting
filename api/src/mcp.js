@@ -1552,6 +1552,73 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   const transactionImportJobOutput = successOutputSchema({
     job: z.json(),
   }, ["success", "receiving", "review_ready", "committed"]);
+  const transactionImportProgressSchema = z.object({
+    expected_source_records: z.number().int().positive(),
+    newly_staged_records: z.number().int().nonnegative(),
+    previously_staged_or_reused_records: z.number().int().nonnegative(),
+    exception_records: z.number().int().nonnegative(),
+    remaining_records: z.number().int().nonnegative(),
+    equation: z.string().min(1),
+    transaction_totals: z.object({
+      staged: z.number().int().nonnegative(),
+      reused: z.number().int().nonnegative(),
+      exceptions: z.number().int().nonnegative(),
+    }),
+  });
+  const transactionImportJobIdentityShape = {
+    import_job_id: z.string().uuid(),
+    source_system: z.string().min(1),
+    source_file: z.object({
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      name: z.string().nullable(),
+    }),
+    expected_record_count: z.number().int().positive(),
+  };
+  const transactionImportFinalSummarySchema = z.object({
+    transactions: z.object({
+      created: z.number().int().nonnegative(),
+      reused: z.number().int().nonnegative(),
+      exceptions: z.number().int().nonnegative(),
+    }),
+    line_items: z.object({
+      created: z.number().int().nonnegative(),
+      reused: z.number().int().nonnegative(),
+      exceptions: z.number().int().nonnegative(),
+    }),
+  });
+  const transactionImportPreviewJobSchema = z.object({
+    ...transactionImportJobIdentityShape,
+    job_status: z.literal("review_ready"),
+    progress: transactionImportProgressSchema,
+    preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    ready_to_commit: z.literal(true),
+    unresolved_exceptions: z.number().int().nonnegative(),
+    commit_scope: z.string().min(1),
+    requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
+    nextAction: z.object({
+      type: z.literal("request_user_confirmation"),
+      instruction: z.string().min(1),
+      onApproval: z.object({
+        tool: z.literal("commit_transaction_import_job"),
+        arguments: z.object({
+          import_job_id: z.string().uuid(),
+          preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+        }),
+      }),
+    }),
+  });
+  const transactionImportCommittedJobSchema = z.object({
+    ...transactionImportJobIdentityShape,
+    job_status: z.literal("committed"),
+    committed: z.literal(true),
+    already_committed: z.boolean(),
+    preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    progress: transactionImportProgressSchema,
+    final_summary: transactionImportFinalSummarySchema,
+  });
+  const transactionImportPreviewOutput = successOutputSchema({
+    job: z.union([transactionImportPreviewJobSchema, transactionImportCommittedJobSchema]),
+  });
   const transactionImportSchemaOutput = successOutputSchema({
     schema_uri: z.literal(TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI),
     canonical_schema: z.json(),
@@ -1674,7 +1741,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     title: "Create final transaction import preview",
     description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview reports unresolved exceptions, exact commit scope, requiredAction=REQUEST_USER_CONFIRMATION, and nextAction.onApproval containing the exact commit tool arguments; present it to the user for approval.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
-    outputSchema: transactionImportJobOutput,
+    outputSchema: transactionImportPreviewOutput,
     annotations: idempotentWrite,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["stage_transaction_import_chunk"] }),
   }, async ({ import_job_id }) => safeWorkflowResult(async () => ({

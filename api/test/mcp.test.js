@@ -25,6 +25,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let committedTransactionDeletion;
   let createdCurrency;
   let createdImportJob;
+  let previewedImportJob;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
     dryRun: !ledgerChanged,
@@ -76,6 +77,39 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
           exception_records: 0,
           remaining_records: input.expectedRecordCount,
           equation: `${input.expectedRecordCount} = 0 + 0 + 0 + ${input.expectedRecordCount}`,
+        },
+      };
+    },
+    async previewTransactionImportJob(input) {
+      previewedImportJob = input;
+      const previewDigest = `sha256:${"e".repeat(64)}`;
+      return {
+        import_job_id: input.importJobId,
+        source_system: "gnucash_csv_20260827",
+        source_file: { sha256: "7".repeat(64), name: "source.csv" },
+        expected_record_count: 17275,
+        job_status: "review_ready",
+        progress: {
+          expected_source_records: 17275,
+          newly_staged_records: 0,
+          previously_staged_or_reused_records: 17224,
+          exception_records: 51,
+          remaining_records: 0,
+          equation: "17275 = 0 + 17224 + 51 + 0",
+          transaction_totals: { staged: 7987, reused: 0, exceptions: 23 },
+        },
+        preview_digest: previewDigest,
+        ready_to_commit: true,
+        unresolved_exceptions: 23,
+        commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
+        requiredAction: "REQUEST_USER_CONFIRMATION",
+        nextAction: {
+          type: "request_user_confirmation",
+          instruction: "Ask the user to explicitly confirm committing all staged transactions from this exact preview.",
+          onApproval: {
+            tool: "commit_transaction_import_job",
+            arguments: { import_job_id: input.importJobId, preview_digest: previewDigest },
+          },
         },
       };
     },
@@ -384,6 +418,33 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     sourceFileSha256: `sha256:${"7".repeat(64)}`, sourceFileName: "source.csv",
     expectedRecordCount: 17275, clientRequestId: "file-216-import-v1",
   });
+  const importJobPreviewTool = tools.tools.find((tool) => tool.name === "preview_transaction_import_job");
+  assert.match(JSON.stringify(importJobPreviewTool.outputSchema), /request_user_confirmation/);
+  assert.match(JSON.stringify(importJobPreviewTool.outputSchema), /commit_transaction_import_job/);
+  const importJobPreview = await client.callTool({
+    name: "preview_transaction_import_job",
+    arguments: { import_job_id: "0ed8cb57-efb5-419e-b4e5-59b73724f224" },
+  });
+  assert.equal(importJobPreview.structuredContent.job.nextAction.type, "request_user_confirmation");
+  assert.match(importJobPreview.structuredContent.job.nextAction.instruction, /explicitly confirm/);
+  assert.deepEqual(previewedImportJob, {
+    pool: {}, personId: 7, importJobId: "0ed8cb57-efb5-419e-b4e5-59b73724f224",
+  });
+  const importJobCommitTool = tools.tools.find((tool) => tool.name === "commit_transaction_import_job");
+  const importJobDeferredReference = extractDeferredActionReference({
+    tool: "accounting_preview_transaction_import_job",
+    toolDefinition: { name: "accounting_preview_transaction_import_job", source: "mcp:accounting",
+      upstreamName: "preview_transaction_import_job", parameters: importJobPreviewTool.inputSchema },
+    result: importJobPreview.structuredContent,
+    requestId: "request-import-preview",
+    resolveProviderTool(name) {
+      if (name !== "commit_transaction_import_job") return null;
+      return { name: "accounting_commit_transaction_import_job", source: "mcp:accounting",
+        upstreamName: name, parameters: importJobCommitTool.inputSchema };
+    },
+  });
+  assert.deepEqual(importJobDeferredReference.arguments,
+    importJobPreview.structuredContent.job.nextAction.onApproval.arguments);
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,
