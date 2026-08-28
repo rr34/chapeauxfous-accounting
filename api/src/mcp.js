@@ -1573,11 +1573,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("create_transaction_import_job", {
     title: "Create resumable transaction import job",
-    description: "Create one durable logical import job for one exact source file and final expected canonical record count. client_request_id makes retries idempotent. All later chunks retain the returned import_job_id, source_system, source-file SHA-256 identity, and expected count.",
+    description: "Create one durable logical import job for one exact original source file and final expected canonical record count. source_file_sha256 and source_file_name identify the original source before transformation, not the generated canonical JSONL artifact; the artifact upload records its own checksum and name. client_request_id makes retries idempotent. All later chunks retain the returned import_job_id, source_system, original source-file identity, and expected count.",
     inputSchema: {
       source_system: z.string().trim().min(1).max(32),
-      source_file_sha256: z.string().trim().regex(/^(?:sha256:)?[0-9a-fA-F]{64}$/),
-      source_file_name: z.string().trim().min(1).max(1024).nullable().optional(),
+      source_file_sha256: z.string().trim().regex(/^(?:sha256:)?[0-9a-fA-F]{64}$/)
+        .describe("SHA-256 of the original source file before canonical transformation; never use the generated JSONL artifact checksum here."),
+      source_file_name: z.string().trim().min(1).max(1024).nullable().optional()
+        .describe("Original source filename before canonical transformation, or null when unavailable."),
       expected_record_count: z.number().int().positive(),
       client_request_id: z.string().trim().min(1).max(128),
     },

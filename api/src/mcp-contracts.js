@@ -7,7 +7,7 @@ import {
 } from "./artifact-upload.js";
 
 export const MCP_CONTRACT_VERSION = 1;
-export const MCP_SERVER_VERSION = "0.1.0";
+export const MCP_SERVER_VERSION = "0.2.0";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 

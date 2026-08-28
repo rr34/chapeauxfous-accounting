@@ -299,6 +299,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").annotations.idempotentHint, true);
   const artifactImportTool = tools.tools.find((tool) => tool.name === "stage_transaction_import_artifact");
+  const createImportJobTool = tools.tools.find((tool) => tool.name === "create_transaction_import_job");
   assert.equal(artifactImportTool.annotations.idempotentHint, true);
   assert.deepEqual(artifactImportTool._meta["agent-slayer/artifactUpload"], {
     contractVersion: 1,
@@ -309,6 +310,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     maximumBytes: 64 * 1024 * 1024,
   });
   assert.equal(artifactImportTool._meta["agent-slayer/artifactInput"], undefined);
+  assert.match(createImportJobTool.inputSchema.properties.source_file_sha256.description,
+    /original source file before canonical transformation/);
   assert.match(artifactImportTool.description, /without placing its records or transport chunks in model context/);
   assert.equal(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").annotations.idempotentHint, true);
   assert.match(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").description,
@@ -367,7 +370,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: {
       source_system: "gnucash_csv_20260827",
       source_file_sha256: `sha256:${"7".repeat(64)}`,
-      source_file_name: "canonical.jsonl",
+      source_file_name: "source.csv",
       expected_record_count: 17275,
       client_request_id: "file-216-import-v1",
     },
@@ -378,7 +381,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.ok(JSON.stringify(importJobResult.structuredContent).length < 2000);
   assert.deepEqual(createdImportJob, {
     pool: {}, personId: 7, sourceSystem: "gnucash_csv_20260827",
-    sourceFileSha256: `sha256:${"7".repeat(64)}`, sourceFileName: "canonical.jsonl",
+    sourceFileSha256: `sha256:${"7".repeat(64)}`, sourceFileName: "source.csv",
     expectedRecordCount: 17275, clientRequestId: "file-216-import-v1",
   });
   assert.match(
@@ -673,7 +676,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.1.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.2.0");
 
   await handler.close();
 });
