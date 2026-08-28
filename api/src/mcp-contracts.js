@@ -2,6 +2,9 @@ import * as z from "zod/v4";
 import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
 } from "./transaction-import-limits.js";
+import {
+  artifactUploadContract,
+} from "./artifact-upload.js";
 
 export const MCP_CONTRACT_VERSION = 1;
 export const MCP_SERVER_VERSION = "0.1.0";
@@ -170,6 +173,8 @@ export const balanceAssertionSchema = z.object({
 
 export const CAPABILITY_MANIFEST_URI = "accounting://manifest/capabilities/v1";
 
+export const transactionImportArtifactUpload = artifactUploadContract;
+
 export const accountingCapabilityManifest = Object.freeze({
   contractVersion: MCP_CONTRACT_VERSION,
   server: {
@@ -177,6 +182,7 @@ export const accountingCapabilityManifest = Object.freeze({
     title: "Chapeaux Fous Accounting",
     version: MCP_SERVER_VERSION,
     instructions: "Use owner-scoped read tools for evidence. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
+    artifactUpload: artifactUploadContract,
   },
   capabilities: [
     {
@@ -219,7 +225,7 @@ export const accountingCapabilityManifest = Object.freeze({
       aliases: ["transactions", "journal entries", "ledger entries"],
       guidance: "Every posted transaction must balance in its valuation currency. Permanent deletion requires a provider-owned preview, explicit confirmation, and the exact matching commit operation.",
       tools: ["list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
-        "create_transaction_import_job", "stage_transaction_import_chunk", "retry_transaction_import_exception",
+        "create_transaction_import_job", "stage_transaction_import_artifact", "stage_transaction_import_chunk", "retry_transaction_import_exception",
         "get_transaction_import_job", "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
         "commit_transaction_import", "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
@@ -227,7 +233,8 @@ export const accountingCapabilityManifest = Object.freeze({
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [
         "Fetch the authoritative canonical line-record JSON Schema before mapping a source file.",
-        `Transfer canonical records in idempotent chunks of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items while preserving one import_job_id and source-file identity.`,
+        "For a file-originated import, persist canonical application/x-ndjson and use the advertised resumable artifact upload; byte chunks are host-managed transport and must not enter model context.",
+        `Inline JSON is reserved for direct agent-created transactions and bounded calls of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
         "Retry only structured exceptions; successful transaction groups remain staged and must not be resubmitted.",
       ],
       contextViews: ["accounting.accounts.active_paths", "accounting.currencies.active"],
@@ -264,11 +271,12 @@ export const accountingCapabilityManifest = Object.freeze({
   ],
 });
 
-export function toolMetadata(capabilityId, { dependencies = [], attachmentHints = [] } = {}) {
+export function toolMetadata(capabilityId, { dependencies = [], attachmentHints = [], artifactUpload = null } = {}) {
   return {
     "agent-slayer/capabilityId": capabilityId,
     "agent-slayer/dependencies": dependencies,
     "agent-slayer/attachmentHints": attachmentHints,
     "agent-slayer/contractVersion": MCP_CONTRACT_VERSION,
+    ...(artifactUpload == null ? {} : { "agent-slayer/artifactUpload": artifactUpload }),
   };
 }

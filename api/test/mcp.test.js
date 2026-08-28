@@ -236,6 +236,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_plan"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_schema"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "stage_transaction_import_artifact"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "stage_transaction_import_chunk"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "retry_transaction_import_exception"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_job"), true);
@@ -278,6 +279,18 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   );
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").annotations.idempotentHint, true);
+  const artifactImportTool = tools.tools.find((tool) => tool.name === "stage_transaction_import_artifact");
+  assert.equal(artifactImportTool.annotations.idempotentHint, true);
+  assert.deepEqual(artifactImportTool._meta["agent-slayer/artifactUpload"], {
+    contractVersion: 1,
+    transportId: "transaction_import",
+    endpointPath: "/mcp/artifacts",
+    acceptedMediaTypes: ["application/x-ndjson"],
+    maximumChunkBytes: 1024 * 1024,
+    maximumBytes: 64 * 1024 * 1024,
+  });
+  assert.equal(artifactImportTool._meta["agent-slayer/artifactInput"], undefined);
+  assert.match(artifactImportTool.description, /without placing its records or transport chunks in model context/);
   assert.equal(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").annotations.idempotentHint, true);
   assert.match(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").description,
     /expected_source_records = newly_staged_records \+ previously_staged_or_reused_records \+ exception_records \+ remaining_records/);
@@ -317,6 +330,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(transactionCapability.summary, /permanently delete/);
   assert.equal(transactionCapability.tools.includes("refresh_transaction_delete_plan"), true);
+  assert.equal(transactionCapability.tools.includes("stage_transaction_import_artifact"), true);
+  assert.equal(manifest.server.artifactUpload.endpointPath, "/mcp/artifacts");
+  assert.equal(manifest.server.artifactUpload.maximumChunkBytes, 1024 * 1024);
   const canonicalSchemaResource = await client.readResource({
     uri: "accounting://schemas/transaction-import-record/v1",
   });
@@ -324,6 +340,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(canonicalSchema.additionalProperties, false);
   assert.equal(canonicalSchema.properties.transaction_external_id.type, "string");
   assert.equal(canonicalSchema.required.includes("value_decimal"), true);
+  const canonicalSchemaToolResult = await client.callTool({ name: "get_transaction_import_schema", arguments: {} });
+  assert.deepEqual(canonicalSchemaToolResult.structuredContent.artifact_upload,
+    artifactImportTool._meta["agent-slayer/artifactUpload"]);
   assert.match(
     tools.tools.find((tool) => tool.name === "import_account_tree").inputSchema.properties.dry_run.description,
     /Never reduce a file retry/,

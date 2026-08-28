@@ -8,9 +8,9 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 13,
-    "schemaFingerprint": "42f91dce2754a1f4c7755ab7aaf75edd0975c069b4226070870c7520ff3d9ce2",
-    "extractedAt": "2026-08-27T20:59:50.879Z"
+    "schemaVersion": 14,
+    "schemaFingerprint": "05a3fe8feed2eae97dfe7e00cfc4cf56873809bc7e96c50ff1cd75e5be3a1a87",
+    "extractedAt": "2026-08-28T00:52:23.000Z"
   },
   "instructions": {
     "humanOwned": "Fill only semantics properties. Null, empty arrays, and empty objects are intentional blanks.",

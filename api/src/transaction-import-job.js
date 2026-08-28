@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import {
+  parseCanonicalTransactionArtifact,
+  readCompleteArtifact,
+} from "./artifact-upload.js";
+import {
   analyzeTransactionImport,
   insertImportedTransaction,
   normalizeTransactionImport,
@@ -77,21 +81,76 @@ function sourceIdentity(job, transactionExternalId, records) {
   };
 }
 
+const canonicalRecordFields = new Set(Object.keys(transactionImportCanonicalJsonSchema.properties));
+
+function canonicalRecordSchemaErrors(record, sourceOrdinal) {
+  const errors = [];
+  const details = { source_record_index: sourceOrdinal };
+  if (record == null || typeof record !== "object" || Array.isArray(record)) return [{
+    code: "INVALID_CANONICAL_RECORD_TYPE",
+    message: "Each canonical source record must be a JSON object.",
+    details,
+  }];
+  const unexpected = Object.keys(record).filter((field) => !canonicalRecordFields.has(field));
+  if (unexpected.length) errors.push({
+    code: "UNEXPECTED_CANONICAL_FIELDS",
+    message: "The canonical record contains fields outside the authoritative JSON Schema.",
+    details: { ...details, fields: unexpected },
+  });
+  const stringField = (field, { required = false, nullable = false, minimum = 0, maximum, pattern } = {}) => {
+    if (!Object.hasOwn(record, field)) {
+      if (required) errors.push({ code: "CANONICAL_FIELD_REQUIRED", message: `${field} is required.`,
+        details: { ...details, field } });
+      return;
+    }
+    const value = record[field];
+    if (nullable && value === null) return;
+    if (typeof value !== "string" || (required && value.length === 0)) {
+      errors.push({ code: "INVALID_CANONICAL_FIELD_TYPE", message: `${field} must be a string${nullable ? " or null" : ""}.`,
+        details: { ...details, field } });
+      return;
+    }
+    if ([...value].length < minimum) errors.push({ code: "CANONICAL_FIELD_TOO_SHORT",
+      message: `${field} must contain at least ${minimum} character.`, details: { ...details, field, minimum } });
+    if ([...value].length > maximum) errors.push({ code: "CANONICAL_FIELD_TOO_LONG",
+      message: `${field} cannot exceed ${maximum} characters.`, details: { ...details, field, maximum } });
+    if (pattern && !pattern.test(value)) errors.push({ code: "INVALID_CANONICAL_FIELD_FORMAT",
+      message: `${field} has an invalid format.`, details: { ...details, field } });
+  };
+  stringField("transaction_external_id", { required: true, minimum: 1, maximum: 128 });
+  stringField("line_external_id", { nullable: true, minimum: 1, maximum: 128 });
+  stringField("transaction_date", { required: true, maximum: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+  stringField("description", { nullable: true, maximum: 16000 });
+  stringField("valuation_currency_code", { required: true, minimum: 1, maximum: 50 });
+  stringField("account_full_name", { required: true, minimum: 1, maximum: 4096 });
+  stringField("amount_decimal", { required: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
+  stringField("value_decimal", { required: true, nullable: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
+  stringField("memo", { nullable: true, maximum: 16000 });
+  return errors;
+}
+
 export function groupCanonicalTransactionRecords(records) {
   const groups = new Map();
   records.forEach((record, sourceOrdinal) => {
     const externalId = String(record?.transaction_external_id ?? "").trim();
     const key = externalId || `__invalid_${sourceOrdinal}`;
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ ...record, transaction_external_id: externalId, _sourceOrdinal: sourceOrdinal });
+    groups.get(key).push({
+      record: record == null || typeof record !== "object" || Array.isArray(record)
+        ? record
+        : { ...record, transaction_external_id: externalId },
+      recordObject: record == null || typeof record !== "object" || Array.isArray(record) ? {} : record,
+      schemaErrors: canonicalRecordSchemaErrors(record, sourceOrdinal),
+    });
   });
   return [...groups.entries()].map(([externalId, groupedRecords]) => {
-    const canonicalRecords = groupedRecords.map(({ _sourceOrdinal, ...record }) => record);
-    const first = canonicalRecords[0];
-    const errors = [];
+    const canonicalRecords = groupedRecords.map(({ record }) => record);
+    const recordObjects = groupedRecords.map(({ recordObject }) => recordObject);
+    const first = recordObjects[0];
+    const errors = groupedRecords.flatMap(({ schemaErrors }) => schemaErrors);
     if (!externalId) errors.push({ code: "TRANSACTION_EXTERNAL_ID_REQUIRED", message: "transaction_external_id is required." });
     for (const field of ["transaction_date", "description", "valuation_currency_code"]) {
-      const values = new Set(canonicalRecords.map((record) => JSON.stringify(record[field] ?? null)));
+      const values = new Set(recordObjects.map((record) => JSON.stringify(record[field] ?? null)));
       if (values.size > 1) errors.push({
         code: "INCONSISTENT_TRANSACTION_CONTEXT",
         message: `${field} must be identical on every record in transaction ${JSON.stringify(externalId)}.`,
@@ -107,7 +166,7 @@ export function groupCanonicalTransactionRecords(records) {
         transactionDate: first?.transaction_date,
         description: first?.description ?? null,
         valuationCurrencyCode: first?.valuation_currency_code,
-        lineItems: canonicalRecords.map((record) => ({
+        lineItems: recordObjects.map((record) => ({
           externalId: record.line_external_id ?? null,
           accountFullName: record.account_full_name,
           amountDecimal: record.amount_decimal,
@@ -266,6 +325,42 @@ export async function createTransactionImportJob({ pool, personId, sourceSystem,
   );
   const normalizedFileName = sourceFileName == null ? null : requiredText(sourceFileName, "source file name", 1024);
   return withPoolTransaction(pool, async (connection) => {
+    await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE", [personId]);
+    const [requestRows] = await connection.query(
+      `SELECT import_job_id, owner_person_id, source_system, source_file_sha256,
+              source_file_name, expected_record_count, job_status, preview_sha256,
+              result_json, committed_at, created_at, updated_at
+         FROM accounting_transaction_import_jobs
+        WHERE owner_person_id = ? AND client_request_id = ? FOR UPDATE`,
+      [personId, normalizedRequestId],
+    );
+    if (requestRows[0]) {
+      const prior = requestRows[0];
+      if (String(prior.source_system) !== normalizedSourceSystem || String(prior.source_file_sha256) !== digest
+        || Number(prior.expected_record_count) !== expectedRecordCount || (prior.source_file_name ?? null) !== normalizedFileName) {
+        throw jobError("client_request_id was already used for a different logical import job.", "IDEMPOTENCY_KEY_CONFLICT", undefined, 409);
+      }
+      return { ...await currentJobResult(connection, prior), idempotent_replay: true };
+    }
+    const [sourceRows] = await connection.query(
+      `SELECT import_job_id, owner_person_id, source_system, source_file_sha256,
+              source_file_name, expected_record_count, job_status, preview_sha256,
+              result_json, committed_at, created_at, updated_at
+         FROM accounting_transaction_import_jobs
+        WHERE owner_person_id = ? AND source_system = ? AND source_file_sha256 = ?
+        ORDER BY FIELD(job_status, 'committed', 'review_ready', 'receiving'), created_at, import_job_id
+        LIMIT 1 FOR UPDATE`,
+      [personId, normalizedSourceSystem, digest],
+    );
+    if (sourceRows[0]) {
+      const prior = sourceRows[0];
+      if (Number(prior.expected_record_count) !== expectedRecordCount) throw jobError(
+        "This exact source file already has an import job with a different final expected record count.",
+        "SOURCE_FILE_IDENTITY_CONFLICT", { existing_import_job_id: String(prior.import_job_id),
+          existing_expected_record_count: Number(prior.expected_record_count) }, 409,
+      );
+      return { ...await currentJobResult(connection, prior), idempotent_replay: true, resumed_by_source_identity: true };
+    }
     const importJobId = randomUUID();
     await connection.query(
       `INSERT INTO accounting_transaction_import_jobs
@@ -291,6 +386,81 @@ export async function createTransactionImportJob({ pool, personId, sourceSystem,
     }
     return { ...await currentJobResult(connection, job), idempotent_replay: String(job.import_job_id) !== importJobId };
   });
+}
+
+function packArtifactGroups(groups, maximumRecords) {
+  const batches = [];
+  let records = [];
+  for (const group of groups) {
+    if (records.length && records.length + group.canonicalRecords.length > maximumRecords) {
+      batches.push(records);
+      records = [];
+    }
+    records.push(...group.canonicalRecords);
+  }
+  if (records.length) batches.push(records);
+  return batches;
+}
+
+async function bindArtifactToJob({ pool, personId, importJobId, artifactId, recordCount }) {
+  return withPoolTransaction(pool, async (connection) => {
+    const job = await loadJob(connection, personId, importJobId, true);
+    if (job.job_status === "committed") throw jobError(
+      "The import job is already committed.", "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409,
+    );
+    if (Number(job.expected_record_count) !== recordCount) throw jobError(
+      "The canonical artifact record count does not match the job's final expected record count.",
+      "ARTIFACT_RECORD_COUNT_MISMATCH",
+      { expected_record_count: Number(job.expected_record_count), artifact_record_count: recordCount }, 409,
+    );
+    const [bindings] = await connection.query(
+      `SELECT import_job_id, artifact_id FROM accounting_transaction_import_artifacts
+        WHERE import_job_id = ? OR artifact_id = ? FOR UPDATE`, [importJobId, artifactId],
+    );
+    const mismatch = bindings.find((binding) => String(binding.import_job_id) !== importJobId
+      || String(binding.artifact_id) !== artifactId);
+    if (mismatch) throw jobError(
+      "The import job or artifact is already bound to a different canonical artifact identity.",
+      "IMPORT_ARTIFACT_BINDING_CONFLICT", undefined, 409,
+    );
+    if (!bindings.length) await connection.query(
+      `INSERT INTO accounting_transaction_import_artifacts (import_job_id, artifact_id) VALUES (?, ?)`,
+      [importJobId, artifactId],
+    );
+    return bindings.length > 0;
+  });
+}
+
+export async function stageTransactionImportArtifact({ pool, personId, importJobId, artifactId,
+  maximumRecordsPerBatch = 10000 }) {
+  const normalizedJobId = requiredText(importJobId, "import job ID", 36);
+  const normalizedArtifactId = requiredText(artifactId, "artifact ID", 36);
+  const { artifact, bytes } = await readCompleteArtifact({ pool, personId, artifactId: normalizedArtifactId });
+  const records = parseCanonicalTransactionArtifact(bytes, artifact.media_type);
+  if (!records.length) throw jobError("The canonical artifact contains no records.", "CANONICAL_RECORDS_REQUIRED");
+  const bindingReplay = await bindArtifactToJob({ pool, personId, importJobId: normalizedJobId,
+    artifactId: normalizedArtifactId, recordCount: records.length });
+  const groups = groupCanonicalTransactionRecords(records);
+  const batches = packArtifactGroups(groups, maximumRecordsPerBatch);
+  let everyBatchWasReplay = bindingReplay;
+  for (let index = 0; index < batches.length; index += 1) {
+    const result = await stageTransactionImportChunk({
+      pool, personId, importJobId: normalizedJobId,
+      chunkId: `artifact-${normalizedArtifactId}-${index + 1}`, records: batches[index],
+    });
+    everyBatchWasReplay = everyBatchWasReplay && result.idempotent_replay;
+  }
+  const job = await getTransactionImportJob({ pool, personId, importJobId: normalizedJobId });
+  return {
+    ...job,
+    canonical_artifact: artifact,
+    internal_batch_count: batches.length,
+    idempotent_replay: everyBatchWasReplay,
+    exceptions: {
+      count: job.progress.transaction_totals.exceptions,
+      list_with: { tool: "list_transaction_import_exceptions", arguments: { import_job_id: normalizedJobId } },
+    },
+  };
 }
 
 export async function stageTransactionImportChunk({ pool, personId, importJobId, chunkId, records }) {
@@ -448,6 +618,13 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
       ready_to_commit: true,
       unresolved_exceptions: progress.transaction_totals.exceptions,
       commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
+      requiredAction: "REQUEST_USER_CONFIRMATION",
+      nextAction: {
+        onApproval: {
+          tool: "commit_transaction_import_job",
+          arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },
+        },
+      },
     };
   });
 }
@@ -494,7 +671,13 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
   if (!/^[0-9a-f]{64}$/.test(normalizedDigest)) throw jobError("preview_digest must be the exact digest returned by preview_transaction_import_job.", "INVALID_PREVIEW_DIGEST");
   return withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, normalizedJobId, true);
-    if (job.job_status === "committed") return { ...parseJson(job.result_json, "transaction import result"), already_committed: true };
+    if (job.job_status === "committed") {
+      if (String(job.preview_sha256 ?? "") !== normalizedDigest) throw jobError(
+        "The supplied digest does not identify the preview that was committed.",
+        "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
+      );
+      return { ...parseJson(job.result_json, "transaction import result"), already_committed: true };
+    }
     if (job.job_status !== "review_ready" || String(job.preview_sha256 ?? "") !== normalizedDigest) throw jobError(
       "The job is not bound to that final preview. Create a new preview after the latest staging or correction.", "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
     );

@@ -87,21 +87,10 @@ verification database in place for diagnosis if failure occurs before its
 `DROP DATABASE` command. The `.sql` file and its `.sha256` file are the backup;
 keep both until the migrated application and ledger have been verified.
 
-After the backup has printed `Verified recoverable backup`, run:
-
-```bash
-ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate
-npm run schema:semantics:sync
-npm run schema:verify
-```
-
-The semantic sync extracts the nine public accounting tables from MariaDB,
-preserves the human-written meanings in `db/schema-semantics.json`, and refreshes
-compiler-owned mechanics. Review that file and fill any new semantic blanks
-before verification. Identity, API-token, and resumable import staging tables
-are deliberately excluded from generic agent-facing schema projection. The
-import-job MCP tools expose bounded progress, exception, preview, and commit
-contracts instead.
+After the backup has printed `Verified recoverable backup`, continue with
+**Production deployment** below. That is the single authoritative production
+migration procedure. In particular, do not run `schema:semantics:sync` in a
+production checkout.
 
 Migration `0002` expects the new accounting tables to contain no real ledger
 data because it establishes required user ownership. If ledger data is added
@@ -231,16 +220,55 @@ preview digest, expiration, compact summary, and stored commit result. Expired,
 committed, and invalidated plans become eligible for owner-scoped cleanup 48
 hours after their expiration or terminal timestamp.
 
-The MCP accepts structured batches of at most 1,000 complete transactions and
-10,000 nested line items; it does not parse CSV. The calling LLM converts source
-rows into complete nested transactions. Larger datasets are split only between
-transactions and use the same stable `source_system` and stable external IDs in
-every batch. Each batch is previewed and explicitly confirmed in sequence, and
-an approved plan is committed before the next batch is submitted. A retry or a
-resumed dataset may safely repeat committed source IDs because matching content
-is reused and conflicting content is rejected. The MCP route has a 16 MB JSON
-body allowance for ordinary 1,000-transaction statement imports; other API
-routes retain their 2 MB limit.
+For the durable source-file workflow, call `get_transaction_import_schema`,
+create one job with `create_transaction_import_job`, and preserve its
+`import_job_id`, source-system namespace, original source-file SHA-256, and
+final expected canonical-record count for the entire import. The LLM may inspect
+representative source samples and define a declarative mapping, but ordinary
+parser code must apply that mapping to the complete source file. Accounting
+does not parse CSV and the LLM must not reproduce the complete transformed
+dataset.
+
+The parser persists file-originated output as UTF-8 canonical JSON Lines with
+media type `application/x-ndjson`: each nonblank line is one object conforming
+to the authoritative canonical line-record JSON Schema. JSON Lines changes
+only the packaging, not the canonical record model. It is the artifact format
+for file-originated and unusually large generated input. Direct, bounded
+transactions may continue to use ordinary JSON tool arguments.
+
+`stage_transaction_import_artifact` mechanically activates the transfer by
+publishing `_meta["agent-slayer/artifactUpload"]` with contract version 1,
+transport ID `transaction_import`, endpoint `/mcp/artifacts`, accepted media
+type `application/x-ndjson`, a 1 MiB maximum chunk, and the provider's maximum
+artifact size. Using the same Accounting API bearer token, the host:
+
+1. sends `POST /mcp/artifacts` with a stable `client_request_id`, `file_name`,
+   `media_type`, `byte_size`, and whole-file `sha256`;
+2. resumes at the returned `next_offset` and sends raw chunks of at most 1 MiB
+   to `PATCH /mcp/artifacts/{artifact_id}` with `Content-Type:
+   application/octet-stream`, `Upload-Offset`, and `X-Content-SHA256` headers;
+3. calls `POST /mcp/artifacts/{artifact_id}/complete`, which succeeds only after
+   Accounting verifies the complete byte count, every stored chunk, and the
+   whole-file SHA-256, then verifies with `GET` that the root response contains
+   the original `artifact_id`, `status: complete`, final `next_offset`,
+   `media_type`, `byte_size`, and `sha256`; and
+4. calls `stage_transaction_import_artifact` with only the logical
+   `import_job_id` and verified `artifact_id`.
+
+The byte chunks are host-managed transport and never enter model context.
+Accounting waits for the complete verified artifact, groups records across the
+whole file by stable transaction external ID, validates accounts, currencies,
+decimals, exchange rates, and balance, deduplicates, and applies internal
+idempotent batches. Invalid transactions remain structured exceptions without
+aborting valid transactions. The LLM pages only those exceptions and presents
+the final provider preview before explicit commit. Retrying the artifact stage
+or a corrected exception never requires resubmitting successful records.
+
+`stage_transaction_import_chunk` remains the ordinary JSON path for bounded
+direct input, with at most 10,000 canonical line records per call. The MCP route
+has a 16 MB JSON body allowance for those calls; other ordinary API routes
+retain their 2 MB limit. Artifact upload accepts files through 64 MiB without
+placing those bytes in an MCP JSON tool argument.
 
 New registrations create only the user identity and begin with an empty chart
 of accounts. Clicking an account in the web client opens its editor; the
@@ -261,7 +289,25 @@ Timestamped security, mutual-fund, commodity, and FX price history belongs in
 owned `xrates` rows with `xrate_type = 'reference'`. Posted accounting continues
 to use only the exact `transaction` rate copied into each transaction.
 
-### Deployment order
+## Schema semantics
+
+`db/schema-semantics.json` is a tracked, reviewed build artifact. It covers the
+public ledger schema plus the provider-owned import-plan and resumable-import
+workflow tables needed by exact MCP operation projections. Human-written
+meanings live in that file; compiler-owned mechanics come from MariaDB.
+
+Run `npm run schema:semantics:sync` only in a development checkout, against a
+development database that already has every tracked migration applied. The
+command deliberately rewrites `db/schema-semantics.json`, including its
+`extractedAt` timestamp and JSON formatting. Review the resulting mechanics and
+fill any new semantic blanks, run `npm run schema:verify`, and commit the
+reviewed file with the code and migration that require it.
+
+Production never generates or modifies the tracked semantic form. It consumes
+the committed file and uses `npm run schema:verify` to prove that the migrated
+production database matches it.
+
+## Production deployment
 
 The tracked semantic form includes `accounting_import_plans` as authoritative,
 temporary, owner-scoped workflow state. Its raw payload, result, and hash fields
@@ -270,10 +316,23 @@ only exact provider workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Complete **Back up and prove the backup restores** above and retain both backup files.
-3. Stop API writers and apply all pending migrations through 0013 with `ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate`.
-4. Run `npm run schema:verify`, then restart the API service.
+3. Stop API writers.
+4. Apply every pending tracked migration:
 
-`schema:semantics:sync` is a development command that rewrites the tracked
-semantic form from a migrated development database. Do not run it in a
-production checkout during deployment; production verifies the committed form
-with `schema:verify` instead.
+   ```bash
+   ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate
+   ```
+
+5. Verify the migrated schema, committed semantic form, and posted ledger:
+
+   ```bash
+   npm run schema:verify
+   ```
+
+6. Restart the API service only after verification succeeds.
+
+Never run `npm run schema:semantics:sync` during production deployment. If
+`git status --short` reports a modified `db/schema-semantics.json` on a server,
+inspect it, preserve a diagnostic diff outside the checkout if needed, and
+restore the tracked file before pulling. Do not commit a production-generated
+semantic form.

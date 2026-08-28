@@ -3,6 +3,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
+import { mountArtifactUploadRoutes } from "./artifact-upload.js";
 import {
   getBalanceAssertion,
   listBalanceAssertions,
@@ -68,6 +69,7 @@ import {
   structuredErrorSchema,
   successOutputSchema,
   toolMetadata,
+  transactionImportArtifactUpload,
   transactionListItemSchema,
   transactionSchema,
 } from "./mcp-contracts.js";
@@ -80,6 +82,7 @@ import {
   listTransactionImportExceptions,
   previewTransactionImportJob,
   retryTransactionImportException,
+  stageTransactionImportArtifact,
   stageTransactionImportChunk,
   TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
   transactionImportCanonicalJsonSchema,
@@ -541,6 +544,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
     commitTransactionImportPlan: services.commitTransactionImportPlan ?? commitTransactionImportPlan,
     createTransactionImportJob: services.createTransactionImportJob ?? createTransactionImportJob,
     stageTransactionImportChunk: services.stageTransactionImportChunk ?? stageTransactionImportChunk,
+    stageTransactionImportArtifact: services.stageTransactionImportArtifact ?? stageTransactionImportArtifact,
     retryTransactionImportException: services.retryTransactionImportException ?? retryTransactionImportException,
     getTransactionImportJob: services.getTransactionImportJob ?? getTransactionImportJob,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
@@ -577,7 +581,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
   server.registerResource("accounting-transaction-import-canonical-schema", TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI, {
     title: "Canonical transaction import line-record JSON Schema",
-    description: "The exact authoritative JSON Schema accepted by resumable transaction-import chunk and exception-retry tools.",
+    description: "The exact authoritative JSON Schema accepted in canonical JSON Lines artifacts, inline JSON chunks, and exception retries.",
     mimeType: "application/schema+json",
   }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
     text: JSON.stringify(transactionImportCanonicalJsonSchema) }] }));
@@ -1550,11 +1554,12 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   const transactionImportSchemaOutput = successOutputSchema({
     schema_uri: z.literal(TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI),
     canonical_schema: z.json(),
+    artifact_upload: z.json(),
   });
 
   server.registerTool("get_transaction_import_schema", {
     title: "Get canonical transaction import schema",
-    description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record accepted by the resumable import workflow. Fetch this before creating a declarative CSV-to-canonical mapping; do not infer fields from examples.",
+    description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record and the complete resumable artifact-upload contract. Fetch this before creating a declarative CSV-to-canonical mapping; do not infer fields or artifact semantics from examples.",
     inputSchema: {},
     outputSchema: transactionImportSchemaOutput,
     annotations: readOnly,
@@ -1562,6 +1567,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   }, async () => safeToolResult(async () => ({
     schema_uri: TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
     canonical_schema: transactionImportCanonicalJsonSchema,
+    artifact_upload: transactionImportArtifactUpload,
   })));
 
   server.registerTool("create_transaction_import_job", {
@@ -1584,9 +1590,27 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       clientRequestId: input.client_request_id }),
   }, operations.transactionImportJob), { retryTool: "create_transaction_import_job" }));
 
+  server.registerTool("stage_transaction_import_artifact", {
+    title: "Stage a complete canonical transaction artifact",
+    description: "Consume one completed, SHA-256-verified canonical artifact without placing its records or transport chunks in model context. File-originated imports should use application/x-ndjson with one canonical line record per nonblank line. The host uploads raw bytes through the advertised resumable artifact contract, then calls this tool with only import_job_id and artifact_id. Accounting waits for the complete artifact, binds it to the logical job, groups every record by transaction_external_id across the whole file, applies internal idempotent batches, owns all accounting validation and deduplication, checkpoints progress, and exposes invalid transactions only through list_transaction_import_exceptions.",
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      artifact_id: z.string().trim().uuid(),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["create_transaction_import_job"],
+      artifactUpload: transactionImportArtifactUpload,
+    }),
+  }, async ({ import_job_id, artifact_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
+    job: await accounting.stageTransactionImportArtifact({ pool, personId,
+      importJobId: import_job_id, artifactId: artifact_id }),
+  }, operations.transactionImportJob), { retryTool: "stage_transaction_import_artifact" }));
+
   server.registerTool("stage_transaction_import_chunk", {
     title: "Stage canonical transaction records",
-    description: `Transfer a deterministic parser's canonical output without asking the LLM to reproduce it. Each chunk may contain any number of complete transaction groups up to ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} records; the MCP groups flat records by transaction_external_id, performs all account, currency, decimal, exchange-rate, balance, and source-ID validation, stages valid groups, reuses matching ledger transactions, and returns invalid groups as structured exceptions without failing other groups. Keep every transaction's records in one chunk. A stable chunk_id makes an exact retry idempotent. Progress always reconciles expected_source_records = newly_staged_records + previously_staged_or_reused_records + exception_records + remaining_records.`,
+    description: `Ordinary inline-JSON path for bounded transactions created directly by the agent. File-originated or unusually large data must use the advertised artifact upload and stage_transaction_import_artifact so records and transport chunks do not enter model context. Each inline chunk may contain any number of complete transaction groups up to ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} records; Accounting groups by transaction_external_id and owns all validation, deduplication, staging, and exceptions. A stable chunk_id makes an exact retry idempotent. Progress always reconciles expected_source_records = newly_staged_records + previously_staged_or_reused_records + exception_records + remaining_records.`,
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       chunk_id: z.string().trim().min(1).max(128),
@@ -1646,7 +1670,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
 
   server.registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
-    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview explicitly reports unresolved exceptions and the exact commit scope; present it to the user for approval.",
+    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview reports unresolved exceptions, exact commit scope, requiredAction=REQUEST_USER_CONFIRMATION, and nextAction.onApproval containing the exact commit tool arguments; present it to the user for approval.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
     outputSchema: transactionImportJobOutput,
     annotations: idempotentWrite,
@@ -1831,8 +1855,14 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   return server;
 }
 
-export function mountAccountingMcp(app, { pool, jsonBodyParser }) {
+export function mountAccountingMcp(app, { pool, jsonBodyParser, artifactJsonBodyParser, artifactRawBodyParser }) {
   const authenticate = requireApiToken(pool);
+  mountArtifactUploadRoutes(app, {
+    pool,
+    authenticate,
+    jsonBodyParser: artifactJsonBodyParser,
+    rawBodyParser: artifactRawBodyParser,
+  });
   const handler = createAccountingMcpHandler({ pool });
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => console.error("Accounting MCP HTTP adapter error:", error),

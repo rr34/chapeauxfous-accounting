@@ -7,6 +7,77 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0014: add-resumable-artifact-uploads
+-- writer downtime: not required; these are independent transport tables and
+-- do not change ledger rows or existing import-job rows.
+-- deployment order: apply before advertising artifact input for transaction
+-- import jobs.
+-- locking: table creation takes brief metadata locks only.
+-- recovery: restore the verified pre-migration backup if rollback is required;
+-- incomplete transport artifacts may otherwise be deleted without changing
+-- staged or committed accounting data.
+
+CREATE TABLE IF NOT EXISTS accounting_artifact_uploads (
+  artifact_id CHAR(36) NOT NULL,
+  owner_person_id INT NOT NULL,
+  client_request_id VARCHAR(128) NOT NULL,
+  file_name VARCHAR(1024) NULL,
+  media_type VARCHAR(255) NOT NULL,
+  expected_byte_size BIGINT UNSIGNED NOT NULL,
+  received_byte_size BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  expected_sha256 CHAR(64) NOT NULL,
+  upload_status ENUM('receiving','complete') NOT NULL DEFAULT 'receiving',
+  completed_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (artifact_id),
+  UNIQUE KEY accounting_artifact_uploads_owner_request_UQ
+    (owner_person_id, client_request_id),
+  KEY accounting_artifact_uploads_owner_status_IDX
+    (owner_person_id, upload_status, updated_at),
+  CONSTRAINT accounting_artifact_uploads_owner_FK
+    FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Owner-scoped resumable uploads verified before provider consumption';
+
+CREATE TABLE IF NOT EXISTS accounting_artifact_chunks (
+  artifact_id CHAR(36) NOT NULL,
+  byte_offset BIGINT UNSIGNED NOT NULL,
+  byte_count INT UNSIGNED NOT NULL,
+  chunk_sha256 CHAR(64) NOT NULL,
+  chunk_bytes MEDIUMBLOB NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (artifact_id, byte_offset),
+  CONSTRAINT accounting_artifact_chunks_upload_FK
+    FOREIGN KEY (artifact_id) REFERENCES accounting_artifact_uploads (artifact_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Exact byte ranges for resumable owner-scoped artifact uploads';
+
+CREATE TABLE IF NOT EXISTS accounting_transaction_import_artifacts (
+  import_job_id CHAR(36) NOT NULL,
+  artifact_id CHAR(36) NOT NULL,
+  attached_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (import_job_id),
+  UNIQUE KEY accounting_transaction_import_artifacts_artifact_UQ (artifact_id),
+  CONSTRAINT accounting_transaction_import_artifacts_job_FK
+    FOREIGN KEY (import_job_id) REFERENCES accounting_transaction_import_jobs (import_job_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE,
+  CONSTRAINT accounting_transaction_import_artifacts_upload_FK
+    FOREIGN KEY (artifact_id) REFERENCES accounting_artifact_uploads (artifact_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci
+  COMMENT='Binds one verified canonical artifact to one logical import job';
+
+-- end migration 0014
+
 -- migration 0013: add-transaction-deletion-plans
 -- writer downtime: not required; transaction deletion must remain unavailable
 -- until this migration completes.
