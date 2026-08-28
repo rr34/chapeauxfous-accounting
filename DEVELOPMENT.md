@@ -247,15 +247,25 @@ artifact size. Using the same Accounting API bearer token, the host:
 2. resumes at the returned `next_offset` and sends raw chunks of at most 1 MiB
    to `PATCH /mcp/artifacts/{artifact_id}` with `Content-Type:
    application/octet-stream`, `Upload-Offset`, and `X-Content-SHA256` headers;
+   Accounting verifies each chunk checksum before appending those bytes;
 3. calls `POST /mcp/artifacts/{artifact_id}/complete`, which succeeds only after
-   Accounting verifies the complete byte count, every stored chunk, and the
-   whole-file SHA-256, then verifies with `GET` that the root response contains
+   Accounting verifies the complete byte count and whole-file SHA-256, then
+   verifies with `GET` that the root response contains
    the original `artifact_id`, `status: complete`, final `next_offset`,
    `media_type`, `byte_size`, and `sha256`; and
 4. calls `stage_transaction_import_artifact` with only the logical
    `import_job_id` and verified `artifact_id`.
 
 The byte chunks are host-managed transport and never enter model context.
+Accounting stores upload bytes and small JSON sidecars in an owner-scoped
+filesystem spool, not in MariaDB. Set `ACCOUNTING_ARTIFACT_ROOT` to an absolute
+durable path in production; it defaults to `api/data/artifacts` locally. The
+confirmed resumable offset is always derived from the actual stored file size,
+completion atomically promotes the verified partial file, and the sidecar
+binds a completed artifact to no more than one import job. The API service user
+must have exclusive read/write access to this directory, and it should be
+included in operational backups while imports are in progress.
+
 Accounting waits for the complete verified artifact, groups records across the
 whole file by stable transaction external ID, validates accounts, currencies,
 decimals, exchange rates, and balance, deduplicates, and applies internal

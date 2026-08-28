@@ -13,7 +13,7 @@ import {
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
-import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES } from "./artifact-upload.js";
+import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, resolveArtifactUploadRoot } from "./artifact-upload.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 5004);
@@ -24,6 +24,7 @@ app.disable("x-powered-by");
 app.use(cors({ origin: clientOrigin }));
 mountAccountingMcp(app, {
   pool,
+  artifactRoot: resolveArtifactUploadRoot(),
   jsonBodyParser: express.json({ limit: TRANSACTION_IMPORT_HTTP_BODY_LIMIT }),
   artifactJsonBodyParser: express.json({ limit: "64kb" }),
   artifactRawBodyParser: express.raw({ type: "application/octet-stream", limit: ARTIFACT_UPLOAD_MAX_CHUNK_BYTES }),

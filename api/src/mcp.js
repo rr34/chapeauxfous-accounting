@@ -516,7 +516,7 @@ function transactionDeletionStatusRecovery(result, deletionPlanId) {
   };
 }
 
-export function createAccountingMcpServer({ personId, pool, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
+export function createAccountingMcpServer({ personId, pool, artifactRoot, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
   const injectedPage = (list, key) => async (...args) => {
     const options = args.at(-1) ?? {};
     const limit = Number(options.limit) || 100;
@@ -1604,7 +1604,7 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
       artifactUpload: transactionImportArtifactUpload,
     }),
   }, async ({ import_job_id, artifact_id }) => safeWorkflowResult(async () => withSchemaProjection(schemaSemantics, {
-    job: await accounting.stageTransactionImportArtifact({ pool, personId,
+    job: await accounting.stageTransactionImportArtifact({ pool, artifactRoot, personId,
       importJobId: import_job_id, artifactId: artifact_id }),
   }, operations.transactionImportJob), { retryTool: "stage_transaction_import_artifact" }));
 
@@ -1855,15 +1855,17 @@ export function createAccountingMcpServer({ personId, pool, schemaSemantics = ne
   return server;
 }
 
-export function mountAccountingMcp(app, { pool, jsonBodyParser, artifactJsonBodyParser, artifactRawBodyParser }) {
+export function mountAccountingMcp(app, {
+  pool, artifactRoot, jsonBodyParser, artifactJsonBodyParser, artifactRawBodyParser,
+}) {
   const authenticate = requireApiToken(pool);
   mountArtifactUploadRoutes(app, {
-    pool,
+    artifactRoot,
     authenticate,
     jsonBodyParser: artifactJsonBodyParser,
     rawBodyParser: artifactRawBodyParser,
   });
-  const handler = createAccountingMcpHandler({ pool });
+  const handler = createAccountingMcpHandler({ pool, artifactRoot });
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => console.error("Accounting MCP HTTP adapter error:", error),
   });
@@ -1886,7 +1888,7 @@ export function mountAccountingMcp(app, { pool, jsonBodyParser, artifactJsonBody
   });
 }
 
-export function createAccountingMcpHandler({ pool }) {
+export function createAccountingMcpHandler({ pool, artifactRoot }) {
   return createMcpHandler(
     (requestContext) => {
       const accountingAuth = requestContext.authInfo?.extra?.accountingAuth ?? {};
@@ -1894,7 +1896,7 @@ export function createAccountingMcpHandler({ pool }) {
       if (!Number.isInteger(personId) || personId <= 0) {
         throw new Error("Authenticated accounting user is required.");
       }
-      return createAccountingMcpServer({ personId, pool });
+      return createAccountingMcpServer({ personId, pool, artifactRoot });
     },
     {
       legacy: "stateless",

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import {
+  bindArtifactToImportJob,
   parseCanonicalTransactionArtifact,
   readCompleteArtifact,
 } from "./artifact-upload.js";
@@ -402,8 +403,8 @@ function packArtifactGroups(groups, maximumRecords) {
   return batches;
 }
 
-async function bindArtifactToJob({ pool, personId, importJobId, artifactId, recordCount }) {
-  return withPoolTransaction(pool, async (connection) => {
+async function bindArtifactToJob({ pool, artifactRoot, personId, importJobId, artifactId, recordCount }) {
+  await withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, importJobId, true);
     if (job.job_status === "committed") throw jobError(
       "The import job is already committed.", "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409,
@@ -413,32 +414,28 @@ async function bindArtifactToJob({ pool, personId, importJobId, artifactId, reco
       "ARTIFACT_RECORD_COUNT_MISMATCH",
       { expected_record_count: Number(job.expected_record_count), artifact_record_count: recordCount }, 409,
     );
-    const [bindings] = await connection.query(
-      `SELECT import_job_id, artifact_id FROM accounting_transaction_import_artifacts
-        WHERE import_job_id = ? OR artifact_id = ? FOR UPDATE`, [importJobId, artifactId],
-    );
-    const mismatch = bindings.find((binding) => String(binding.import_job_id) !== importJobId
-      || String(binding.artifact_id) !== artifactId);
-    if (mismatch) throw jobError(
+  });
+  try {
+    return (await bindArtifactToImportJob({
+      artifactRoot, personId, importJobId, artifactId,
+    })).idempotent_replay;
+  } catch (error) {
+    if (error.code === "ARTIFACT_BINDING_CONFLICT") throw jobError(
       "The import job or artifact is already bound to a different canonical artifact identity.",
       "IMPORT_ARTIFACT_BINDING_CONFLICT", undefined, 409,
     );
-    if (!bindings.length) await connection.query(
-      `INSERT INTO accounting_transaction_import_artifacts (import_job_id, artifact_id) VALUES (?, ?)`,
-      [importJobId, artifactId],
-    );
-    return bindings.length > 0;
-  });
+    throw error;
+  }
 }
 
-export async function stageTransactionImportArtifact({ pool, personId, importJobId, artifactId,
+export async function stageTransactionImportArtifact({ pool, artifactRoot, personId, importJobId, artifactId,
   maximumRecordsPerBatch = 10000 }) {
   const normalizedJobId = requiredText(importJobId, "import job ID", 36);
   const normalizedArtifactId = requiredText(artifactId, "artifact ID", 36);
-  const { artifact, bytes } = await readCompleteArtifact({ pool, personId, artifactId: normalizedArtifactId });
+  const { artifact, bytes } = await readCompleteArtifact({ artifactRoot, personId, artifactId: normalizedArtifactId });
   const records = parseCanonicalTransactionArtifact(bytes, artifact.media_type);
   if (!records.length) throw jobError("The canonical artifact contains no records.", "CANONICAL_RECORDS_REQUIRED");
-  const bindingReplay = await bindArtifactToJob({ pool, personId, importJobId: normalizedJobId,
+  const bindingReplay = await bindArtifactToJob({ pool, artifactRoot, personId, importJobId: normalizedJobId,
     artifactId: normalizedArtifactId, recordCount: records.length });
   const groups = groupCanonicalTransactionRecords(records);
   const batches = packArtifactGroups(groups, maximumRecordsPerBatch);
