@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   excludeTransactionImportException,
+  getTransactionImportJob,
   groupCanonicalTransactionRecords,
   previewTransactionImportJob,
   retryTransactionImportException,
@@ -12,6 +13,36 @@ import {
   parseCanonicalTransactionArtifact,
   TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES,
 } from "../src/artifact-upload.js";
+
+test("a committed job keeps its current job shape when its stored result predates that shape", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  const connection = {
+    async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+    async query(sql) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[{
+        import_job_id: importJobId, owner_person_id: 7, source_system: "source_app",
+        source_file_sha256: "7".repeat(64), source_file_name: "source.csv",
+        expected_record_count: 4, job_status: "committed", preview_sha256: "8".repeat(64),
+        result_json: JSON.stringify({ committed: true, transactions_created: 1 }),
+      }]];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        staged_records: 2, committed_records: 2, exception_records: 2, received_records: 4,
+        committed_transactions: 1, exception_transactions: 1,
+      }]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const result = await getTransactionImportJob({
+    pool: { async getConnection() { return connection; } }, personId: 7, importJobId,
+  });
+  assert.equal(result.import_job_id, importJobId);
+  assert.equal(result.source_file.name, "source.csv");
+  assert.equal(result.job_status, "committed");
+  assert.equal(result.progress.expected_source_records, 4);
+  assert.equal(result.transactions_created, 1);
+  assert.equal(result.already_committed, true);
+  assert.equal(result.ready_to_commit, false);
+});
 
 test("the canonical import schema is exact, source-neutral, and line-oriented", () => {
   assert.equal(transactionImportCanonicalJsonSchema.$id, TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI);

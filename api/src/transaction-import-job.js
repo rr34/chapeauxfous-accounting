@@ -723,8 +723,15 @@ export async function getTransactionImportJob({ pool, personId, importJobId }) {
   const normalizedJobId = requiredText(importJobId, "import job ID", 36);
   return withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, normalizedJobId);
-    if (job.job_status === "committed" && job.result_json) return { ...parseJson(job.result_json, "transaction import result"), already_committed: true };
-    return { ...await currentJobResult(connection, job),
+    const current = await currentJobResult(connection, job);
+    if (job.job_status === "committed" && job.result_json) return {
+      ...parseJson(job.result_json, "transaction import result"),
+      ...current,
+      preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
+      ready_to_commit: false,
+      already_committed: true,
+    };
+    return { ...current,
       preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
       ready_to_commit: job.job_status === "review_ready" };
   });

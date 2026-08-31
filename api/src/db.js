@@ -24,7 +24,11 @@ export async function withPoolTransaction(transactionPool, work) {
     await connection.commit();
     return result;
   } catch (error) {
-    await connection.rollback();
+    try {
+      await connection.rollback();
+    } catch (rollbackError) {
+      console.error("Transaction rollback could not complete.", rollbackError);
+    }
     throw error;
   } finally {
     connection.release();

@@ -254,9 +254,9 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   </div>;
 }
 
-function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAccountId, misfitsSelected,
+function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, misfitsSelected,
   token, onSelectAccount, onSelectMisfits, onChanged }: {
-  accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[];
+  accounts: Account[]; currencies: Currency[];
   importJobs: TransactionImportJob[]; selectedAccountId: number | null; misfitsSelected: boolean; token: string;
   onSelectAccount: (account: Account) => void; onSelectMisfits: () => void; onChanged: () => Promise<void>;
 }) {
@@ -268,11 +268,6 @@ function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAc
   const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
   const [error, setError] = useState("");
-  const [assertionAccountId, setAssertionAccountId] = useState("");
-  const [assertionDate, setAssertionDate] = useState(today());
-  const [knownBalance, setKnownBalance] = useState("");
-  const [assertionError, setAssertionError] = useState("");
-  const [assertionBusy, setAssertionBusy] = useState(false);
   const [showCurrencyForm, setShowCurrencyForm] = useState(false);
   const [currencyCode, setCurrencyCode] = useState("");
   const [currencyDisplayName, setCurrencyDisplayName] = useState("");
@@ -284,10 +279,6 @@ function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAc
   const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
   const excludedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.excluded, 0);
 
-  useEffect(() => {
-    if (assertionAccountId && !accounts.some((account) => account.id === Number(assertionAccountId))) setAssertionAccountId("");
-  }, [accounts, assertionAccountId]);
-
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
     try {
@@ -295,21 +286,6 @@ function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAc
         parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
       setName(""); setDescription(""); setPlaceholder(false); setShowForm(false); await onChanged();
     } catch (nextError) { setError(errorMessage(nextError)); }
-  }
-
-  async function saveAssertion(event: FormEvent) {
-    event.preventDefault(); setAssertionBusy(true); setAssertionError("");
-    try {
-      const account = accounts.find((candidate) => candidate.id === Number(assertionAccountId));
-      if (!account) throw new Error("Choose an account.");
-      await api("/balance-assertions", { method: "POST", body: JSON.stringify({
-        accountId: account.id,
-        balanceDate: assertionDate,
-        knownBalanceUnits: decimalToUnits(knownBalance, account.scale),
-      }) }, token);
-      setKnownBalance(""); await onChanged();
-    } catch (nextError) { setAssertionError(errorMessage(nextError)); }
-    finally { setAssertionBusy(false); }
   }
 
   async function createCurrency(event: FormEvent) {
@@ -375,31 +351,6 @@ function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAc
         <div className="currency-row" key={currency.id}><div><strong>{currency.code}</strong><span>{currency.displayName}</span></div>
           <small>{currency.type} · {currency.scale} decimals</small></div>)}
         {!currencies.some((currency) => currency.userDefined) && <p className="assertion-empty">No custom units yet.</p>}
-      </div>
-    </section>
-    <section className="assertions-panel">
-      <div><p className="eyebrow">Reconciliation</p><h3>Known balances</h3></div>
-      <form className="assertion-form" onSubmit={saveAssertion}>
-        <select aria-label="Account" required value={assertionAccountId} onChange={(event) => setAssertionAccountId(event.target.value)}>
-          <option value="">Choose account…</option>
-          {accounts.filter((account) => !account.archivedAt && !account.placeholder).map((account) =>
-            <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}
-        </select>
-        <div className="form-row"><input aria-label="End of date" type="date" required value={assertionDate}
-          onChange={(event) => setAssertionDate(event.target.value)} />
-          <input aria-label="Known ending balance" required placeholder="Known balance" value={knownBalance}
-            onChange={(event) => setKnownBalance(event.target.value)} /></div>
-        {assertionError && <p className="error">{assertionError}</p>}
-        <button className="secondary" disabled={assertionBusy}>{assertionBusy ? "Saving…" : "Save balance"}</button>
-      </form>
-      <div className="assertion-list">{assertions.map((assertion) =>
-        <div className={`assertion-row ${assertion.matches ? "matches" : "mismatch"}`} key={assertion.id}>
-          <div><strong>{assertion.accountName}</strong><span>{assertion.date} · {assertion.currencyCode}</span></div>
-          <div className="assertion-values"><span>Known {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)}</span>
-            <span>Ledger {unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</span>
-            <b>{assertion.matches ? "Matches" : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)}`}</b></div>
-        </div>)}
-        {!assertions.length && <p className="assertion-empty">No known balances recorded.</p>}
       </div>
     </section>
     {editingAccount && <AccountEditDialog key={editingAccount.id} account={editingAccount} accounts={accounts} currencies={currencies}
@@ -614,6 +565,7 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [job, setJob] = useState<TransactionImportJob | null>(null);
   const [exceptions, setExceptions] = useState<TransactionImportException[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [editingExternalId, setEditingExternalId] = useState<string | null>(null);
   const [filter, setFilter] = useState("unresolved");
   const [preview, setPreview] = useState<TransactionImportJob | null>(null);
@@ -626,21 +578,21 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       ?? jobs[0]?.import_job_id ?? null);
   }, [jobs, selectedJobId]);
 
-  async function load() {
-    if (!selectedJobId) { setJob(null); setExceptions([]); return; }
+  async function load(append = false) {
+    if (!selectedJobId) { setJob(null); setExceptions([]); setNextCursor(null); return; }
     setBusy("load"); setError("");
     try {
-      const jobResult = await api<{ job: TransactionImportJob }>(`/transaction-import-jobs/${selectedJobId}`, {}, token);
-      const collected: TransactionImportException[] = [];
-      let cursor: string | null = null;
-      do {
-        const suffix = cursor ? `?limit=500&cursor=${encodeURIComponent(cursor)}` : "?limit=500";
-        const page: { job: { exceptions: TransactionImportException[]; next_cursor: string | null } } =
-          await api(`/transaction-import-jobs/${selectedJobId}/exceptions${suffix}`, {}, token);
-        collected.push(...page.job.exceptions);
-        cursor = page.job.next_cursor;
-      } while (cursor);
-      setJob(jobResult.job); setExceptions(collected);
+      if (!append) {
+        setJob(null); setExceptions([]); setNextCursor(null);
+        const jobResult = await api<{ job: TransactionImportJob }>(`/transaction-import-jobs/${selectedJobId}`, {}, token);
+        setJob(jobResult.job);
+      }
+      const cursor = append ? nextCursor : null;
+      const suffix = cursor ? `?limit=100&cursor=${encodeURIComponent(cursor)}` : "?limit=100";
+      const page: { job: { exceptions: TransactionImportException[]; next_cursor: string | null } } =
+        await api(`/transaction-import-jobs/${selectedJobId}/exceptions${suffix}`, {}, token);
+      setExceptions((current) => append ? [...current, ...page.job.exceptions] : page.job.exceptions);
+      setNextCursor(page.job.next_cursor);
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusy(""); }
   }
@@ -708,6 +660,8 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       </select>}
     </div>
     {!jobs.length && <p className="misfits-empty">No transaction import jobs yet.</p>}
+    {error && <p className="error">{error}</p>}
+    {busy === "load" && !job && <p className="misfits-empty">Loading import job…</p>}
     {job && <>
       <div className="misfit-job-summary">
         <div><span>Source</span><strong>{job.source_file.name ?? job.source_system}</strong><small>{job.source_system}</small></div>
@@ -734,7 +688,6 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
           .map((option) => <button key={option.value} className={filter === option.value ? "active" : ""}
             onClick={() => setFilter(option.value)}>{option.label}</button>)}
       </div>
-      {error && <p className="error">{error}</p>}
       {busy === "load" && <p className="misfits-empty">Loading import exceptions…</p>}
       <div className="misfit-list">{visible.map((exception) => {
         const externalId = exception.source_identity.transaction_external_id;
@@ -774,6 +727,8 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       })}
         {!visible.length && busy !== "load" && <p className="misfits-empty">No exceptions match this view.</p>}
       </div>
+      {nextCursor && <button type="button" className="secondary" disabled={Boolean(busy)}
+        onClick={() => void load(true)}>{busy === "load" ? "Loading…" : "Load 100 more"}</button>}
     </>}
   </section>;
 }
@@ -795,26 +750,76 @@ function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
   </section>;
 }
 
-function AccountRegister({ account, entries, loading, error, onShowAll, onNewTransaction }: {
-  account: Account; entries: AccountLedgerEntry[]; loading: boolean; error: string;
-  onShowAll: () => void; onNewTransaction: () => void;
+type AccountRegisterRow =
+  | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry }
+  | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
+
+function AccountRegister({ account, entries, assertions, loading, error, token, onShowAll, onNewTransaction, onChanged }: {
+  account: Account; entries: AccountLedgerEntry[]; assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
+  onShowAll: () => void; onNewTransaction: () => void; onChanged: () => Promise<void>;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
   const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
+  const [showKnownBalanceForm, setShowKnownBalanceForm] = useState(false);
+  const [knownBalanceDate, setKnownBalanceDate] = useState(today());
+  const [knownBalance, setKnownBalance] = useState("");
+  const [knownBalanceError, setKnownBalanceError] = useState("");
+  const [knownBalanceBusy, setKnownBalanceBusy] = useState(false);
   const debitIncreases = account.type === "asset" || account.type === "expense";
   const debitEffect = debitIncreases ? "increases" : "decreases";
   const creditEffect = debitIncreases ? "decreases" : "increases";
+  const accountAssertions = useMemo(() => assertions.filter((assertion) => assertion.accountId === account.id), [account.id, assertions]);
+  const registerRows = useMemo<AccountRegisterRow[]>(() => [
+    ...entries.map((entry, order) => ({ kind: "entry" as const, date: entry.date, order, entry })),
+    ...accountAssertions.map((assertion) => ({ kind: "assertion" as const, date: assertion.date, order: assertion.id, assertion })),
+  ].sort((left, right) => left.date.localeCompare(right.date)
+    || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1)), [accountAssertions, entries]);
 
-  useEffect(() => { setActiveTransactionId(null); }, [account.id]);
+  useEffect(() => {
+    setActiveTransactionId(null); setShowKnownBalanceForm(false); setKnownBalanceDate(today());
+    setKnownBalance(""); setKnownBalanceError("");
+  }, [account.id]);
 
   function activateTransaction(transactionId: number) {
     if (view === "auto-split") setActiveTransactionId(transactionId);
   }
 
+  function editKnownBalance(assertion: BalanceAssertion) {
+    setKnownBalanceDate(assertion.date);
+    setKnownBalance(unitsToDecimal(assertion.knownBalanceUnits, assertion.scale));
+    setKnownBalanceError(""); setShowKnownBalanceForm(true);
+  }
+
+  async function saveKnownBalance(event: FormEvent) {
+    event.preventDefault(); setKnownBalanceBusy(true); setKnownBalanceError("");
+    try {
+      await api("/balance-assertions", { method: "POST", body: JSON.stringify({
+        accountId: account.id,
+        balanceDate: knownBalanceDate,
+        knownBalanceUnits: decimalToUnits(knownBalance, account.scale),
+      }) }, token);
+      setKnownBalance(""); await onChanged();
+    } catch (nextError) { setKnownBalanceError(errorMessage(nextError)); }
+    finally { setKnownBalanceBusy(false); }
+  }
+
   return <section className="account-register card">
     <div className="section-heading"><div><p className="eyebrow">Account register</p><h2>{account.name}</h2>
       <p className="register-subtitle">Posted transactions · {account.currencyCode}</p></div>
-      <button className="secondary" onClick={onShowAll}>All activity</button></div>
+      <div className="register-heading-actions">
+        {!account.placeholder && !account.archivedAt && <button className="secondary" aria-expanded={showKnownBalanceForm}
+          aria-controls="known-balance-form" onClick={() => setShowKnownBalanceForm((current) => !current)}>
+          Enter a known balance</button>}
+        <button className="secondary" onClick={onShowAll}>All activity</button>
+      </div></div>
+    {showKnownBalanceForm && <form id="known-balance-form" className="known-balance-form" onSubmit={saveKnownBalance}>
+      <label>End of date<input type="date" required value={knownBalanceDate}
+        onChange={(event) => setKnownBalanceDate(event.target.value)} /></label>
+      <label>Known ending balance ({account.currencyCode})<input required placeholder="Known balance" value={knownBalance}
+        onChange={(event) => setKnownBalance(event.target.value)} /></label>
+      <button className="secondary" disabled={knownBalanceBusy}>{knownBalanceBusy ? "Saving…" : "Save balance"}</button>
+      {knownBalanceError && <p className="error">{knownBalanceError}</p>}
+    </form>}
     <div className="register-view-controls" role="group" aria-label="Register view">
       <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
         onClick={() => setView("basic")}>Basic Ledger</button>
@@ -825,12 +830,27 @@ function AccountRegister({ account, entries, loading, error, onShowAll, onNewTra
     </div>
     {error && <p className="error">{error}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
-      : !error && entries.length === 0 ? <p className="register-message">No posted transactions in this account.</p>
+      : !error && registerRows.length === 0 ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>Split account</th>
           <th>Debit <span>({debitEffect} {account.type})</span></th>
-          <th>Credit <span>({creditEffect} {account.type})</span></th><th>Running balance</th></tr></thead>
-        <tbody>{entries.map((entry) => {
+          <th>Credit <span>({creditEffect} {account.type})</span></th><th>Running balance</th><th>Known balance</th></tr></thead>
+        <tbody>{registerRows.map((row) => {
+          if (row.kind === "assertion") {
+            const { assertion } = row;
+            return <tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`} key={`assertion-${assertion.id}`}>
+              <td>{assertion.date}</td>
+              <td><strong>Known balance</strong><small>{assertion.matches
+                ? "Matches the ledger"
+                : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small></td>
+              <td>—</td><td></td><td></td>
+              <td className="amount balance">{unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</td>
+              <td className="amount known-balance"><button type="button" className="known-balance-edit"
+                aria-label={`Edit known balance for ${assertion.date}`} onClick={() => editKnownBalance(assertion)}>
+                {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)} <span aria-hidden="true">✎</span></button></td>
+            </tr>;
+          }
+          const { entry } = row;
           const splitLabel = entry.splitAccountNames.length === 0 ? "—"
             : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split transaction";
           const expanded = view === "journal" || (view === "auto-split" && activeTransactionId === entry.transactionId);
@@ -853,8 +873,9 @@ function AccountRegister({ account, entries, loading, error, onShowAll, onNewTra
               <td className={`amount ${debitIncreases ? "decrease-effect" : "increase-effect"}`}>
                 {entry.creditUnits == null ? "" : unitsToDecimal(entry.creditUnits, account.scale)}</td>
               <td className="amount balance">{unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
+              <td className="amount known-balance"></td>
             </tr>
-            {expanded && <tr className="register-splits-row"><td colSpan={6}>
+            {expanded && <tr className="register-splits-row"><td colSpan={7}>
               <div className="register-splits" aria-label={`Splits for ${entry.description || "untitled transaction"}`}>
                 {entry.splits.map((split) => <div className="register-split" key={split.lineItemId}>
                   <div><strong>{split.accountName}</strong>{split.memo && <small>{split.memo}</small>}</div>
@@ -1101,15 +1122,16 @@ export default function App() {
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <button className="header-action" onClick={() => setShowAgentAccess(true)}>Agent access</button>
     <button className="link-button" onClick={logout}>Sign out</button></div></header>
-    <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
+    <main className="workspace"><AccountPanel accounts={accounts} currencies={currencies}
       importJobs={importJobs} selectedAccountId={selectedAccountId} misfitsSelected={showMisfits} token={token}
       onSelectAccount={selectAccount} onSelectMisfits={selectMisfits} onChanged={refresh} />
       <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>{showMisfits
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
           : selectedAccount
-          ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} loading={accountLedgerLoading}
-              error={accountLedgerError} onShowAll={() => setSelectedAccountId(null)}
-              onNewTransaction={() => setShowTransactionComposer(true)} />
+          ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} assertions={assertions}
+              loading={accountLedgerLoading} error={accountLedgerError} token={token}
+              onShowAll={() => setSelectedAccountId(null)} onNewTransaction={() => setShowTransactionComposer(true)}
+              onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
               onVerify={() => void verify()} verification={verification} />}</div></main>
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}

@@ -212,12 +212,27 @@ const server = app.listen(port, host, () => {
   console.log(`Chapeaux Fous Accounting API listening on http://${host}:${port}`);
 });
 
+let shuttingDown = false;
+
 async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`${signal} received; shutting down.`);
-  server.close(async () => {
+  const forcedExit = setTimeout(() => {
+    console.error("Shutdown timed out; forcing exit.");
+    process.exit(1);
+  }, 5000);
+  forcedExit.unref();
+  try {
+    const serverClosed = new Promise((resolve) => server.close(resolve));
+    server.closeAllConnections?.();
     await pool.end();
+    await serverClosed;
     process.exit(0);
-  });
+  } catch (error) {
+    console.error("Shutdown failed.", error);
+    process.exit(1);
+  }
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
