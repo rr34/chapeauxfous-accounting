@@ -1041,7 +1041,7 @@
           },
           "semantics": {
             "inheritsFrom": null,
-            "meaning": "Number of canonical source line records represented by this transaction group.",
+            "meaning": "Immutable number of original source records represented by this transaction group, independent of accounting lines added or removed during exception correction.",
             "units": null,
             "format": null,
             "allowedValueMeanings": {},
@@ -1050,7 +1050,8 @@
             "routingWeight": 0.5,
             "examples": [],
             "importantRules": [
-              "Use only within the authenticated owner-scoped provider workflow."
+              "Use only within the authenticated owner-scoped provider workflow.",
+              "Exception correction may change canonical accounting line count without changing this original-source reconciliation count."
             ],
             "sensitivity": "Private owner-scoped financial workflow metadata."
           }
@@ -1134,7 +1135,7 @@
           },
           "semantics": {
             "inheritsFrom": null,
-            "meaning": "Structured provider validation exceptions for this complete canonical transaction context.",
+            "meaning": "Structured provider validation exceptions and any explicit user exclusion disposition for this complete canonical transaction context.",
             "units": null,
             "format": null,
             "allowedValueMeanings": {},
@@ -1143,7 +1144,8 @@
             "routingWeight": 0.5,
             "examples": [],
             "importantRules": [
-              "Use only within the authenticated owner-scoped provider workflow."
+              "Use only within the authenticated owner-scoped provider workflow.",
+              "A USER_EXCLUDED entry records the user's reason and decision time without discarding the original validation errors."
             ],
             "sensitivity": "Server-only private financial workflow payload; never expose as generic model context."
           }

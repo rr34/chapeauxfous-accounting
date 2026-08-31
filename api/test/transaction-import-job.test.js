@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  excludeTransactionImportException,
   groupCanonicalTransactionRecords,
   previewTransactionImportJob,
+  retryTransactionImportException,
   TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
   transactionImportCanonicalJsonSchema,
 } from "../src/transaction-import-job.js";
@@ -144,4 +146,89 @@ test("the final job preview publishes an executable confirmation handoff", async
     tool: "commit_transaction_import_job",
     arguments: { import_job_id: importJobId, preview_digest: result.preview_digest },
   });
+});
+
+test("a committed job can retry one exception with supplemental accounting lines", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  let canonicalUpdate;
+  const connection = {
+    async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+    async query(sql, params) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[{
+        import_job_id: importJobId, owner_person_id: 7, source_system: "source_app",
+        source_file_sha256: "7".repeat(64), source_file_name: "source.csv",
+        expected_record_count: 1, job_status: "committed", result_json: "{}",
+      }]];
+      if (sql.includes("FROM accounting_transaction_import_requests")) return [[]];
+      if (sql.includes("SELECT transaction_external_id, source_record_count, item_status")) return [[{
+        transaction_external_id: "tx-one-line", source_record_count: 1, item_status: "exception",
+      }]];
+      if (sql.includes("SET canonical_sha256")) { canonicalUpdate = params; return [{ affectedRows: 1 }]; }
+      if (sql.includes("INSERT INTO accounting_transaction_import_requests")) return [{ affectedRows: 1 }];
+      if (sql.includes("UPDATE accounting_transaction_import_jobs")) return [{ affectedRows: 1 }];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        staged_records: 0, reused_records: 0, exception_records: 1, received_records: 1,
+        exception_transactions: 1,
+      }]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const records = [
+    { transaction_external_id: "tx-one-line", transaction_date: "2026-01-01",
+      valuation_currency_code: "USD", account_full_name: "Assets:Bank", amount_decimal: "-1", value_decimal: "-1" },
+    { transaction_external_id: "tx-one-line", transaction_date: "2026-01-02",
+      valuation_currency_code: "USD", account_full_name: "Expenses:Food", amount_decimal: "1", value_decimal: "1" },
+  ];
+  const result = await retryTransactionImportException({
+    pool: { async getConnection() { return connection; } }, personId: 7, importJobId,
+    retryId: "retry-with-balancing-line", transactionExternalId: "tx-one-line", records,
+  });
+
+  assert.equal(result.job_status, "receiving");
+  assert.equal(result.progress.expected_source_records, 1);
+  assert.equal(JSON.parse(canonicalUpdate[1]).length, 2);
+  assert.equal(result.exceptions[0].error_codes.includes("INCONSISTENT_TRANSACTION_CONTEXT"), true);
+});
+
+test("an explicit exclusion retains validation errors, source context, and the user's reason", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  const canonicalRecords = [{ transaction_external_id: "tx-ignore", transaction_date: "2026-01-01",
+    valuation_currency_code: "USD", account_full_name: "Assets:Bank", amount_decimal: "1", value_decimal: "1" }];
+  let storedErrors;
+  const connection = {
+    async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+    async query(sql, params) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[{
+        import_job_id: importJobId, owner_person_id: 7, source_system: "source_app",
+        source_file_sha256: "7".repeat(64), source_file_name: "source.csv",
+        expected_record_count: 1, job_status: "committed", result_json: "{}",
+      }]];
+      if (sql.includes("FROM accounting_transaction_import_requests")) return [[]];
+      if (sql.includes("SELECT transaction_external_id, canonical_json")) return [[{
+        transaction_external_id: "tx-ignore", canonical_json: JSON.stringify(canonicalRecords),
+        source_record_count: 1, item_status: "exception",
+        errors_json: JSON.stringify([{ code: "TOO_FEW_LINE_ITEMS", message: "Two lines are required." }]),
+      }]];
+      if (sql.includes("SET errors_json")) { storedErrors = JSON.parse(params[0]); return [{ affectedRows: 1 }]; }
+      if (sql.includes("INSERT INTO accounting_transaction_import_requests")) return [{ affectedRows: 1 }];
+      if (sql.includes("UPDATE accounting_transaction_import_jobs")) return [{ affectedRows: 1 }];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        staged_records: 0, reused_records: 0, exception_records: 1, excluded_records: 1,
+        received_records: 1, exception_transactions: 1, excluded_transactions: 1,
+      }]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const result = await excludeTransactionImportException({
+    pool: { async getConnection() { return connection; } }, personId: 7, importJobId,
+    exclusionId: "exclude-not-a-transaction", transactionExternalId: "tx-ignore",
+    reason: "This source row is a price note, not a ledger transaction.",
+  });
+
+  assert.deepEqual(result.exception.error_codes, ["TOO_FEW_LINE_ITEMS"]);
+  assert.equal(result.exception.resolution.status, "excluded");
+  assert.match(result.exception.resolution.reason, /price note/);
+  assert.equal(storedErrors.at(-1).code, "USER_EXCLUDED");
+  assert.equal(result.progress.transaction_totals.unresolved_exceptions, 0);
+  assert.equal(result.progress.transaction_totals.excluded, 1);
 });

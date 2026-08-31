@@ -78,7 +78,9 @@ import { commitTransactionImportPlan, getTransactionImportPlan, previewTransacti
 import {
   commitTransactionImportJob,
   createTransactionImportJob,
+  excludeTransactionImportException,
   getTransactionImportJob,
+  listTransactionImportJobs,
   listTransactionImportExceptions,
   previewTransactionImportJob,
   retryTransactionImportException,
@@ -546,7 +548,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     stageTransactionImportChunk: services.stageTransactionImportChunk ?? stageTransactionImportChunk,
     stageTransactionImportArtifact: services.stageTransactionImportArtifact ?? stageTransactionImportArtifact,
     retryTransactionImportException: services.retryTransactionImportException ?? retryTransactionImportException,
+    excludeTransactionImportException: services.excludeTransactionImportException ?? excludeTransactionImportException,
     getTransactionImportJob: services.getTransactionImportJob ?? getTransactionImportJob,
+    listTransactionImportJobs: services.listTransactionImportJobs ?? listTransactionImportJobs,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
@@ -1559,10 +1563,20 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     exception_records: z.number().int().nonnegative(),
     remaining_records: z.number().int().nonnegative(),
     equation: z.string().min(1),
+    pending_commit_records: z.number().int().nonnegative(),
+    previously_committed_records: z.number().int().nonnegative(),
+    exception_record_totals: z.object({
+      unresolved: z.number().int().nonnegative(),
+      excluded: z.number().int().nonnegative(),
+    }),
     transaction_totals: z.object({
       staged: z.number().int().nonnegative(),
+      pending_commit: z.number().int().nonnegative(),
+      previously_committed: z.number().int().nonnegative(),
       reused: z.number().int().nonnegative(),
       exceptions: z.number().int().nonnegative(),
+      unresolved_exceptions: z.number().int().nonnegative(),
+      excluded: z.number().int().nonnegative(),
     }),
   });
   const transactionImportJobIdentityShape = {
@@ -1579,11 +1593,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       created: z.number().int().nonnegative(),
       reused: z.number().int().nonnegative(),
       exceptions: z.number().int().nonnegative(),
+      unresolved_exceptions: z.number().int().nonnegative(),
+      excluded: z.number().int().nonnegative(),
     }),
     line_items: z.object({
       created: z.number().int().nonnegative(),
       reused: z.number().int().nonnegative(),
       exceptions: z.number().int().nonnegative(),
+      unresolved_exceptions: z.number().int().nonnegative(),
+      excluded: z.number().int().nonnegative(),
     }),
   });
   const transactionImportPreviewJobSchema = z.object({
@@ -1593,6 +1611,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     ready_to_commit: z.literal(true),
     unresolved_exceptions: z.number().int().nonnegative(),
+    excluded_exceptions: z.number().int().nonnegative(),
     commit_scope: z.string().min(1),
     requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
     nextAction: z.object({
@@ -1695,7 +1714,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("retry_transaction_import_exception", {
     title: "Retry one corrected import exception",
-    description: "Replace and revalidate one current exception transaction using corrected canonical records. Successful staged or reused transactions are not resubmitted or changed. The stable retry_id makes exact retries idempotent; transaction identity and the job's final source-record count must remain unchanged.",
+    description: "Replace and revalidate one current exception transaction using corrected canonical records, before or after earlier valid transactions were committed. A correction may add or remove accounting lines while Accounting preserves the original source-record count used by job reconciliation. Successful staged, committed, or reused transactions are not resubmitted or changed. The stable retry_id makes exact retries idempotent and transaction_external_id must remain unchanged.",
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       retry_id: z.string().trim().min(1).max(128),
@@ -1710,6 +1729,34 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         retryId: retry_id, transactionExternalId: transaction_external_id, records }),
     }), { retryTool: "retry_transaction_import_exception" }));
 
+  server.registerTool("exclude_transaction_import_exception", {
+    title: "Explicitly exclude one import exception",
+    description: "Record the user's explicit decision that one current source transaction should remain outside the ledger. The reason and decision time stay attached to the structured exception; the original source identity and canonical context are preserved. This may be used before or after earlier valid transactions were committed, invalidates the prior preview, and never changes successful transactions.",
+    inputSchema: {
+      import_job_id: z.string().trim().uuid(),
+      exclusion_id: z.string().trim().min(1).max(110),
+      transaction_external_id: z.string().trim().min(1).max(128),
+      reason: z.string().trim().min(1).max(2000),
+    },
+    outputSchema: transactionImportJobOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", { dependencies: ["list_transaction_import_exceptions"] }),
+  }, async ({ import_job_id, exclusion_id, transaction_external_id, reason }) => safeWorkflowResult(async () => ({
+    job: await accounting.excludeTransactionImportException({ pool, personId, importJobId: import_job_id,
+      exclusionId: exclusion_id, transactionExternalId: transaction_external_id, reason }),
+  }), { retryTool: "exclude_transaction_import_exception" }));
+
+  server.registerTool("list_transaction_import_jobs", {
+    title: "List transaction import jobs",
+    description: "List this owner's recent durable transaction-import jobs with source identity, lifecycle status, pending commit totals, previously committed totals, unresolved exceptions, explicitly excluded exceptions, and the reconcilable source-record equation.",
+    inputSchema: { limit: z.number().int().min(1).max(500).default(100) },
+    outputSchema: successOutputSchema({ jobs: z.array(z.json()) }),
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.transactions"),
+  }, async ({ limit }) => safeWorkflowResult(async () => ({
+    jobs: await accounting.listTransactionImportJobs({ pool, personId, limit }),
+  })));
+
   server.registerTool("get_transaction_import_job", {
     title: "Get transaction import job",
     description: "Read the durable owner-scoped state and reconcilable progress of one logical import job across connections, chunks, and retries.",
@@ -1723,7 +1770,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("list_transaction_import_exceptions", {
     title: "List transaction import exceptions",
-    description: "Page through current invalid transactions. Every exception includes error codes, complete source identity, the canonical records, and complete transaction context so only exceptions need to return to the LLM for correction.",
+    description: "Page through current invalid transactions, including explicit user exclusions. Every exception includes its unresolved or excluded resolution status, error codes, complete source identity, canonical records, and complete transaction context so only unresolved exceptions need to return to the LLM for correction.",
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       limit: z.number().int().min(1).max(500).default(100),

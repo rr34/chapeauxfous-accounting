@@ -3,7 +3,8 @@ import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
-  CurrencyType, TransactionDetail, TransactionSummary, User,
+  CanonicalImportRecord, CurrencyType, TransactionDetail, TransactionImportException,
+  TransactionImportJob, TransactionSummary, User,
 } from "./types";
 
 const tokenKey = "cf-accounting-token";
@@ -63,6 +64,22 @@ function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
   };
 
   return (childrenByParentId.get(null) ?? []).map((account) => addChildren(account, new Set()));
+}
+
+function accountFullNames(accounts: Account[]) {
+  const byId = new Map(accounts.map((account) => [account.id, account]));
+  const names = new Map<number, string>();
+  function resolve(account: Account, visiting = new Set<number>()): string {
+    const known = names.get(account.id);
+    if (known) return known;
+    if (visiting.has(account.id)) return account.name;
+    const parent = account.parentAccountId == null ? null : byId.get(account.parentAccountId);
+    const fullName = parent ? `${resolve(parent, new Set(visiting).add(account.id))}:${account.name}` : account.name;
+    names.set(account.id, fullName);
+    return fullName;
+  }
+  for (const account of accounts) resolve(account);
+  return names;
 }
 
 function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
@@ -237,10 +254,11 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   </div>;
 }
 
-function AccountPanel({ accounts, assertions, currencies, selectedAccountId, token, onSelectAccount, onChanged }: {
+function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAccountId, misfitsSelected,
+  token, onSelectAccount, onSelectMisfits, onChanged }: {
   accounts: Account[]; assertions: BalanceAssertion[]; currencies: Currency[];
-  selectedAccountId: number | null; token: string;
-  onSelectAccount: (account: Account) => void; onChanged: () => Promise<void>;
+  importJobs: TransactionImportJob[]; selectedAccountId: number | null; misfitsSelected: boolean; token: string;
+  onSelectAccount: (account: Account) => void; onSelectMisfits: () => void; onChanged: () => Promise<void>;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -263,6 +281,8 @@ function AccountPanel({ accounts, assertions, currencies, selectedAccountId, tok
   const [currencyError, setCurrencyError] = useState("");
   const [currencyBusy, setCurrencyBusy] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
+  const excludedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.excluded, 0);
 
   useEffect(() => {
     if (assertionAccountId && !accounts.some((account) => account.id === Number(assertionAccountId))) setAssertionAccountId("");
@@ -328,6 +348,11 @@ function AccountPanel({ accounts, assertions, currencies, selectedAccountId, tok
     </form>}
     <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}
       onSelect={onSelectAccount} onEdit={setEditingAccount} />
+    <button type="button" className={`misfits-account ${misfitsSelected ? "selected" : ""}`} onClick={onSelectMisfits}>
+      <span className="misfits-mark" aria-hidden="true">◇</span>
+      <span><strong>Import misfits</strong><small>Transactions needing a home or a decision</small></span>
+      <span className="misfits-count">{unresolvedMisfits}{excludedMisfits > 0 && <small>{excludedMisfits} excluded</small>}</span>
+    </button>
     <section className="currencies-panel">
       <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
         <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
@@ -480,6 +505,276 @@ function TransactionComposerDialog({ accounts, currencies, initialAccountId, tok
         token={token} onCreated={onCreated} />
     </section>
   </div>;
+}
+
+function MisfitEditor({ exception, accounts, currencies, token, importJobId, onSaved, onCancel }: {
+  exception: TransactionImportException; accounts: Account[]; currencies: Currency[]; token: string;
+  importJobId: string; onSaved: () => Promise<void>; onCancel: () => void;
+}) {
+  const [records, setRecords] = useState<CanonicalImportRecord[]>(() =>
+    exception.canonical_records.map((record) => ({ ...record })));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const postableAccounts = accounts.filter((account) => !account.archivedAt && !account.placeholder)
+    .map((account) => ({ account, fullName: fullNames.get(account.id) ?? account.name }))
+    .sort((left, right) => left.fullName.localeCompare(right.fullName));
+  const first = records[0];
+
+  function updateTransaction(patch: Partial<Pick<CanonicalImportRecord,
+    "transaction_date" | "description" | "valuation_currency_code">>) {
+    setRecords((current) => current.map((record) => ({ ...record, ...patch })));
+  }
+
+  function updateLine(index: number, patch: Partial<CanonicalImportRecord>) {
+    setRecords((current) => current.map((record, recordIndex) => recordIndex === index ? { ...record, ...patch } : record));
+  }
+
+  function addSplit() {
+    setRecords((current) => [...current, {
+      transaction_external_id: exception.source_identity.transaction_external_id,
+      line_external_id: null,
+      transaction_date: current[0]?.transaction_date ?? today(),
+      description: current[0]?.description ?? null,
+      valuation_currency_code: current[0]?.valuation_currency_code ?? "USD",
+      account_full_name: "",
+      amount_decimal: "",
+      value_decimal: "",
+      memo: null,
+    }]);
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      const corrected = records.map((record) => ({
+        ...record,
+        description: record.description?.trim() || null,
+        memo: record.memo?.trim() || null,
+        line_external_id: record.line_external_id?.trim() || null,
+        account_full_name: record.account_full_name.trim(),
+        amount_decimal: record.amount_decimal.trim(),
+        value_decimal: record.value_decimal == null || record.value_decimal.trim() === "" ? null : record.value_decimal.trim(),
+      }));
+      await api(`/transaction-import-jobs/${importJobId}/exceptions/${encodeURIComponent(exception.source_identity.transaction_external_id)}/retry`, {
+        method: "POST",
+        body: JSON.stringify({ retryId: crypto.randomUUID(), records: corrected }),
+      }, token);
+      await onSaved(); onCancel();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(false); }
+  }
+
+  if (!first) return null;
+  return <form className="misfit-editor" onSubmit={submit}>
+    <div className="misfit-meta">
+      <label>Date<input type="date" required value={first.transaction_date}
+        onChange={(event) => updateTransaction({ transaction_date: event.target.value })} /></label>
+      <label>Description<input value={first.description ?? ""}
+        onChange={(event) => updateTransaction({ description: event.target.value })} /></label>
+      <label>Value currency<select required value={first.valuation_currency_code}
+        onChange={(event) => updateTransaction({ valuation_currency_code: event.target.value })}>
+        {currencies.map((currency) => <option key={currency.id} value={currency.code}>{currencyLabel(currency)}</option>)}
+      </select></label>
+    </div>
+    <div className="misfit-lines">
+      <div className="misfit-line-head"><span>Account</span><span>Native amount</span><span>Value</span><span>Memo</span><span /></div>
+      {records.map((record, index) => <div className="misfit-line" key={`${record.line_external_id ?? "new"}-${index}`}>
+        <select required value={record.account_full_name}
+          onChange={(event) => updateLine(index, { account_full_name: event.target.value })}>
+          <option value="">Choose a postable account…</option>
+          {postableAccounts.map(({ account, fullName }) => <option key={account.id} value={fullName}>
+            {fullName} ({account.currencyCode})
+          </option>)}
+        </select>
+        <input required value={record.amount_decimal}
+          onChange={(event) => updateLine(index, { amount_decimal: event.target.value })} placeholder="-12.34" />
+        <input value={record.value_decimal ?? ""}
+          onChange={(event) => updateLine(index, { value_decimal: event.target.value })} placeholder="Same-currency may be blank" />
+        <input value={record.memo ?? ""} onChange={(event) => updateLine(index, { memo: event.target.value })} />
+        <button type="button" className="quiet" aria-label="Remove split" disabled={records.length === 1}
+          onClick={() => setRecords((current) => current.filter((_, recordIndex) => recordIndex !== index))}>×</button>
+      </div>)}
+    </div>
+    <div className="misfit-editor-actions">
+      <button type="button" className="secondary" onClick={addSplit}>Add balancing split</button>
+      <span />
+      <button type="button" className="link-button" onClick={onCancel}>Cancel</button>
+      <button className="primary" disabled={busy}>{busy ? "Revalidating…" : "Revalidate correction"}</button>
+    </div>
+    {error && <p className="error">{error}</p>}
+  </form>;
+}
+
+function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
+  jobs: TransactionImportJob[]; accounts: Account[]; currencies: Currency[]; token: string;
+  onChanged: () => Promise<void>;
+}) {
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<TransactionImportJob | null>(null);
+  const [exceptions, setExceptions] = useState<TransactionImportException[]>([]);
+  const [editingExternalId, setEditingExternalId] = useState<string | null>(null);
+  const [filter, setFilter] = useState("unresolved");
+  const [preview, setPreview] = useState<TransactionImportJob | null>(null);
+  const [busy, setBusy] = useState<"load" | "preview" | "commit" | "exclude" | "">("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (selectedJobId && jobs.some((candidate) => candidate.import_job_id === selectedJobId)) return;
+    setSelectedJobId(jobs.find((candidate) => candidate.progress.transaction_totals.exceptions > 0)?.import_job_id
+      ?? jobs[0]?.import_job_id ?? null);
+  }, [jobs, selectedJobId]);
+
+  async function load() {
+    if (!selectedJobId) { setJob(null); setExceptions([]); return; }
+    setBusy("load"); setError("");
+    try {
+      const jobResult = await api<{ job: TransactionImportJob }>(`/transaction-import-jobs/${selectedJobId}`, {}, token);
+      const collected: TransactionImportException[] = [];
+      let cursor: string | null = null;
+      do {
+        const suffix = cursor ? `?limit=500&cursor=${encodeURIComponent(cursor)}` : "?limit=500";
+        const page: { job: { exceptions: TransactionImportException[]; next_cursor: string | null } } =
+          await api(`/transaction-import-jobs/${selectedJobId}/exceptions${suffix}`, {}, token);
+        collected.push(...page.job.exceptions);
+        cursor = page.job.next_cursor;
+      } while (cursor);
+      setJob(jobResult.job); setExceptions(collected);
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  useEffect(() => { void load(); }, [selectedJobId]);
+
+  async function changed() {
+    setPreview(null);
+    await onChanged();
+    await load();
+  }
+
+  async function exclude(exception: TransactionImportException) {
+    const reason = window.prompt("Why should this source transaction remain outside the ledger?");
+    if (!reason?.trim() || !selectedJobId) return;
+    setBusy("exclude"); setError("");
+    try {
+      await api(`/transaction-import-jobs/${selectedJobId}/exceptions/${encodeURIComponent(exception.source_identity.transaction_external_id)}/exclude`, {
+        method: "POST",
+        body: JSON.stringify({ exclusionId: crypto.randomUUID(), reason: reason.trim() }),
+      }, token);
+      await changed();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function preparePreview() {
+    if (!selectedJobId) return;
+    setBusy("preview"); setError("");
+    try {
+      const result = await api<{ job: TransactionImportJob }>(`/transaction-import-jobs/${selectedJobId}/preview`, {
+        method: "POST", body: "{}",
+      }, token);
+      setPreview(result.job); setJob(result.job);
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function commitPreview() {
+    if (!selectedJobId || !preview?.preview_digest) return;
+    const pending = preview.progress.transaction_totals.pending_commit;
+    if (!window.confirm(`Commit exactly ${pending} pending corrected or staged transaction${pending === 1 ? "" : "s"}? Previously committed transactions will not be recreated.`)) return;
+    setBusy("commit"); setError("");
+    try {
+      await api(`/transaction-import-jobs/${selectedJobId}/commit`, {
+        method: "POST", body: JSON.stringify({ previewDigest: preview.preview_digest }),
+      }, token);
+      setPreview(null); await changed();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  const errorCodes = [...new Set(exceptions.flatMap((exception) => exception.error_codes))].sort();
+  const visible = exceptions.filter((exception) => filter === "all"
+    || filter === exception.resolution.status || exception.error_codes.includes(filter));
+
+  return <section className="misfits-page card">
+    <div className="section-heading misfits-heading"><div><p className="eyebrow">Import holding area</p>
+      <h2>Import misfits</h2><p>Source transactions that need a correction, an accounting choice, or an explicit exclusion.</p></div>
+      {jobs.length > 1 && <select aria-label="Import job" value={selectedJobId ?? ""}
+        onChange={(event) => { setSelectedJobId(event.target.value); setPreview(null); }}>
+        {jobs.map((candidate) => <option key={candidate.import_job_id} value={candidate.import_job_id}>
+          {candidate.source_file.name ?? candidate.source_system} · {candidate.progress.transaction_totals.unresolved_exceptions} unresolved
+        </option>)}
+      </select>}
+    </div>
+    {!jobs.length && <p className="misfits-empty">No transaction import jobs yet.</p>}
+    {job && <>
+      <div className="misfit-job-summary">
+        <div><span>Source</span><strong>{job.source_file.name ?? job.source_system}</strong><small>{job.source_system}</small></div>
+        <div><span>Pending commit</span><strong>{job.progress.transaction_totals.pending_commit}</strong><small>{job.progress.pending_commit_records} source records</small></div>
+        <div><span>Already committed</span><strong>{job.progress.transaction_totals.previously_committed}</strong><small>{job.progress.previously_committed_records} source records</small></div>
+        <div><span>Unresolved</span><strong>{job.progress.transaction_totals.unresolved_exceptions}</strong><small>{job.progress.exception_record_totals.unresolved} source records</small></div>
+        <div><span>Excluded</span><strong>{job.progress.transaction_totals.excluded}</strong><small>{job.progress.exception_record_totals.excluded} source records</small></div>
+      </div>
+      <p className="reconciliation-equation">{job.progress.equation}</p>
+      <div className="misfit-commit-panel">
+        <div><strong>{job.progress.transaction_totals.pending_commit} transactions waiting for commit</strong>
+          <span>Corrections are fully revalidated. Existing committed and reused transactions stay untouched.</span></div>
+        {!preview ? <button className="secondary" disabled={Boolean(busy) || job.job_status === "committed"}
+          onClick={() => void preparePreview()}>{busy === "preview" ? "Preparing…" : "Prepare exact preview"}</button>
+          : <button className="primary" disabled={Boolean(busy)} onClick={() => void commitPreview()}>
+            {busy === "commit" ? "Committing…" : `Commit ${preview.progress.transaction_totals.pending_commit} pending`}
+          </button>}
+      </div>
+      {preview && <div className="preview-notice"><strong>Exact preview ready.</strong><span>{preview.commit_scope}</span>
+        <code>{preview.preview_digest}</code></div>}
+      <div className="misfit-filters">
+        {[{ value: "unresolved", label: "Unresolved" }, { value: "excluded", label: "Excluded" },
+          { value: "all", label: "All" }, ...errorCodes.map((code) => ({ value: code, label: code.replaceAll("_", " ") }))]
+          .map((option) => <button key={option.value} className={filter === option.value ? "active" : ""}
+            onClick={() => setFilter(option.value)}>{option.label}</button>)}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {busy === "load" && <p className="misfits-empty">Loading import exceptions…</p>}
+      <div className="misfit-list">{visible.map((exception) => {
+        const externalId = exception.source_identity.transaction_external_id;
+        const editing = editingExternalId === externalId;
+        return <article className={`misfit-card ${exception.resolution.status}`} key={externalId}>
+          <div className="misfit-card-heading"><div><div className="misfit-code-list">
+            {exception.error_codes.map((code) => <span key={code}>{code.replaceAll("_", " ")}</span>)}
+            {exception.resolution.status === "excluded" && <span className="excluded-label">EXCLUDED</span>}
+          </div><h3>{exception.transaction_context.description || "Undescribed transaction"}</h3>
+            <p>{exception.transaction_context.transactionDate} · {exception.transaction_context.valuationCurrencyCode} · {exception.canonical_records.length} canonical line{exception.canonical_records.length === 1 ? "" : "s"}</p></div>
+            <code title={externalId}>{externalId}</code></div>
+          {exception.errors.map((entry) => <p className="misfit-error-message" key={`${entry.code}-${entry.message}`}>
+            <strong>{entry.code}</strong> {entry.message}
+            {entry.details != null && <code>{JSON.stringify(entry.details)}</code>}
+          </p>)}
+          {exception.resolution.status === "excluded" && <p className="exclusion-reason">
+            Excluded: {exception.resolution.reason} {exception.resolution.resolved_at && <small>· {new Date(exception.resolution.resolved_at).toLocaleString()}</small>}
+          </p>}
+          {!editing && <div className="misfit-source-lines">{exception.canonical_records.map((record, index) => <div key={index}>
+            <span>{record.account_full_name}</span><strong>{record.amount_decimal}</strong>
+            <small>{record.memo || "No memo"}{record.value_decimal != null && ` · value ${record.value_decimal}`}</small>
+          </div>)}</div>}
+          {!editing && <details className="misfit-source-identity"><summary>Complete source identity</summary>
+            <dl><dt>Source system</dt><dd>{exception.source_identity.source_system}</dd>
+              <dt>Source file</dt><dd>{exception.source_identity.source_file.name ?? "Unnamed source"}</dd>
+              <dt>File SHA-256</dt><dd><code>{exception.source_identity.source_file.sha256}</code></dd>
+              <dt>Transaction ID</dt><dd><code>{externalId}</code></dd>
+              <dt>Line IDs</dt><dd>{exception.source_identity.line_external_ids.map((id) => id ?? "(none)").join(", ")}</dd></dl>
+          </details>}
+          {editing ? <MisfitEditor exception={exception} accounts={accounts} currencies={currencies} token={token}
+            importJobId={job.import_job_id} onSaved={changed} onCancel={() => setEditingExternalId(null)} />
+            : <div className="misfit-actions"><button className="secondary" onClick={() => setEditingExternalId(externalId)}>
+              {exception.resolution.status === "excluded" ? "Reopen and correct" : "Fix transaction"}</button>
+              {exception.resolution.status === "unresolved" && <button className="danger-link" disabled={Boolean(busy)}
+                onClick={() => void exclude(exception)}>Exclude with reason</button>}</div>}
+        </article>;
+      })}
+        {!visible.length && busy !== "load" && <p className="misfits-empty">No exceptions match this view.</p>}
+      </div>
+    </>}
+  </section>;
 }
 
 function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
@@ -679,6 +974,7 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [assertions, setAssertions] = useState<BalanceAssertion[]>([]);
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
+  const [importJobs, setImportJobs] = useState<TransactionImportJob[]>([]);
   const [selected, setSelected] = useState<TransactionDetail | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [accountLedgerEntries, setAccountLedgerEntries] = useState<AccountLedgerEntry[]>([]);
@@ -688,6 +984,7 @@ export default function App() {
   const [showTransactionComposer, setShowTransactionComposer] = useState(false);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
+  const [showMisfits, setShowMisfits] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -700,14 +997,16 @@ export default function App() {
 
   async function refresh() {
     if (!token) return;
-    const [currencyResult, accountResult, assertionResult, transactionResult] = await Promise.all([
+    const [currencyResult, accountResult, assertionResult, transactionResult, importJobResult] = await Promise.all([
       api<{ currencies: Currency[] }>("/currencies", {}, token),
       api<{ accounts: Account[] }>("/accounts", {}, token),
       api<{ assertions: BalanceAssertion[] }>("/balance-assertions", {}, token),
       api<{ transactions: TransactionSummary[] }>("/transactions", {}, token),
+      api<{ jobs: TransactionImportJob[] }>("/transaction-import-jobs", {}, token),
     ]);
     setCurrencies(currencyResult.currencies); setAccounts(accountResult.accounts);
     setAssertions(assertionResult.assertions); setTransactions(transactionResult.transactions);
+    setImportJobs(importJobResult.jobs);
   }
   useEffect(() => { if (token && user) void refresh(); }, [token, user]);
 
@@ -731,7 +1030,10 @@ export default function App() {
   function authenticated(nextToken: string, nextUser: User) {
     localStorage.setItem(tokenKey, nextToken); setToken(nextToken); setUser(nextUser);
   }
-  function logout() { localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null); }
+  function logout() {
+    localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null);
+    setImportJobs([]); setShowMisfits(false);
+  }
   async function refreshAfterTransaction() {
     await refresh();
     setAccountLedgerRefresh((current) => current + 1);
@@ -757,8 +1059,12 @@ export default function App() {
     <button className="header-action" onClick={() => setShowAgentAccess(true)}>Agent access</button>
     <button className="link-button" onClick={logout}>Sign out</button></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
-      selectedAccountId={selectedAccountId} token={token} onSelectAccount={(account) => setSelectedAccountId(account.id)} onChanged={refresh} />
-      <div className="main-column">{selectedAccount
+      importJobs={importJobs} selectedAccountId={selectedAccountId} misfitsSelected={showMisfits} token={token}
+      onSelectAccount={(account) => { setSelectedAccountId(account.id); setShowMisfits(false); }}
+      onSelectMisfits={() => { setSelectedAccountId(null); setShowMisfits(true); }} onChanged={refresh} />
+      <div className="main-column">{showMisfits
+          ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
+          : selectedAccount
           ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} loading={accountLedgerLoading}
               error={accountLedgerError} onShowAll={() => setSelectedAccountId(null)}
               onNewTransaction={() => setShowTransactionComposer(true)} />

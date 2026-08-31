@@ -14,6 +14,15 @@ import {
 import { createCurrency, listCurrencies } from "./currencies.js";
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
 import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, resolveArtifactUploadRoot } from "./artifact-upload.js";
+import {
+  commitTransactionImportJob,
+  excludeTransactionImportException,
+  getTransactionImportJob,
+  listTransactionImportExceptions,
+  listTransactionImportJobs,
+  previewTransactionImportJob,
+  retryTransactionImportException,
+} from "./transaction-import-job.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 5004);
@@ -126,6 +135,60 @@ app.get("/api/transactions/:transactionId", requireAuth, async (req, res, next) 
 
 app.post("/api/transactions", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createTransaction({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
+});
+
+app.get("/api/transaction-import-jobs", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ jobs: await listTransactionImportJobs({ pool, personId: req.auth.personId,
+      limit: req.query.limit ?? 100 }) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/transaction-import-jobs/:importJobId", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ job: await getTransactionImportJob({ pool, personId: req.auth.personId,
+      importJobId: req.params.importJobId }) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/transaction-import-jobs/:importJobId/exceptions", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ job: await listTransactionImportExceptions({ pool, personId: req.auth.personId,
+      importJobId: req.params.importJobId, limit: req.query.limit ?? 100,
+      afterExternalId: req.query.cursor ?? null }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/transaction-import-jobs/:importJobId/exceptions/:transactionExternalId/retry", requireAuth,
+  async (req, res, next) => {
+    try {
+      res.json({ job: await retryTransactionImportException({ pool, personId: req.auth.personId,
+        importJobId: req.params.importJobId, transactionExternalId: req.params.transactionExternalId,
+        retryId: req.body?.retryId, records: req.body?.records }) });
+    } catch (error) { next(error); }
+  });
+
+app.post("/api/transaction-import-jobs/:importJobId/exceptions/:transactionExternalId/exclude", requireAuth,
+  async (req, res, next) => {
+    try {
+      res.json({ job: await excludeTransactionImportException({ pool, personId: req.auth.personId,
+        importJobId: req.params.importJobId, transactionExternalId: req.params.transactionExternalId,
+        exclusionId: req.body?.exclusionId, reason: req.body?.reason }) });
+    } catch (error) { next(error); }
+  });
+
+app.post("/api/transaction-import-jobs/:importJobId/preview", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ job: await previewTransactionImportJob({ pool, personId: req.auth.personId,
+      importJobId: req.params.importJobId }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/transaction-import-jobs/:importJobId/commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ job: await commitTransactionImportJob({ pool, personId: req.auth.personId,
+      importJobId: req.params.importJobId, previewDigest: req.body?.previewDigest }) });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/ledger/verify", requireAuth, async (req, res, next) => {

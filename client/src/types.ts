@@ -111,3 +111,78 @@ export type TransactionDetail = {
   }>;
   rates: Array<{ id: number; fromUnits: string; fromCurrencyId: number; toUnits: string; toCurrencyId: number }>;
 };
+
+export type CanonicalImportRecord = {
+  transaction_external_id: string;
+  line_external_id?: string | null;
+  transaction_date: string;
+  description?: string | null;
+  valuation_currency_code: string;
+  account_full_name: string;
+  amount_decimal: string;
+  value_decimal: string | null;
+  memo?: string | null;
+};
+
+export type TransactionImportProgress = {
+  expected_source_records: number;
+  newly_staged_records: number;
+  previously_staged_or_reused_records: number;
+  exception_records: number;
+  remaining_records: number;
+  equation: string;
+  pending_commit_records: number;
+  previously_committed_records: number;
+  exception_record_totals: { unresolved: number; excluded: number };
+  transaction_totals: {
+    staged: number;
+    pending_commit: number;
+    previously_committed: number;
+    reused: number;
+    exceptions: number;
+    unresolved_exceptions: number;
+    excluded: number;
+  };
+};
+
+export type TransactionImportJob = {
+  import_job_id: string;
+  source_system: string;
+  source_file: { sha256: string; name: string | null };
+  expected_record_count: number;
+  job_status: "receiving" | "review_ready" | "committed";
+  progress: TransactionImportProgress;
+  preview_digest?: string | null;
+  ready_to_commit?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  unresolved_exceptions?: number;
+  excluded_exceptions?: number;
+  commit_scope?: string;
+};
+
+export type TransactionImportException = {
+  error_codes: string[];
+  errors: Array<{ code: string; message: string; details?: unknown }>;
+  resolution: { status: "unresolved" | "excluded"; reason: string | null; resolved_at: string | null };
+  source_identity: {
+    source_system: string;
+    source_file: { sha256: string; name: string | null };
+    transaction_external_id: string;
+    line_external_ids: Array<string | null>;
+  };
+  canonical_records: CanonicalImportRecord[];
+  transaction_context: {
+    externalId: string;
+    transactionDate: string;
+    description: string | null;
+    valuationCurrencyCode: string;
+    lineItems: Array<{
+      externalId: string | null;
+      accountFullName: string;
+      amountDecimal: string;
+      valueDecimal: string | null;
+      memo: string | null;
+    }>;
+  };
+};

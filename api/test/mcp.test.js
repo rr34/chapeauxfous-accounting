@@ -96,11 +96,16 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
           exception_records: 51,
           remaining_records: 0,
           equation: "17275 = 0 + 17224 + 51 + 0",
-          transaction_totals: { staged: 7987, reused: 0, exceptions: 23 },
+          pending_commit_records: 17224,
+          previously_committed_records: 0,
+          exception_record_totals: { unresolved: 51, excluded: 0 },
+          transaction_totals: { staged: 7987, pending_commit: 7987, previously_committed: 0,
+            reused: 0, exceptions: 23, unresolved_exceptions: 23, excluded: 0 },
         },
         preview_digest: previewDigest,
         ready_to_commit: true,
         unresolved_exceptions: 23,
+        excluded_exceptions: 0,
         commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
         requiredAction: "REQUEST_USER_CONFIRMATION",
         nextAction: {
@@ -292,6 +297,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "stage_transaction_import_artifact"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "stage_transaction_import_chunk"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "retry_transaction_import_exception"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "exclude_transaction_import_exception"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_jobs"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_exceptions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_transaction_import_job"), true);
@@ -737,7 +744,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.2.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.3.0");
 
   await handler.close();
 });

@@ -7,7 +7,7 @@ import {
 } from "./artifact-upload.js";
 
 export const MCP_CONTRACT_VERSION = 1;
-export const MCP_SERVER_VERSION = "0.2.0";
+export const MCP_SERVER_VERSION = "0.3.0";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 
@@ -226,7 +226,8 @@ export const accountingCapabilityManifest = Object.freeze({
       guidance: "Every posted transaction must balance in its valuation currency. Permanent deletion requires a provider-owned preview, explicit confirmation, and the exact matching commit operation.",
       tools: ["list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
         "create_transaction_import_job", "stage_transaction_import_artifact", "stage_transaction_import_chunk", "retry_transaction_import_exception",
-        "get_transaction_import_job", "list_transaction_import_exceptions", "preview_transaction_import_job",
+        "exclude_transaction_import_exception", "list_transaction_import_jobs", "get_transaction_import_job",
+        "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
         "commit_transaction_import", "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
         "commit_delete_transactions", "verify_ledger"],
@@ -235,7 +236,9 @@ export const accountingCapabilityManifest = Object.freeze({
         "Fetch the authoritative canonical line-record JSON Schema before mapping a source file.",
         "For a file-originated import, persist canonical application/x-ndjson and use the advertised resumable artifact upload; byte chunks are host-managed transport and must not enter model context.",
         `Inline JSON is reserved for direct agent-created transactions and bounded calls of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
-        "Retry only structured exceptions; successful transaction groups remain staged and must not be resubmitted.",
+        "Retry only structured exceptions; successful transaction groups remain staged or committed and must not be resubmitted.",
+        "Corrected exceptions may add accounting lines without changing the immutable count of original source records represented by the job.",
+        "A user may explicitly exclude an exception with a durable reason while preserving its source identity and canonical context.",
       ],
       contextViews: ["accounting.accounts.active_paths", "accounting.currencies.active"],
     },

@@ -70,6 +70,21 @@ function parseJson(value, label) {
   }
 }
 
+const USER_EXCLUDED_ERROR_CODE = "USER_EXCLUDED";
+
+function exceptionResolution(errors) {
+  const exclusion = [...(errors ?? [])].reverse().find((error) => error?.code === USER_EXCLUDED_ERROR_CODE);
+  return exclusion ? {
+    status: "excluded",
+    reason: String(exclusion.details?.reason ?? ""),
+    resolved_at: exclusion.details?.excluded_at ?? null,
+  } : { status: "unresolved", reason: null, resolved_at: null };
+}
+
+function validationErrors(errors) {
+  return (errors ?? []).filter((error) => error?.code !== USER_EXCLUDED_ERROR_CODE);
+}
+
 function sourceIdentity(job, transactionExternalId, records) {
   return {
     source_system: String(job.source_system),
@@ -218,9 +233,11 @@ async function analyzeGroups(connection, personId, sourceSystem, groups, lock) {
 
 function exceptionValue(job, entry) {
   const group = entry.group;
+  const errors = entry.errors ?? [];
   return {
-    error_codes: (entry.errors ?? []).map((error) => error.code),
-    errors: entry.errors ?? [],
+    error_codes: validationErrors(errors).map((error) => error.code),
+    errors: validationErrors(errors),
+    resolution: exceptionResolution(errors),
     source_identity: sourceIdentity(job, group.externalId, group.canonicalRecords),
     canonical_records: group.canonicalRecords,
     transaction_context: group.transaction,
@@ -244,12 +261,20 @@ async function aggregateProgress(connection, job, newlyStagedRecords = 0) {
   const [rows] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN item_status IN ('staged','committed') THEN source_record_count ELSE 0 END), 0) AS staged_records,
+       COALESCE(SUM(CASE WHEN item_status = 'staged' THEN source_record_count ELSE 0 END), 0) AS pending_staged_records,
+       COALESCE(SUM(CASE WHEN item_status = 'committed' THEN source_record_count ELSE 0 END), 0) AS committed_records,
        COALESCE(SUM(CASE WHEN item_status = 'reused' THEN source_record_count ELSE 0 END), 0) AS reused_records,
        COALESCE(SUM(CASE WHEN item_status = 'exception' THEN source_record_count ELSE 0 END), 0) AS exception_records,
+       COALESCE(SUM(CASE WHEN item_status = 'exception' AND errors_json LIKE '%\"code\":\"USER_EXCLUDED\"%'
+                         THEN source_record_count ELSE 0 END), 0) AS excluded_records,
        COALESCE(SUM(source_record_count), 0) AS received_records,
        COALESCE(SUM(CASE WHEN item_status IN ('staged','committed') THEN 1 ELSE 0 END), 0) AS staged_transactions,
+       COALESCE(SUM(CASE WHEN item_status = 'staged' THEN 1 ELSE 0 END), 0) AS pending_staged_transactions,
+       COALESCE(SUM(CASE WHEN item_status = 'committed' THEN 1 ELSE 0 END), 0) AS committed_transactions,
        COALESCE(SUM(CASE WHEN item_status = 'reused' THEN 1 ELSE 0 END), 0) AS reused_transactions,
-       COALESCE(SUM(CASE WHEN item_status = 'exception' THEN 1 ELSE 0 END), 0) AS exception_transactions
+       COALESCE(SUM(CASE WHEN item_status = 'exception' THEN 1 ELSE 0 END), 0) AS exception_transactions,
+       COALESCE(SUM(CASE WHEN item_status = 'exception' AND errors_json LIKE '%\"code\":\"USER_EXCLUDED\"%'
+                         THEN 1 ELSE 0 END), 0) AS excluded_transactions
      FROM accounting_transaction_import_items
     WHERE import_job_id = ?`,
     [job.import_job_id],
@@ -258,6 +283,9 @@ async function aggregateProgress(connection, job, newlyStagedRecords = 0) {
   const stagedRecords = Number(totals.staged_records ?? 0);
   const reusedRecords = Number(totals.reused_records ?? 0);
   const exceptionRecords = Number(totals.exception_records ?? 0);
+  const excludedRecords = Number(totals.excluded_records ?? 0);
+  const exceptionTransactions = Number(totals.exception_transactions ?? 0);
+  const excludedTransactions = Number(totals.excluded_transactions ?? 0);
   const expected = Number(job.expected_record_count);
   const remaining = expected - stagedRecords - reusedRecords - exceptionRecords;
   if (remaining < 0) throw jobError("The job contains more unique source records than expected.", "EXPECTED_RECORD_COUNT_EXCEEDED", {
@@ -271,10 +299,20 @@ async function aggregateProgress(connection, job, newlyStagedRecords = 0) {
     exception_records: exceptionRecords,
     remaining_records: remaining,
     equation: `${expected} = ${newlyStagedRecords} + ${stagedRecords + reusedRecords - newlyStagedRecords} + ${exceptionRecords} + ${remaining}`,
+    pending_commit_records: Number(totals.pending_staged_records ?? 0),
+    previously_committed_records: Number(totals.committed_records ?? 0),
+    exception_record_totals: {
+      unresolved: exceptionRecords - excludedRecords,
+      excluded: excludedRecords,
+    },
     transaction_totals: {
       staged: Number(totals.staged_transactions ?? 0),
+      pending_commit: Number(totals.pending_staged_transactions ?? 0),
+      previously_committed: Number(totals.committed_transactions ?? 0),
       reused: Number(totals.reused_transactions ?? 0),
-      exceptions: Number(totals.exception_transactions ?? 0),
+      exceptions: exceptionTransactions,
+      unresolved_exceptions: exceptionTransactions - excludedTransactions,
+      excluded: excludedTransactions,
     },
   };
 }
@@ -534,7 +572,6 @@ export async function retryTransactionImportException({ pool, personId, importJo
   const payloadSha256 = hashJson({ transactionExternalId: normalizedExternalId, records });
   return withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, normalizedJobId, true);
-    if (job.job_status === "committed") throw jobError("Committed import-job exceptions cannot be changed.", "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409);
     if (await requestReplay(connection, normalizedJobId, "exception_retry", normalizedRetryId, payloadSha256)) {
       return { ...await currentJobResult(connection, job), retry_id: normalizedRetryId,
         idempotent_replay: true, exceptions: [] };
@@ -548,10 +585,6 @@ export async function retryTransactionImportException({ pool, personId, importJo
     const prior = rows[0];
     if (!prior || prior.item_status !== "exception") throw jobError(
       "Only a current structured exception can be retried without resubmitting successful records.", "IMPORT_EXCEPTION_NOT_FOUND", undefined, 404,
-    );
-    if (records.length !== Number(prior.source_record_count)) throw jobError(
-      "A corrected exception must preserve the final expected source-record count.", "EXCEPTION_RECORD_COUNT_CHANGED",
-      { expected: Number(prior.source_record_count), received: records.length }, 409,
     );
     if (records.some((record) => String(record.transaction_external_id ?? "").trim() !== normalizedExternalId)) throw jobError(
       "Every corrected record must retain the exception transaction_external_id.", "EXCEPTION_SOURCE_IDENTITY_CHANGED", undefined, 409,
@@ -576,20 +609,77 @@ export async function retryTransactionImportException({ pool, personId, importJo
         WHERE import_job_id = ?`, [normalizedJobId],
     );
     const refreshedJob = { ...job, job_status: "receiving" };
-    return { ...await currentJobResult(connection, refreshedJob, itemStatus === "staged" ? records.length : 0),
+    return { ...await currentJobResult(connection, refreshedJob,
+      itemStatus === "staged" ? Number(prior.source_record_count) : 0),
       retry_id: normalizedRetryId, idempotent_replay: false,
       exceptions: itemStatus === "exception" ? [exceptionValue(job, { ...entry, group })] : [] };
   });
 }
 
+export async function excludeTransactionImportException({ pool, personId, importJobId, exclusionId,
+  transactionExternalId, reason }) {
+  const normalizedJobId = requiredText(importJobId, "import job ID", 36);
+  const normalizedExclusionId = requiredText(exclusionId, "exclusion ID", 110);
+  const normalizedExternalId = requiredText(transactionExternalId, "transaction external ID", 128);
+  const normalizedReason = requiredText(reason, "exclusion reason", 2000);
+  const requestId = `exclude:${normalizedExclusionId}`;
+  const payloadSha256 = hashJson({ transactionExternalId: normalizedExternalId, reason: normalizedReason });
+  return withPoolTransaction(pool, async (connection) => {
+    const job = await loadJob(connection, personId, normalizedJobId, true);
+    if (await requestReplay(connection, normalizedJobId, "exception_retry", requestId, payloadSha256)) {
+      return { ...await currentJobResult(connection, job), exclusion_id: normalizedExclusionId,
+        idempotent_replay: true };
+    }
+    const [rows] = await connection.query(
+      `SELECT transaction_external_id, canonical_json, source_record_count, item_status, errors_json
+         FROM accounting_transaction_import_items
+        WHERE import_job_id = ? AND transaction_external_id = ? FOR UPDATE`,
+      [normalizedJobId, normalizedExternalId],
+    );
+    const prior = rows[0];
+    if (!prior || prior.item_status !== "exception") throw jobError(
+      "Only a current structured exception can be explicitly excluded.", "IMPORT_EXCEPTION_NOT_FOUND", undefined, 404,
+    );
+    const errors = validationErrors(parseJson(prior.errors_json, "import exception errors"));
+    errors.push({
+      code: USER_EXCLUDED_ERROR_CODE,
+      message: "The user explicitly excluded this source transaction from ledger import.",
+      details: { reason: normalizedReason, excluded_at: new Date().toISOString() },
+    });
+    await connection.query(
+      `UPDATE accounting_transaction_import_items
+          SET errors_json = ?, updated_at = UTC_TIMESTAMP(6)
+        WHERE import_job_id = ? AND transaction_external_id = ?`,
+      [JSON.stringify(errors), normalizedJobId, normalizedExternalId],
+    );
+    await saveRequest(connection, normalizedJobId, "exception_retry", requestId, payloadSha256,
+      Number(prior.source_record_count));
+    await connection.query(
+      `UPDATE accounting_transaction_import_jobs
+          SET job_status = 'receiving', preview_sha256 = NULL, updated_at = UTC_TIMESTAMP(6)
+        WHERE import_job_id = ?`, [normalizedJobId],
+    );
+    const canonicalRecords = parseJson(prior.canonical_json, "canonical exception records");
+    const group = groupCanonicalTransactionRecords(canonicalRecords)[0];
+    const refreshedJob = { ...job, job_status: "receiving" };
+    return {
+      ...await currentJobResult(connection, refreshedJob),
+      exclusion_id: normalizedExclusionId,
+      idempotent_replay: false,
+      exception: exceptionValue(job, { group, errors }),
+    };
+  });
+}
+
 async function entryDigest(connection, importJobId) {
   const [rows] = await connection.query(
-    `SELECT transaction_external_id, canonical_sha256, item_status
+    `SELECT transaction_external_id, canonical_sha256, item_status, errors_json
        FROM accounting_transaction_import_items WHERE import_job_id = ?
       ORDER BY transaction_external_id`, [importJobId],
   );
   return hashJson(rows.map((row) => ({ transaction_external_id: String(row.transaction_external_id),
-    canonical_sha256: String(row.canonical_sha256), item_status: String(row.item_status) })));
+    canonical_sha256: String(row.canonical_sha256), item_status: String(row.item_status),
+    errors_sha256: row.errors_json == null ? null : hashJson(parseJson(row.errors_json, "import exception errors")) })));
 }
 
 export async function previewTransactionImportJob({ pool, personId, importJobId }) {
@@ -613,12 +703,13 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
       progress,
       preview_digest: `sha256:${previewSha256}`,
       ready_to_commit: true,
-      unresolved_exceptions: progress.transaction_totals.exceptions,
-      commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
+      unresolved_exceptions: progress.transaction_totals.unresolved_exceptions,
+      excluded_exceptions: progress.transaction_totals.excluded,
+      commit_scope: `${progress.transaction_totals.pending_commit} pending staged transactions; ${progress.transaction_totals.previously_committed} previously committed and ${progress.transaction_totals.reused} reused transactions remain unchanged; unresolved and explicitly excluded exceptions remain uncommitted.`,
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: "Ask the user to explicitly confirm committing all staged transactions from this exact preview. Reused transactions remain unchanged and exceptions remain uncommitted.",
+        instruction: `Ask the user to explicitly confirm committing ${progress.transaction_totals.pending_commit} pending staged transactions from this exact preview. Previously committed and reused transactions remain unchanged; unresolved and explicitly excluded exceptions remain uncommitted.`,
         onApproval: {
           tool: "commit_transaction_import_job",
           arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },
@@ -639,8 +730,40 @@ export async function getTransactionImportJob({ pool, personId, importJobId }) {
   });
 }
 
+export async function listTransactionImportJobs({ pool, personId, limit = 100 }) {
+  const normalizedLimit = Number(limit);
+  if (!Number.isSafeInteger(normalizedLimit) || normalizedLimit < 1 || normalizedLimit > 500) throw jobError(
+    "limit must be an integer from 1 through 500.", "INVALID_IMPORT_JOB_LIMIT",
+  );
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT import_job_id, owner_person_id, source_system, source_file_sha256,
+              source_file_name, expected_record_count, job_status, preview_sha256,
+              result_json, committed_at, created_at, updated_at
+         FROM accounting_transaction_import_jobs
+        WHERE owner_person_id = ?
+        ORDER BY updated_at DESC, import_job_id DESC LIMIT ?`,
+      [personId, normalizedLimit],
+    );
+    const jobs = [];
+    for (const job of rows) jobs.push({
+      ...await currentJobResult(connection, job),
+      preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
+      ready_to_commit: job.job_status === "review_ready",
+      created_at: job.created_at == null ? null : String(job.created_at),
+      updated_at: job.updated_at == null ? null : String(job.updated_at),
+    });
+    return jobs;
+  });
+}
+
 export async function listTransactionImportExceptions({ pool, personId, importJobId, limit = 100, afterExternalId = null }) {
   const normalizedJobId = requiredText(importJobId, "import job ID", 36);
+  const normalizedLimit = Number(limit);
+  if (!Number.isSafeInteger(normalizedLimit) || normalizedLimit < 1 || normalizedLimit > 500) throw jobError(
+    "limit must be an integer from 1 through 500.", "INVALID_IMPORT_EXCEPTION_LIMIT",
+  );
+  const normalizedCursor = afterExternalId == null ? null : requiredText(afterExternalId, "exception cursor", 128);
   return withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, normalizedJobId);
     const [rows] = await connection.query(
@@ -649,9 +772,9 @@ export async function listTransactionImportExceptions({ pool, personId, importJo
         WHERE import_job_id = ? AND item_status = 'exception'
           AND (? IS NULL OR transaction_external_id > ?)
         ORDER BY transaction_external_id LIMIT ?`,
-      [normalizedJobId, afterExternalId, afterExternalId, Number(limit) + 1],
+      [normalizedJobId, normalizedCursor, normalizedCursor, normalizedLimit + 1],
     );
-    const page = rows.slice(0, limit);
+    const page = rows.slice(0, normalizedLimit);
     return {
       ...jobIdentity(job),
       exceptions: page.map((row) => {
@@ -659,7 +782,7 @@ export async function listTransactionImportExceptions({ pool, personId, importJo
         const group = groupCanonicalTransactionRecords(canonicalRecords)[0];
         return exceptionValue(job, { group, errors: parseJson(row.errors_json, "import exception errors") });
       }),
-      next_cursor: rows.length > limit ? String(page.at(-1).transaction_external_id) : null,
+      next_cursor: rows.length > normalizedLimit ? String(page.at(-1).transaction_external_id) : null,
     };
   });
 }
@@ -730,7 +853,8 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
       }
     }
     const [totalsRows] = await connection.query(
-      `SELECT item_status, COUNT(*) AS transaction_count, COALESCE(SUM(source_record_count), 0) AS line_item_count
+      `SELECT item_status, COUNT(*) AS transaction_count,
+              COALESCE(SUM(JSON_LENGTH(canonical_json)), 0) AS canonical_line_count
          FROM accounting_transaction_import_items WHERE import_job_id = ? GROUP BY item_status`, [normalizedJobId],
     );
     const totals = new Map(totalsRows.map((row) => [String(row.item_status), row]));
@@ -746,11 +870,15 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
           created: Number(totals.get("committed")?.transaction_count ?? 0),
           reused: Number(totals.get("reused")?.transaction_count ?? 0),
           exceptions: Number(totals.get("exception")?.transaction_count ?? 0),
+          unresolved_exceptions: progress.transaction_totals.unresolved_exceptions,
+          excluded: progress.transaction_totals.excluded,
         },
         line_items: {
-          created: Number(totals.get("committed")?.line_item_count ?? 0),
-          reused: Number(totals.get("reused")?.line_item_count ?? 0),
-          exceptions: Number(totals.get("exception")?.line_item_count ?? 0),
+          created: Number(totals.get("committed")?.canonical_line_count ?? 0),
+          reused: Number(totals.get("reused")?.canonical_line_count ?? 0),
+          exceptions: Number(totals.get("exception")?.canonical_line_count ?? 0),
+          unresolved_exceptions: progress.exception_record_totals.unresolved,
+          excluded: progress.exception_record_totals.excluded,
         },
       },
     };
