@@ -141,7 +141,8 @@ test("the final job preview publishes an executable confirmation handoff", async
 
   assert.equal(result.requiredAction, "REQUEST_USER_CONFIRMATION");
   assert.equal(result.nextAction.type, "request_user_confirmation");
-  assert.match(result.nextAction.instruction, /explicitly confirm/);
+  assert.match(result.nextAction.instruction, /^Commit \d+ pending staged transactions from this preview now\?/);
+  assert.doesNotMatch(result.nextAction.instruction, /ask the user|explicitly confirm/i);
   assert.deepEqual(result.nextAction.onApproval, {
     tool: "commit_transaction_import_job",
     arguments: { import_job_id: importJobId, preview_digest: result.preview_digest },

@@ -305,6 +305,7 @@ test("an account-tree plan survives a new MCP connection and unrelated tool call
       dry_run: true,
     },
   });
+  assert.match(dryRun.structuredContent.nextAction.instruction, /^Commit this account-tree import now\?/);
   const planId = dryRun.structuredContent.importPlanId;
   const blocked = await firstClient.callTool({
     name: "import_account_tree",

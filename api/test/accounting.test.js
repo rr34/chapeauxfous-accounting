@@ -6,7 +6,30 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { createTransaction, deleteAccount, listAccountLedger, updateAccount, validateTransaction } = await import("../src/accounting.js");
+const { createTransaction, deleteAccount, listAccountLedger, listAccounts, updateAccount, validateTransaction } = await import("../src/accounting.js");
+
+test("account balances follow each account type's normal side", async () => {
+  const accountTypes = [
+    ["asset", "100", "100"],
+    ["expense", "200", "200"],
+    ["liability", "-300", "300"],
+    ["income", "-400", "400"],
+    ["equity", "500", "-500"],
+  ];
+  const pool = {
+    async query(_sql, params) {
+      assert.deepEqual(params, [7]);
+      return [accountTypes.map(([type, rawBalance], index) => ({
+        account_id: index + 1, AccountName: type, description: null, is_placeholder: 0,
+        parent_account_id: null, AccountType: type, account_currency_id: 1,
+        CurrencyAbbreviation: "USD", scale: 2, balance_units: rawBalance, archived_at: null,
+      }))];
+    },
+  };
+
+  const accounts = await listAccounts(pool, 7);
+  assert.deepEqual(accounts.map((account) => account.balanceUnits), accountTypes.map(([, , expected]) => expected));
+});
 
 test("an account ledger groups split accounts and calculates its running balance", async () => {
   const pool = {
@@ -62,6 +85,46 @@ test("an account ledger groups split accounts and calculates its running balance
         { lineItemId: 24, accountId: 10, accountName: "Tax", memo: null, amountUnits: "20",
           currencyId: 1, currencyCode: "USD", scale: 2 },
       ], debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
+  ]);
+});
+
+test("a credit-normal account register keeps journal sides and reverses running-balance math", async () => {
+  const pool = {
+    async query(sql, params) {
+      if (sql.includes("FROM accounts a")) {
+        assert.deepEqual(params, [7, 2, 2]);
+        return [[{
+          account_id: 3, AccountName: "Credit card", description: null, is_placeholder: 0,
+          parent_account_id: 1, AccountType: "liability", account_currency_id: 1,
+          CurrencyAbbreviation: "USD", scale: 2, balance_units: "-200", archived_at: null,
+        }]];
+      }
+      if (sql.includes("FROM line_items li")) {
+        assert.deepEqual(params, [3, 7]);
+        return [[
+          { line_item_id: 20, amount_units: "-320", memo: null, transaction_id: 10,
+            TransactionDate: "2026-08-01", description: "Purchase",
+            split_line_item_id: 20, split_amount_units: "-320", split_memo: null,
+            split_account_id: 3, split_account_name: "Credit card",
+            split_currency_id: 1, split_currency_code: "USD", split_scale: 2 },
+          { line_item_id: 21, amount_units: "120", memo: null, transaction_id: 11,
+            TransactionDate: "2026-08-02", description: "Payment",
+            split_line_item_id: 21, split_amount_units: "120", split_memo: null,
+            split_account_id: 3, split_account_name: "Credit card",
+            split_currency_id: 1, split_currency_code: "USD", split_scale: 2 },
+        ]];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  const result = await listAccountLedger(pool, 7, 3);
+  assert.equal(result.account.balanceUnits, "200");
+  assert.deepEqual(result.entries.map(({ debitUnits, creditUnits, runningBalanceUnits }) => ({
+    debitUnits, creditUnits, runningBalanceUnits,
+  })), [
+    { debitUnits: null, creditUnits: "320", runningBalanceUnits: "320" },
+    { debitUnits: "120", creditUnits: null, runningBalanceUnits: "200" },
   ]);
 });
 

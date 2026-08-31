@@ -110,7 +110,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
         requiredAction: "REQUEST_USER_CONFIRMATION",
         nextAction: {
           type: "request_user_confirmation",
-          instruction: "Ask the user to explicitly confirm committing all staged transactions from this exact preview.",
+          instruction: "Commit all staged transactions from this preview now? Reused transactions and exceptions will remain unchanged.",
           onApproval: {
             tool: "commit_transaction_import_job",
             arguments: { import_job_id: input.importJobId, preview_digest: previewDigest },
@@ -433,7 +433,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_job_id: "0ed8cb57-efb5-419e-b4e5-59b73724f224" },
   });
   assert.equal(importJobPreview.structuredContent.job.nextAction.type, "request_user_confirmation");
-  assert.match(importJobPreview.structuredContent.job.nextAction.instruction, /explicitly confirm/);
+  assert.match(importJobPreview.structuredContent.job.nextAction.instruction, /^Commit .+\?/);
+  assert.doesNotMatch(importJobPreview.structuredContent.job.nextAction.instruction, /ask the user/i);
   assert.deepEqual(previewedImportJob, {
     pool: {}, personId: 7, importJobId: "0ed8cb57-efb5-419e-b4e5-59b73724f224",
   });
@@ -625,6 +626,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   });
   assert.equal(transactionPreview.structuredContent.import.wouldCreateTransactionCount, 1);
   assert.equal(transactionPreview.structuredContent.import.requiredAction, "REQUEST_USER_CONFIRMATION");
+  assert.match(transactionPreview.structuredContent.import.nextAction.instruction, /^Commit .+\?/);
   assert.deepEqual(importedTransactions.transactions[0].lineItems[0], {
     externalId: "1", accountFullName: "Assets:Cash", amountDecimal: "-1.00",
     valueDecimal: undefined, memo: undefined,
@@ -649,6 +651,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     name: "preview_delete_transactions", arguments: { scope: "all" },
   });
   assert.equal(deletionPreview.structuredContent.requiredAction, "REQUEST_USER_CONFIRMATION");
+  assert.match(deletionPreview.structuredContent.nextAction.instruction, /^Permanently delete .+\?/);
   assert.equal(deletionPreview.structuredContent.preview.targetDigest, `sha256:${"d".repeat(64)}`);
   assert.equal("transactionIds" in deletionPreview.structuredContent.preview, false);
   assert.equal(deletionPreview.structuredContent.nextAction.onApproval.tool, "commit_delete_transactions");

@@ -405,7 +405,7 @@ function toolResult(value, defaultStatus = "success") {
     type: "resource_link",
     uri,
     name: uri.replace("accounting://", ""),
-    description: "Stable accounting provider reference for this result.",
+    description: "Stable Accounting MCP reference for this result.",
     mimeType: "application/json",
   }));
   return {
@@ -579,7 +579,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-capability-manifest", CAPABILITY_MANIFEST_URI, {
     title: "Accounting capability manifest",
-    description: "Versioned capabilities, dependencies, attachment guidance, and bounded context views for this accounting provider.",
+    description: "Versioned capabilities, dependencies, attachment guidance, and bounded context views for the Accounting MCP.",
     mimeType: "application/json",
   }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(accountingCapabilityManifest) }] }));
 
@@ -633,7 +633,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-currency", resourceTemplate("accounting://currencies/{currencyId}"), {
     title: "Accounting currency or unit",
-    description: "One currently accessible global or owner-scoped accounting unit by stable provider ID.",
+    description: "One currently accessible global or owner-scoped accounting unit by stable Accounting ID.",
     mimeType: "application/json",
   }, async (uri, { currencyId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
     contractVersion: MCP_CONTRACT_VERSION,
@@ -643,7 +643,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-account", resourceTemplate("accounting://accounts/{accountId}"), {
     title: "Accounting account",
-    description: "One current owner-scoped account and posted native-unit balance by stable provider ID.",
+    description: "One current owner-scoped account and posted native-unit balance by stable Accounting ID.",
     mimeType: "application/json",
   }, async (uri, { accountId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
     contractVersion: MCP_CONTRACT_VERSION,
@@ -653,7 +653,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-transaction", resourceTemplate("accounting://transactions/{transactionId}"), {
     title: "Accounting transaction",
-    description: "One current owner-scoped transaction with line items, tags, and transaction rates by stable provider ID.",
+    description: "One current owner-scoped transaction with line items, tags, and transaction rates by stable Accounting ID.",
     mimeType: "application/json",
   }, async (uri, { transactionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
     contractVersion: MCP_CONTRACT_VERSION,
@@ -663,7 +663,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-balance-assertion", resourceTemplate("accounting://balance-assertions/{assertionId}"), {
     title: "Accounting balance assertion",
-    description: "One current owner-scoped known-balance assertion and calculated ledger difference by stable provider ID.",
+    description: "One current owner-scoped known-balance assertion and calculated ledger difference by stable Accounting ID.",
     mimeType: "application/json",
   }, async (uri, { assertionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
     contractVersion: MCP_CONTRACT_VERSION,
@@ -674,7 +674,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   server.registerResource("accounting-account-tree-import-plan",
     resourceTemplate("accounting://account-tree-import-plans/{planId}"), {
       title: "Account-tree import plan",
-      description: "Current owner-scoped provider status for one durable account-tree import plan.",
+      description: "Current owner-scoped status for one durable account-tree import plan.",
       mimeType: "application/json",
     }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
       contractVersion: MCP_CONTRACT_VERSION,
@@ -684,7 +684,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   server.registerResource("accounting-account-delete-plan",
     resourceTemplate("accounting://account-delete-plans/{planId}"), {
       title: "Account-deletion plan",
-      description: "Current owner-scoped provider status for one durable verified account-deletion plan.",
+      description: "Current owner-scoped status for one durable verified account-deletion plan.",
       mimeType: "application/json",
     }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
       contractVersion: MCP_CONTRACT_VERSION,
@@ -694,7 +694,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   server.registerResource("accounting-transaction-import-plan",
     resourceTemplate("accounting://transaction-import-plans/{planId}"), {
       title: "Transaction import plan",
-      description: "Current owner-scoped provider status for one durable transaction-import plan.",
+      description: "Current owner-scoped status for one durable transaction-import plan.",
       mimeType: "application/json",
     }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
       contractVersion: MCP_CONTRACT_VERSION,
@@ -714,7 +714,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   server.registerResource("accounting-transaction-delete-plan",
     resourceTemplate("accounting://transaction-delete-plans/{planId}"), {
       title: "Transaction-deletion plan",
-      description: "Current owner-scoped provider status for one exact permanent transaction-deletion plan.",
+      description: "Current owner-scoped status for one exact permanent transaction-deletion plan.",
       mimeType: "application/json",
     }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
       contractVersion: MCP_CONTRACT_VERSION,
@@ -1231,7 +1231,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   ]);
   server.registerTool("import_account_tree", {
     title: "Preview account tree import",
-    description: "Start or continue a complete account-tree import workflow. Call this tool with the entire intended batch even when new currency details or scales are unknown; omit unknown fields and the MCP will return status=needs_input, exact questions for the user, and a machine-readable retry instruction. Do not inspect historical receipts or guess missing values instead of calling this tool. Testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. A successful dry run saves the exact normalized input as a durable owner-scoped plan and returns status=ready, numerical created/reused summaries, and nextAction.onApproval containing the exact commit tool and plan ID. Report the preview and ask for confirmation. After approval, call commit_account_tree_import once with that plan ID; never replay the large batch.",
+    description: "Start or continue a complete account-tree import workflow. Call this tool with the entire intended batch even when new currency details or scales are unknown; omit unknown fields and the MCP will return status=needs_input, exact questions for the user, and a machine-readable retry instruction. Do not inspect historical receipts or guess missing values instead of calling this tool. Testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. A successful dry run saves the exact normalized input as a durable owner-scoped plan and returns status=ready, numerical created/reused summaries, and nextAction.onApproval containing the exact commit tool and plan ID. Present its one final confirmation question. After confirmation, call commit_account_tree_import once with that plan ID; never replay the large batch.",
     inputSchema: {
       currencies: z.array(importedCurrencySchema).max(500).default([]),
       accounts: z.array(importedAccountSchema).min(1).max(1000),
@@ -1290,7 +1290,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_account_tree_import", {
     title: "Commit account tree import",
-    description: "After the user explicitly approves a successful account-tree dry run, commit that exact durable plan using only import_plan_id. The server revalidates current database state, imports all currencies and accounts atomically, scopes the plan to its owner, rejects expired plans, and returns the original stored result on repeated confirmation calls.",
+    description: "After the user confirms a successful account-tree dry run, commit that exact durable plan using only import_plan_id. The server revalidates current database state, imports all currencies and accounts atomically, scopes the plan to its owner, rejects expired plans, and returns the original stored result on repeated calls.",
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_account_tree."),
     },
@@ -1324,7 +1324,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Ask for explicit confirmation to permanently delete account ${result.summary.accountName}.`,
+        instruction: `Permanently delete account ${result.summary.accountName}?`,
         onApproval: {
           tool: "commit_delete_account",
           arguments: { deletion_plan_id: result.deletionPlanId },
@@ -1348,7 +1348,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_delete_account", {
     title: "Commit account deletion",
-    description: "Use only after explicit user approval of the exact preview. A successful committed result and receipt prove the plan was owner-scoped, unexpired, revalidated, deleted atomically, and verified absent; repeated calls return the stored result.",
+    description: "Use only after the user confirms the exact preview. A successful committed result and receipt prove the plan was owner-scoped, unexpired, revalidated, deleted atomically, and verified absent; repeated calls return the stored result.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
     outputSchema: accountDeletionWorkflowOutput,
     annotations: destructiveWrite,
@@ -1380,7 +1380,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Ask for explicit confirmation to permanently delete exactly ${result.summary.transactionCount} transactions and ${result.summary.lineItemCount} line items. The account tree will remain unchanged.`,
+        instruction: `Permanently delete exactly ${result.summary.transactionCount} transactions and ${result.summary.lineItemCount} line items? The account tree will remain unchanged.`,
         onApproval: { tool: "commit_delete_transactions",
           arguments: { deletion_plan_id: result.deletionPlanId, preview_digest: result.previewDigest } },
       },
@@ -1390,7 +1390,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("refresh_transaction_delete_plan", {
     title: "Refresh transaction-deletion plan",
-    description: "Use only when a prior transaction-deletion plan expired or was invalidated. The provider recovers its opaque owner-scoped selection, re-reads current ledger state, and creates a new 15-minute preview requiring fresh explicit confirmation. It never deletes ledger data.",
+    description: "Use only when a prior transaction-deletion plan expired or was invalidated. The MCP recovers the opaque owner-scoped selection, re-reads current ledger state, and creates a new 15-minute preview requiring fresh explicit confirmation. It never deletes ledger data.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
     outputSchema: transactionDeletionWorkflowOutput,
     annotations: writesData,
@@ -1403,7 +1403,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Ask for explicit confirmation to permanently delete exactly ${result.summary.transactionCount} transactions and ${result.summary.lineItemCount} line items. The account tree will remain unchanged.`,
+        instruction: `Permanently delete exactly ${result.summary.transactionCount} transactions and ${result.summary.lineItemCount} line items? The account tree will remain unchanged.`,
         onApproval: { tool: "commit_delete_transactions",
           arguments: { deletion_plan_id: result.deletionPlanId, preview_digest: result.previewDigest } },
       },
@@ -1413,7 +1413,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("get_transaction_delete_plan", {
     title: "Get transaction-deletion plan",
-    description: "Recover a durable owner-scoped transaction-deletion preview across turns or connections. Returns its exact digest and bounded numerical summary, an exact provider refresh action when expired or invalidated, or the original verified result after commit.",
+    description: "Recover a durable owner-scoped transaction-deletion preview across turns or connections. Returns its exact digest and bounded numerical summary, an exact MCP refresh action when expired or invalidated, or the original verified result after commit.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
     outputSchema: transactionDeletionWorkflowOutput,
     annotations: readOnly,
@@ -1427,7 +1427,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_delete_transactions", {
     title: "Commit permanent transaction deletion",
-    description: "Use only after explicit user approval of the exact preview. Accepts the opaque plan ID and matching preview digest, revalidates the frozen transaction contents and—for scope=all—the complete owner transaction set, blocks unplanned reversal references, deletes dependent tag assignments, line items, transaction rates, and exact transactions atomically, preserves accounts, updates resumable-import audit references, verifies absence and account-tree identity, and returns the stored result idempotently on retry.",
+    description: "Use only after the user confirms the exact preview. Accepts the opaque plan ID and matching preview digest, revalidates the frozen transaction contents and—for scope=all—the complete owner transaction set, blocks unplanned reversal references, deletes dependent tag assignments, line items, transaction rates, and exact transactions atomically, preserves accounts, updates resumable-import audit references, verifies absence and account-tree identity, and returns the stored result idempotently on retry.",
     inputSchema: {
       deletion_plan_id: z.string().trim().uuid(),
       preview_digest: z.string().trim().regex(/^sha256:[0-9a-f]{64}$/),
@@ -1786,7 +1786,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
-    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview reports unresolved exceptions, exact commit scope, requiredAction=REQUEST_USER_CONFIRMATION, and nextAction.onApproval containing the exact commit tool arguments; present it to the user for approval.",
+    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview reports unresolved exceptions, exact commit scope, and one direct yes-or-no question with the exact commit tool arguments. Present that question once.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
     outputSchema: transactionImportPreviewOutput,
     annotations: idempotentWrite,
@@ -1797,7 +1797,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_transaction_import_job", {
     title: "Commit final transaction import preview",
-    description: "Explicitly commit the exact final job preview after user approval. The server revalidates staged accounting transactions, atomically creates only valid new transactions, reuses stable source-ID matches, leaves structured exceptions uncommitted, and returns one idempotent final job summary with transaction and line-item created/reused/exception totals.",
+    description: "Commit the exact final job preview after the user confirms it. The server revalidates staged accounting transactions, atomically creates only valid new transactions, reuses stable source-ID matches, leaves structured exceptions uncommitted, and returns one idempotent final job summary with transaction and line-item created/reused/exception totals.",
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       preview_digest: z.string().trim().regex(/^sha256:[0-9a-f]{64}$/),
@@ -1831,7 +1831,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this provider does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and explicitly confirm each plan sequentially. Commit an approved plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Report that preview before noting that ledger data was unchanged, then ask for approval. After approval call commit_transaction_import with only the plan ID; never replay the batch.`,
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
@@ -1882,7 +1882,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_transaction_import", {
     title: "Commit transaction import",
-    description: "After the user explicitly approves a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, balance, exchange rates, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated confirmation is idempotent.",
+    description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, balance, exchange rates, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent.",
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_transactions."),
     },

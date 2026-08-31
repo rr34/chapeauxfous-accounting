@@ -76,7 +76,7 @@ export function accountTreeReadyWorkflow(result) {
     requiredAction: "REQUEST_USER_CONFIRMATION",
     nextAction: {
       type: "request_user_confirmation",
-      instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the import payload.",
+      instruction: `Commit this account-tree import now? It will create ${result.summary.accountsCreated} accounts and ${result.summary.currenciesCreated} currencies; ${result.summary.accountsReused} accounts and ${result.summary.currenciesReused} currencies will be reused.`,
       onApproval: { tool: "commit_account_tree_import", arguments: { import_plan_id: result.importPlanId } },
     },
     preview,
@@ -91,7 +91,7 @@ export function transactionPreviewWorkflow(result) {
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: "Report the numerical change preview and ask whether to commit this exact stored plan. Do not replay the transaction batch.",
+        instruction: `Commit this transaction import now? It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused.`,
         onApproval: { tool: "commit_transaction_import", arguments: { import_plan_id: result.importPlanId } },
       },
     };

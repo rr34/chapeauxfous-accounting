@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
 import type {
@@ -348,7 +348,8 @@ function AccountPanel({ accounts, assertions, currencies, importJobs, selectedAc
     </form>}
     <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}
       onSelect={onSelectAccount} onEdit={setEditingAccount} />
-    <button type="button" className={`misfits-account ${misfitsSelected ? "selected" : ""}`} onClick={onSelectMisfits}>
+    <button type="button" className={`misfits-account ${misfitsSelected ? "selected" : ""}`}
+      aria-controls="import-misfits" aria-pressed={misfitsSelected} onClick={onSelectMisfits}>
       <span className="misfits-mark" aria-hidden="true">◇</span>
       <span><strong>Import misfits</strong><small>Transactions needing a home or a decision</small></span>
       <span className="misfits-count">{unresolvedMisfits}{excludedMisfits > 0 && <small>{excludedMisfits} excluded</small>}</span>
@@ -984,8 +985,36 @@ export default function App() {
   const [showTransactionComposer, setShowTransactionComposer] = useState(false);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
-  const [showMisfits, setShowMisfits] = useState(false);
+  const [showMisfits, setShowMisfits] = useState(() => window.location.hash === "#import-misfits");
   const [loading, setLoading] = useState(true);
+  const mainContentRef = useRef<HTMLDivElement>(null);
+
+  function revealMainContent() {
+    requestAnimationFrame(() => {
+      const content = mainContentRef.current;
+      if (!content) return;
+      content.scrollIntoView({ behavior: "smooth", block: "start" });
+      content.focus({ preventScroll: true });
+    });
+  }
+
+  function selectAccount(account: Account) {
+    setSelectedAccountId(account.id);
+    setShowMisfits(false);
+    if (window.location.hash === "#import-misfits") {
+      window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    revealMainContent();
+  }
+
+  function selectMisfits() {
+    setSelectedAccountId(null);
+    setShowMisfits(true);
+    if (window.location.hash !== "#import-misfits") {
+      window.history.pushState(null, "", "#import-misfits");
+    }
+    revealMainContent();
+  }
 
   useEffect(() => {
     if (!token) { setUser(null); setCurrencies([]); setLoading(false); return; }
@@ -994,6 +1023,20 @@ export default function App() {
       localStorage.removeItem(tokenKey); setToken(null);
     }).finally(() => setLoading(false));
   }, [token]);
+
+  useEffect(() => {
+    const syncViewFromUrl = () => {
+      const misfits = window.location.hash === "#import-misfits";
+      setShowMisfits(misfits);
+      if (misfits) setSelectedAccountId(null);
+    };
+    window.addEventListener("popstate", syncViewFromUrl);
+    window.addEventListener("hashchange", syncViewFromUrl);
+    return () => {
+      window.removeEventListener("popstate", syncViewFromUrl);
+      window.removeEventListener("hashchange", syncViewFromUrl);
+    };
+  }, []);
 
   async function refresh() {
     if (!token) return;
@@ -1060,9 +1103,8 @@ export default function App() {
     <button className="link-button" onClick={logout}>Sign out</button></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} assertions={assertions} currencies={currencies}
       importJobs={importJobs} selectedAccountId={selectedAccountId} misfitsSelected={showMisfits} token={token}
-      onSelectAccount={(account) => { setSelectedAccountId(account.id); setShowMisfits(false); }}
-      onSelectMisfits={() => { setSelectedAccountId(null); setShowMisfits(true); }} onChanged={refresh} />
-      <div className="main-column">{showMisfits
+      onSelectAccount={selectAccount} onSelectMisfits={selectMisfits} onChanged={refresh} />
+      <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>{showMisfits
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
           : selectedAccount
           ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} loading={accountLedgerLoading}

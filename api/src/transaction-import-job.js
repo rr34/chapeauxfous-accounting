@@ -709,7 +709,7 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Ask the user to explicitly confirm committing ${progress.transaction_totals.pending_commit} pending staged transactions from this exact preview. Previously committed and reused transactions remain unchanged; unresolved and explicitly excluded exceptions remain uncommitted.`,
+        instruction: `Commit ${progress.transaction_totals.pending_commit} pending staged transactions from this preview now? ${progress.transaction_totals.previously_committed} previously committed and ${progress.transaction_totals.reused} reused transactions will remain unchanged; ${progress.transaction_totals.unresolved_exceptions} unresolved and ${progress.transaction_totals.excluded} excluded exceptions will remain uncommitted.`,
         onApproval: {
           tool: "commit_transaction_import_job",
           arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },

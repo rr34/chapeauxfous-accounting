@@ -1,6 +1,7 @@
 import { addFractions, fraction } from "./money.js";
 import { withTransaction } from "./db.js";
 import { requireAccessibleCurrency } from "./currencies.js";
+import { normalBalanceSign, normalBalanceUnits } from "./account-balances.js";
 
 function applicationError(message, status = 400, code = "INVALID_ACCOUNTING_OPERATION", details = undefined) {
   return Object.assign(new Error(message), { status, code, details });
@@ -34,6 +35,16 @@ function optionalBoundedText(value, field, maximum) {
   return normalized;
 }
 
+function mapAccount(row) {
+  return {
+    id: Number(row.account_id), name: row.AccountName, description: row.description,
+    placeholder: Boolean(row.is_placeholder),
+    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
+    type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
+    scale: Number(row.scale), balanceUnits: normalBalanceUnits(row.AccountType, row.balance_units), archivedAt: row.archived_at,
+  };
+}
+
 export async function listAccounts(pool, personId) {
   const [rows] = await pool.query(
     `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
@@ -52,13 +63,7 @@ export async function listAccounts(pool, personId) {
       ORDER BY a.account_id`,
     [personId],
   );
-  return rows.map((row) => ({
-    id: Number(row.account_id), name: row.AccountName, description: row.description,
-    placeholder: Boolean(row.is_placeholder),
-    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
-    type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
-    scale: Number(row.scale), balanceUnits: String(row.balance_units), archivedAt: row.archived_at,
-  }));
+  return rows.map(mapAccount);
 }
 
 export async function listAccountsPage(pool, personId, { limit = 100, afterAccountId = null } = {}) {
@@ -85,13 +90,7 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
   );
   const hasMore = rows.length > resolvedLimit;
   const pageRows = rows.slice(0, resolvedLimit);
-  const accounts = pageRows.map((row) => ({
-    id: Number(row.account_id), name: row.AccountName, description: row.description,
-    placeholder: Boolean(row.is_placeholder),
-    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
-    type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
-    scale: Number(row.scale), balanceUnits: String(row.balance_units), archivedAt: row.archived_at,
-  }));
+  const accounts = pageRows.map(mapAccount);
   return { accounts, nextCursor: hasMore ? String(accounts.at(-1).id) : null };
 }
 
@@ -170,9 +169,10 @@ export async function listAccountLedger(pool, personId, accountId) {
   }
 
   let runningBalance = 0n;
+  const balanceSign = normalBalanceSign(account.type);
   const entries = [...entriesByLineItemId.values()].map((entry) => {
     const amount = BigInt(entry.amountUnits);
-    runningBalance += amount;
+    runningBalance += amount * balanceSign;
     return {
       lineItemId: entry.lineItemId,
       transactionId: entry.transactionId,

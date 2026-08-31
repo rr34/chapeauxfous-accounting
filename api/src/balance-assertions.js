@@ -1,4 +1,5 @@
 import { withTransaction } from "./db.js";
+import { normalBalanceUnits } from "./account-balances.js";
 
 function applicationError(message, status = 400, code = "INVALID_BALANCE_ASSERTION") {
   return Object.assign(new Error(message), { status, code });
@@ -26,7 +27,7 @@ function integerUnits(value) {
 
 const assertionSelect = `
   SELECT aba.account_balance_assertion_id, aba.account_id, aba.balance_date,
-         aba.known_balance_units, a.AccountName, a.account_currency_id,
+         aba.known_balance_units, a.AccountName, a.AccountType, a.account_currency_id,
          c.CurrencyAbbreviation, c.scale,
          COALESCE((
            SELECT SUM(li.amount_units)
@@ -45,7 +46,7 @@ const assertionSelect = `
 
 function mapAssertion(row) {
   const knownBalanceUnits = String(row.known_balance_units);
-  const calculatedBalanceUnits = String(row.calculated_balance_units);
+  const calculatedBalanceUnits = normalBalanceUnits(row.AccountType, row.calculated_balance_units);
   const differenceUnits = (BigInt(knownBalanceUnits) - BigInt(calculatedBalanceUnits)).toString();
   return {
     id: Number(row.account_balance_assertion_id),

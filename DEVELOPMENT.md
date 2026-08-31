@@ -168,7 +168,7 @@ stable source-reference metadata. Mutations return a server-issued receipt
 binding the tool name to a SHA-256 digest of its exact arguments and the
 observed entity references. Source references returned as MCP resource links
 resolve through owner-scoped resource templates instead of duplicating the
-referenced record in tool text. Recoverable provider errors and incomplete
+referenced record in tool text. Recoverable MCP errors and incomplete
 workflows use the authoritative `agent-slayer.retry-descriptor` version-1
 field contract.
 
@@ -192,7 +192,7 @@ currency, placeholder status, and top-level branch, plus a durable owner-scoped
 `importPlanId`, `expiresAt`, a SHA-256 `previewDigest`, and a compact numerical
 summary before the potentially large preview. The MCP advertises and validates
 this result through a formal output schema. A successful response includes the
-exact commit tool and plan ID in `nextAction.onApproval`. After the user approves that exact preview,
+exact commit tool and plan ID in `nextAction.onApproval`. After the user confirms that exact preview,
 `commit_account_tree_import` accepts only the plan ID, revalidates current
 database state, and atomically creates the currencies and accounts. Plans
 expire after 24 hours, and repeated commit calls return the stored result
@@ -211,7 +211,7 @@ the accounts, converts amounts through their established currency scales,
 validates foreign values and exchange rates, and requires every transaction to
 balance in its valuation currency. The dry-run result lists all unknown or
 ambiguous paths, numerical create/reuse/reject counts, useful summaries, and—if
-there are no rejections—a durable `importPlanId`. After explicit approval,
+there are no rejections—a durable `importPlanId`. After explicit confirmation,
 `commit_transaction_import` accepts only that ID, revalidates the batch, and
 atomically creates all planned transactions. Identical confirmation retries
 return the stored commit result. `get_transaction_import_plan` reports ready,
@@ -239,7 +239,7 @@ transactions may continue to use ordinary JSON tool arguments.
 `stage_transaction_import_artifact` mechanically activates the transfer by
 publishing `_meta["agent-slayer/artifactUpload"]` with contract version 1,
 transport ID `transaction_import`, endpoint `/mcp/artifacts`, accepted media
-type `application/x-ndjson`, a 1 MiB maximum chunk, and the provider's maximum
+type `application/x-ndjson`, a 1 MiB maximum chunk, and the MCP server's maximum
 artifact size. Using the same Accounting API bearer token, the host:
 
 1. sends `POST /mcp/artifacts` with a stable `client_request_id`, `file_name`,
@@ -278,7 +278,7 @@ whole file by stable transaction external ID, validates accounts, currencies,
 decimals, exchange rates, and balance, deduplicates, and applies internal
 idempotent batches. Invalid transactions remain structured exceptions without
 aborting valid transactions. The LLM pages only those exceptions and presents
-the final provider preview before explicit commit. Retrying the artifact stage
+the final MCP preview before explicit commit. Retrying the artifact stage
 or a corrected exception never requires resubmitting successful records.
 
 `stage_transaction_import_chunk` remains the ordinary JSON path for bounded
@@ -296,9 +296,9 @@ conversion to a placeholder are also blocked once native-unit amounts or
 balance assertions depend on the account.
 
 The MCP exposes the same account update service as the HTTP adapter. Permanent
-MCP deletion is a provider-owned workflow: `preview_delete_account` verifies an
+MCP deletion is an MCP-owned workflow: `preview_delete_account` verifies an
 owner-scoped account is an empty, unreferenced leaf and saves a durable
-15-minute plan; after explicit approval, `commit_delete_account` locks and
+15-minute plan; after explicit confirmation, `commit_delete_account` locks and
 revalidates that exact plan, deletes atomically, verifies the account is absent,
 and returns a receipt. `get_account_delete_plan` reads its durable status.
 
@@ -309,7 +309,7 @@ to use only the exact `transaction` rate copied into each transaction.
 ## Schema semantics
 
 `db/schema-semantics.json` is a tracked, reviewed build artifact. It covers the
-public ledger schema plus the provider-owned import-plan and resumable-import
+public ledger schema plus the MCP-owned import-plan and resumable-import
 workflow tables needed by exact MCP operation projections. Human-written
 meanings live in that file; compiler-owned mechanics come from MariaDB.
 
@@ -329,7 +329,7 @@ production database matches it.
 The tracked semantic form includes `accounting_import_plans` as authoritative,
 temporary, owner-scoped workflow state. Its raw payload, result, and hash fields
 are private financial data excluded from generic search and ordinary context;
-only exact provider workflow projections may expose bounded validated results.
+only exact MCP workflow projections may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Complete **Back up and prove the backup restores** above and retain both backup files.
