@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -75,4 +75,12 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(transactionDeletionMigration.sql, /transaction_delete/);
   assert.match(transactionDeletionMigration.sql, /ENUM\('staged','reused','exception','committed','deleted'\)/);
   assert.doesNotMatch(transactionDeletionMigration.sql, /GENERATED ALWAYS/i);
+  const lineValuationMigration = migrations.find((migration) => migration.version === 14);
+  assert.match(lineValuationMigration.sql, /ADD COLUMN IF NOT EXISTS value_units BIGINT NULL/);
+  assert.match(lineValuationMigration.sql, /SET li\.value_units = li\.amount_units/);
+  assert.doesNotMatch(lineValuationMigration.sql, /GENERATED ALWAYS/i);
+  const dataDeletionPlanMigration = migrations.find((migration) => migration.version === 15);
+  assert.match(dataDeletionPlanMigration.sql, /import_restart/);
+  assert.match(dataDeletionPlanMigration.sql, /user_delete/);
+  assert.doesNotMatch(dataDeletionPlanMigration.sql, /GENERATED ALWAYS/i);
 });

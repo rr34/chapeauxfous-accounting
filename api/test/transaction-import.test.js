@@ -114,9 +114,9 @@ function memoryPool() {
             return [{ insertId: row.transaction_id }];
           }
           if (sql.includes("INSERT INTO line_items")) {
-            const [transactionId, amountUnits, memo, accountId, sourceId] = params;
+            const [transactionId, amountUnits, valueUnits, memo, accountId, sourceId] = params;
             const row = { line_item_id: state.nextLineItemId++, transaction_id: transactionId,
-              amount_units: amountUnits, memo, account_id: accountId, source_id: sourceId };
+              amount_units: amountUnits, value_units: valueUnits, memo, account_id: accountId, source_id: sourceId };
             state.lineItems.push(row);
             return [{ insertId: row.line_item_id }];
           }
@@ -301,7 +301,8 @@ test("transaction preview plans complete nested transactions and commit is repea
   assert.equal(committed.createdLineItemCount, 4);
   assert.equal(committed.alreadyCommitted, false);
   assert.equal(pool.state.transactions.every((transaction) => transaction.TransactionState === "posted"), true);
-  assert.deepEqual(pool.state.rates.map((rate) => [rate.from_units, rate.to_units]), [["617", "5000"]]);
+  assert.deepEqual(pool.state.rates, []);
+  assert.deepEqual(pool.state.lineItems.map((line) => line.value_units), ["-1234", "1234", "10000", "-10000"]);
 
   const committedPlan = await getTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
   assert.equal(committedPlan.status, "committed");
@@ -320,6 +321,30 @@ test("transaction preview plans complete nested transactions and commit is repea
   });
   assert.equal(retryPreview.wouldCreateTransactionCount, 0);
   assert.equal(retryPreview.wouldReuseTransactionCount, 2);
+});
+
+test("transaction import preserves distinct per-line exchange rates", async () => {
+  const pool = memoryPool();
+  const transactions = [{
+    externalId: "different-line-rates",
+    transactionDate: "2026-01-09",
+    valuationCurrencyCode: "USD",
+    lineItems: [
+      { externalId: "1", accountFullName: "Assets:Investments:VTSAX",
+        amountDecimal: "1.000", valueDecimal: "100.00" },
+      { externalId: "2", accountFullName: "Assets:Investments:VTSAX",
+        amountDecimal: "-0.500", valueDecimal: "-60.00" },
+      { externalId: "3", accountFullName: "Assets:Checking", amountDecimal: "-40.00" },
+    ],
+  }];
+
+  const preview = await previewTransactionImport({ pool, personId: 7, sourceSystem: "source_app", transactions });
+  assert.equal(preview.readyToCommit, true);
+  assert.equal(preview.rejectedTransactionCount, 0);
+
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.deepEqual(pool.state.lineItems.map((line) => line.value_units), ["10000", "-6000", "-4000"]);
+  assert.deepEqual(pool.state.rates, []);
 });
 
 test("transaction commit persists plan invalidation after an integrity failure", async () => {

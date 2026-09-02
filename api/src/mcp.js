@@ -195,11 +195,11 @@ const operations = Object.freeze({
   },
   getTransaction: {
     name: "get_transaction",
-    purpose: "Read one user-owned transaction with its line items, tags, and exchange rates.",
+    purpose: "Read one user-owned transaction with its line amounts, valuation values, tags, and legacy transaction rates.",
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
     fields: {
       transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id"],
       accounts: ["account_id", "AccountName", "account_currency_id"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       tags: ["tag_id", "tag_key", "tag_value"],
@@ -213,7 +213,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       tags: ["tag_id", "tag_key", "tag_value"],
@@ -227,7 +227,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
@@ -240,7 +240,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
@@ -255,7 +255,7 @@ const operations = Object.freeze({
       "accounting_transaction_import_requests"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id", "source_fingerprint"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
       accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
@@ -276,7 +276,7 @@ const operations = Object.freeze({
       "accounting_import_plans", "accounting_transaction_import_jobs", "accounting_transaction_import_items"],
     fields: {
       transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "valuation_currency_id", "TransactionState", "reversal_of_transaction_id", "source_system", "source_id", "source_fingerprint"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
       lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
       xrates: ["xrate_id", "owner_person_id", "transaction_id", "xrate_type", "ValidAt", "from_units", "from_currency_id", "to_units", "to_currency_id"],
       accounts: ["account_id", "owner_person_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
@@ -316,7 +316,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "xrates"],
     fields: {
       transactions: ["transaction_id", "owner_person_id", "valuation_currency_id", "TransactionState"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "account_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "account_id"],
       accounts: ["account_id", "owner_person_id", "account_currency_id", "is_placeholder"],
       xrates: ["transaction_id", "xrate_type", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
@@ -653,7 +653,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerResource("accounting-transaction", resourceTemplate("accounting://transactions/{transactionId}"), {
     title: "Accounting transaction",
-    description: "One current owner-scoped transaction with line items, tags, and transaction rates by stable Accounting ID.",
+    description: "One current owner-scoped transaction with line amounts, valuation values, tags, and legacy transaction rates by stable Accounting ID.",
     mimeType: "application/json",
   }, async (uri, { transactionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
     contractVersion: MCP_CONTRACT_VERSION,
@@ -1468,7 +1468,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("get_transaction", {
     title: "Get transaction",
-    description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line items, tags, and transaction exchange rates for that transaction.",
+    description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line amounts and valuation values, tags, and any legacy transaction exchange rates.",
     inputSchema: { transaction_id: positiveInteger("Transaction id.") },
     outputSchema: transactionReadOutput,
     annotations: readOnly,
@@ -1480,6 +1480,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   const lineItemSchema = z.object({
     account_id: positiveInteger("Account id owned by the token owner."),
     amount_units: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the account currency's native units."),
+    value_units: z.string().regex(/^-?\d+$/).optional()
+      .describe("Signed value in valuation-currency units. Supply this for every foreign line to use per-line exchange rates."),
     memo: z.string().trim().max(16000).nullable().optional(),
     source_id: z.string().trim().max(128).nullable().optional(),
     tags: z.array(z.object({
@@ -1495,7 +1497,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("create_transaction", {
     title: "Create transaction",
-    description: "Use to atomically create one complete double-entry transaction. A successful result and receipt prove the owner-scoped accounts, currency, rates, and exact balance were validated and the returned transaction was created in the reported state.",
+    description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each line can carry its own implied exchange rate; rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
     inputSchema: {
       description: z.string().trim().max(16000).nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
@@ -1518,6 +1520,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       lineItems: input.line_items.map((line) => ({
         accountId: line.account_id,
         amountUnits: line.amount_units,
+        valueUnits: line.value_units,
         memo: line.memo,
         sourceId: line.source_id,
         tags: line.tags,
@@ -1831,7 +1834,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Foreign line values are used to validate one consistent positive exchange rate per currency, and every transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate; the transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
@@ -1882,7 +1885,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("commit_transaction_import", {
     title: "Commit transaction import",
-    description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, balance, exchange rates, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent.",
+    description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, per-line valuation values, balance, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent.",
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_transactions."),
     },

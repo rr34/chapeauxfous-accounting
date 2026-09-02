@@ -9,7 +9,7 @@ test("the tracked accounting semantic form is complete", () => {
   assert.equal(report.activeSchemaObjectCount, 12);
   assert.equal(report.retiredSchemaObjectCount, 0);
   assert.equal(report.unresolvedCount, 0);
-  assert.equal(semantics.form.database.schemaVersion, 13);
+  assert.equal(semantics.form.database.schemaVersion, 15);
   assert.match(
     semantics.form.schemaObjects.accounting_import_plans.fields.payload_json.semantics.sensitivity,
     /Server-only private financial data/,
@@ -17,6 +17,10 @@ test("the tracked accounting semantic form is complete", () => {
   assert.match(
     semantics.form.schemaObjects.line_items.fields.amount_units.semantics.units,
     /currency's scale/,
+  );
+  assert.match(
+    semantics.form.schemaObjects.line_items.fields.value_units.semantics.meaning,
+    /valuation currency/,
   );
   assert.match(
     semantics.form.schemaObjects.transactions.fields.TransactionDate.semantics.format,
@@ -46,9 +50,14 @@ test("request routing returns a small inspectable compiler projection", () => {
   assert.equal(projection.product, "schema-semantic-compiler/schema-semantic-projection");
   assert.equal(projection.compiler.name, "schema-semantic-compiler");
   assert.equal(Object.hasOwn(projection.schemaProjection.schemaObjects, "xrates"), true);
+  assert.equal(Object.hasOwn(projection.schemaProjection.schemaObjects, "line_items"), true);
   assert.equal(Object.hasOwn(projection.schemaProjection.schemaObjects, "transactions"), true);
   assert.match(
     projection.schemaProjection.schemaObjects.xrates.fields.from_units.meaning,
     /Positive integer source-currency units/,
+  );
+  assert.match(
+    projection.schemaProjection.schemaObjects.line_items.fields.value_units.meaning,
+    /valuation currency/,
   );
 });

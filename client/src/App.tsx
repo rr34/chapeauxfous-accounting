@@ -1,6 +1,6 @@
 import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
-import { decimalToUnits, parseTags, unitsToDecimal } from "./money";
+import { decimalToUnits, unitsToDecimal } from "./money";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CanonicalImportRecord, CurrencyType, TransactionDetail, TransactionImportException,
@@ -22,6 +22,71 @@ type AuthProps = { onAuthenticated: (token: string, user: User) => void };
 
 type AccountTreeBalance = { currencyId: number; currencyCode: string; scale: number; units: string };
 type AccountTreeNode = Account & { children: AccountTreeNode[]; subtreeBalances: AccountTreeBalance[] };
+type TransactionDeletionPreview = {
+  deletionPlanId: string;
+  previewDigest: string;
+  summary: {
+    scope: "all" | "selected";
+    transactionCount: number;
+    lineItemCount: number;
+    exchangeRateCount: number;
+    tagAssignmentCount: number;
+    affectedAccountCount: number;
+    deleteAccounts: boolean;
+    accountCount: number;
+    balanceAssertionCount: number;
+    dateRange: { first: string | null; last: string | null };
+  };
+};
+type DataSummary = {
+  accountCount: number;
+  transactionCount: number;
+  lineItemCount: number;
+  assertionCount: number;
+  customCurrencyCount: number;
+  tagCount: number;
+  exchangeRateCount: number;
+  importJobCount: number;
+  importItemCount: number;
+  apiTokenCount: number;
+  savedPlanCount: number;
+};
+type AccountDeletionPreview = {
+  deletionPlanId: string;
+  previewDigest: string;
+  summary: { accountId: number; accountName: string };
+};
+type ImportRestartPreview = {
+  restartPlanId: string;
+  previewDigest: string;
+  summary: {
+    importJobId: string;
+    sourceSystem: string;
+    sourceFileName: string | null;
+    importItemCount: number;
+    createdTransactionCount: number;
+    preservedReusedTransactionCount: number;
+    lineItemCount: number;
+    exchangeRateCount: number;
+    tagAssignmentCount: number;
+  };
+};
+type UserDeletionPreview = {
+  deletionPlanId: string;
+  previewDigest: string;
+  confirmationText: string;
+  summary: {
+    name: string;
+    email: string;
+    accountCount: number;
+    transactionCount: number;
+    lineItemCount: number;
+    assertionCount: number;
+    customCurrencyCount: number;
+    importJobCount: number;
+    apiTokenCount: number;
+  };
+};
 
 function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
   const accountIds = new Set(accounts.map((account) => account.id));
@@ -185,7 +250,9 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   const [currencyId, setCurrencyId] = useState(account.currencyId);
   const [parentAccountId, setParentAccountId] = useState(account.parentAccountId == null ? "" : String(account.parentAccountId));
   const [error, setError] = useState("");
-  const [busyAction, setBusyAction] = useState<"save" | "delete" | "">("");
+  const [busyAction, setBusyAction] = useState<"save" | "preview-delete" | "delete" | "">("");
+  const [deletePreview, setDeletePreview] = useState<AccountDeletionPreview | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const unavailableParentIds = useMemo(() => {
     const ids = new Set([account.id]);
     let changed = true;
@@ -217,11 +284,22 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   }
 
   async function remove() {
-    if (!window.confirm(`Permanently delete “${account.name}”? Accounts with children, transactions, or balance assertions cannot be deleted.`)) return;
-    setBusyAction("delete"); setError("");
+    const confirmationText = `DELETE ${account.name}`;
+    if (deletePreview && deleteConfirmation !== confirmationText) return;
+    setBusyAction(deletePreview ? "delete" : "preview-delete"); setError("");
     try {
-      await api(`/accounts/${account.id}`, { method: "DELETE" }, token);
-      await onChanged(); onClose();
+      if (!deletePreview) {
+        const preview = await api<AccountDeletionPreview>(`/data/accounts/${account.id}/delete-preview`, {
+          method: "POST", body: "{}",
+        }, token);
+        setDeletePreview(preview);
+      } else {
+        await api(`/data/accounts/${account.id}/delete-commit`, {
+          method: "POST", body: JSON.stringify({ deletionPlanId: deletePreview.deletionPlanId,
+            previewDigest: deletePreview.previewDigest }),
+        }, token);
+        await onChanged(); onClose();
+      }
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusyAction(""); }
   }
@@ -245,9 +323,18 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
         </select></label>
         <label className="checkbox-field"><input type="checkbox" checked={placeholder}
           onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
+        {deletePreview && <section className="delete-confirmation-panel">
+          <strong>Delete this empty account?</strong>
+          <p>This permanently removes only <b>{deletePreview.summary.accountName}</b>. Accounts with children, postings, or known balances cannot be deleted.</p>
+          <label>Type <code>DELETE {account.name}</code>
+            <input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} />
+          </label>
+        </section>}
         {error && <p className="error">{error}</p>}
-        <div className="account-dialog-actions"><button type="button" className="danger-button" disabled={Boolean(busyAction)}
-          onClick={() => void remove()}>{busyAction === "delete" ? "Deleting…" : "Delete account"}</button>
+        <div className="account-dialog-actions"><button type="button" className="danger-button"
+          disabled={Boolean(busyAction) || Boolean(deletePreview && deleteConfirmation !== `DELETE ${account.name}`)}
+          onClick={() => void remove()}>{busyAction === "preview-delete" ? "Preparing preview…"
+            : busyAction === "delete" ? "Deleting…" : deletePreview ? "Permanently delete account" : "Review account deletion"}</button>
           <button className="primary" disabled={Boolean(busyAction)}>{busyAction === "save" ? "Saving…" : "Save changes"}</button></div>
       </form>
     </section>
@@ -358,8 +445,137 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
   </aside>;
 }
 
-type EditableLine = { accountId: string; amount: string; memo: string; tags: string };
+type EditableLine = { accountId: string; amount: string; memo: string };
 type EditableRate = { fromAmount: string; toAmount: string };
+type RateDirection = "value-per-amount" | "amount-per-value";
+type EditableImportRecord = CanonicalImportRecord & {
+  editorKey: string;
+  rateDecimal: string;
+  rateDirection: RateDirection;
+  rateChanges: "amount" | "value";
+};
+
+function amountForSide(amount: string, side: "debit" | "credit") {
+  const trimmed = amount.trim();
+  const isCredit = trimmed.startsWith("-");
+  if ((side === "credit") !== isCredit || !trimmed) return "";
+  return trimmed.replace(/^[+-]/, "");
+}
+
+function signedAmountForSide(side: "debit" | "credit", value: string) {
+  const unsigned = value.trim().replace(/^[+-]/, "");
+  if (!unsigned) return "";
+  return side === "credit" ? `-${unsigned}` : unsigned;
+}
+
+type DecimalParts = { units: bigint; scale: number };
+
+function decimalParts(value: string | null | undefined): DecimalParts | null {
+  const match = value?.trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return null;
+  const fraction = match[3] ?? "";
+  const magnitude = BigInt(`${match[2]}${fraction}`);
+  return { units: match[1] === "-" ? -magnitude : magnitude, scale: fraction.length };
+}
+
+function powerOfTen(exponent: number) {
+  return 10n ** BigInt(exponent);
+}
+
+function roundedQuotient(numerator: bigint, denominator: bigint) {
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return remainder * 2n >= denominator ? quotient + 1n : quotient;
+}
+
+function formattedDecimal(units: bigint, scale: number) {
+  const value = unitsToDecimal(units.toString(), scale);
+  return scale === 0 ? value : value.replace(/\.?0+$/, "");
+}
+
+function decimalRatio(dividend: string | null | undefined, divisor: string | null | undefined) {
+  const left = decimalParts(dividend);
+  const right = decimalParts(divisor);
+  if (!left || !right || left.units === 0n || right.units === 0n) return "";
+  const numerator = (left.units < 0n ? -left.units : left.units) * powerOfTen(right.scale);
+  const denominator = (right.units < 0n ? -right.units : right.units) * powerOfTen(left.scale);
+  const integerPart = numerator / denominator;
+  let exponent: number;
+  if (integerPart > 0n) {
+    exponent = integerPart.toString().length - 1;
+  } else {
+    let shifted = numerator;
+    let places = 0;
+    while (shifted < denominator && places < 18) { shifted *= 10n; places += 1; }
+    exponent = -places;
+  }
+  const decimalPlaces = Math.max(0, Math.min(18, 11 - exponent));
+  return formattedDecimal(roundedQuotient(numerator * powerOfTen(decimalPlaces), denominator), decimalPlaces);
+}
+
+function decimalProductToScale(leftValue: string, rightValue: string, outputScale: number) {
+  const left = decimalParts(leftValue);
+  const right = decimalParts(rightValue);
+  if (!left || !right || right.units <= 0n) return null;
+  const negative = left.units < 0n;
+  const numerator = (negative ? -left.units : left.units) * right.units * powerOfTen(outputScale);
+  const denominator = powerOfTen(left.scale + right.scale);
+  const units = roundedQuotient(numerator, denominator);
+  return unitsToDecimal((negative ? -units : units).toString(), outputScale);
+}
+
+function decimalQuotientToScale(leftValue: string, rightValue: string, outputScale: number) {
+  const left = decimalParts(leftValue);
+  const right = decimalParts(rightValue);
+  if (!left || !right || right.units <= 0n) return null;
+  const negative = left.units < 0n;
+  const numerator = (negative ? -left.units : left.units) * powerOfTen(right.scale + outputScale);
+  const denominator = right.units * powerOfTen(left.scale);
+  const units = roundedQuotient(numerator, denominator);
+  return unitsToDecimal((negative ? -units : units).toString(), outputScale);
+}
+
+function lineRate(record: Pick<CanonicalImportRecord, "amount_decimal" | "value_decimal">, direction: RateDirection) {
+  return direction === "value-per-amount"
+    ? decimalRatio(record.value_decimal, record.amount_decimal)
+    : decimalRatio(record.amount_decimal, record.value_decimal);
+}
+
+function sameLineRate(
+  left: Pick<CanonicalImportRecord, "amount_decimal" | "value_decimal">,
+  right: Pick<CanonicalImportRecord, "amount_decimal" | "value_decimal">,
+) {
+  const leftAmount = decimalParts(left.amount_decimal);
+  const leftValue = decimalParts(left.value_decimal);
+  const rightAmount = decimalParts(right.amount_decimal);
+  const rightValue = decimalParts(right.value_decimal);
+  if (!leftAmount || !leftValue || !rightAmount || !rightValue
+    || leftAmount.units === 0n || rightAmount.units === 0n) return true;
+  const leftNumerator = (leftValue.units < 0n ? -leftValue.units : leftValue.units)
+    * powerOfTen(leftAmount.scale);
+  const leftDenominator = (leftAmount.units < 0n ? -leftAmount.units : leftAmount.units)
+    * powerOfTen(leftValue.scale);
+  const rightNumerator = (rightValue.units < 0n ? -rightValue.units : rightValue.units)
+    * powerOfTen(rightAmount.scale);
+  const rightDenominator = (rightAmount.units < 0n ? -rightAmount.units : rightAmount.units)
+    * powerOfTen(rightValue.scale);
+  return leftNumerator * rightDenominator === rightNumerator * leftDenominator;
+}
+
+function TransactionEditorModal({ eyebrow, title, onClose, children }: {
+  eyebrow: string; title: string; onClose: () => void; children: React.ReactNode;
+}) {
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target === event.currentTarget) onClose();
+  }}>
+    <section className="agent-dialog transaction-dialog" role="dialog" aria-modal="true" aria-labelledby="transaction-dialog-title">
+      <div className="dialog-heading"><div><p className="eyebrow">{eyebrow}</p>
+        <h2 id="transaction-dialog-title">{title}</h2></div>
+        <button type="button" className="dialog-close" aria-label="Close transaction editor" onClick={onClose}>×</button></div>
+      {children}
+    </section>
+  </div>;
+}
 
 function TransactionComposer({ accounts, currencies, initialAccountId, token, onCreated }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
@@ -370,8 +586,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, token, on
   const [date, setDate] = useState(today());
   const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(initialAccount?.currencyId ?? "");
   const [lines, setLines] = useState<EditableLine[]>([
-    { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "", tags: "" },
-    { accountId: "", amount: "", memo: "", tags: "" },
+    { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "" },
+    { accountId: "", amount: "", memo: "" },
   ]);
   const [rates, setRates] = useState<Record<number, EditableRate>>({});
   const [error, setError] = useState("");
@@ -392,7 +608,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, token, on
       const payloadLines = lines.map((line) => {
         const account = accountMap.get(Number(line.accountId));
         if (!account) throw new Error("Choose an account for every line.");
-        return { accountId: account.id, amountUnits: decimalToUnits(line.amount, account.scale), memo: line.memo, tags: parseTags(line.tags) };
+        return { accountId: account.id, amountUnits: decimalToUnits(line.amount, account.scale), memo: line.memo, tags: [] };
       });
       const payloadRates = foreignCurrencyIds.map((fromCurrencyId) => {
         const fromCurrency = currencyMap.get(fromCurrencyId);
@@ -405,8 +621,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, token, on
       await api("/transactions", { method: "POST", body: JSON.stringify({ description, transactionDate: date,
         valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: payloadRates, post: true }) }, token);
       setDescription(""); setDate(today()); setLines([
-        { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "", tags: "" },
-        { accountId: "", amount: "", memo: "", tags: "" },
+        { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "" },
+        { accountId: "", amount: "", memo: "" },
       ]);
       setRates({}); await onCreated();
     } catch (nextError) { setError(errorMessage(nextError)); }
@@ -421,16 +637,18 @@ function TransactionComposer({ accounts, currencies, initialAccountId, token, on
           onChange={(event) => setValuationCurrencyId(event.target.value ? Number(event.target.value) : "")}>
           <option value="">Choose currency…</option>
           {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}</select></label></div>
-      <div className="line-editor"><div className="line-head"><span>Account</span><span>Native amount</span><span>Memo</span><span>Tags</span><span /></div>
+      <div className="line-editor"><div className="line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
         {lines.map((line, index) => <div className="line-grid" key={index}>
+          <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
           <select value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}><option value="">Choose…</option>
             {accounts.filter((account) => !account.archivedAt && !account.placeholder).map((account) => <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}</select>
-          <input value={line.amount} onChange={(event) => updateLine(index, { amount: event.target.value })} placeholder="+100 or -100" />
-          <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Optional" />
-          <input value={line.tags} onChange={(event) => updateLine(index, { tags: event.target.value })} placeholder="job:main, tax:repair" />
+          <input inputMode="decimal" aria-label={`Debit for line ${index + 1}`} value={amountForSide(line.amount, "debit")}
+            onChange={(event) => updateLine(index, { amount: signedAmountForSide("debit", event.target.value) })} />
+          <input inputMode="decimal" aria-label={`Credit for line ${index + 1}`} value={amountForSide(line.amount, "credit")}
+            onChange={(event) => updateLine(index, { amount: signedAmountForSide("credit", event.target.value) })} />
           <button type="button" className="quiet" disabled={lines.length <= 2} onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}>×</button>
         </div>)}</div>
-      <button type="button" className="secondary" onClick={() => setLines((current) => [...current, { accountId: "", amount: "", memo: "", tags: "" }])}>Add split</button>
+      <button type="button" className="secondary" onClick={() => setLines((current) => [...current, { accountId: "", amount: "", memo: "" }])}>Add split</button>
       {foreignCurrencyIds.length > 0 && <div className="rates"><h3>Transaction exchange rates</h3>{foreignCurrencyIds.map((currencyId) => {
         const foreign = currencyMap.get(currencyId)!; const valuation = currencyMap.get(resolvedValuationCurrencyId)!; const rate = rates[currencyId] || { fromAmount: "", toAmount: "" };
         return <div className="rate-row" key={currencyId}><span>When</span><input placeholder={`1 ${foreign.code}`} value={rate.fromAmount}
@@ -448,38 +666,92 @@ function TransactionComposerDialog({ accounts, currencies, initialAccountId, tok
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null; token: string;
   onCreated: () => Promise<void>; onClose: () => void;
 }) {
-  return <div className="dialog-backdrop" role="presentation">
-    <section className="agent-dialog transaction-dialog" role="dialog" aria-modal="true" aria-labelledby="transaction-dialog-title">
-      <div className="dialog-heading"><div><p className="eyebrow">New entry</p>
-        <h2 id="transaction-dialog-title">Balanced transaction</h2></div>
-        <button className="dialog-close" aria-label="Close transaction composer" onClick={onClose}>×</button></div>
-      <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={initialAccountId}
-        token={token} onCreated={onCreated} />
-    </section>
-  </div>;
+  return <TransactionEditorModal eyebrow="New entry" title="Balanced transaction" onClose={onClose}>
+    <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={initialAccountId}
+      token={token} onCreated={onCreated} />
+  </TransactionEditorModal>;
 }
 
 function MisfitEditor({ exception, accounts, currencies, token, importJobId, onSaved, onCancel }: {
   exception: TransactionImportException; accounts: Account[]; currencies: Currency[]; token: string;
   importJobId: string; onSaved: () => Promise<void>; onCancel: () => void;
 }) {
-  const [records, setRecords] = useState<CanonicalImportRecord[]>(() =>
-    exception.canonical_records.map((record) => ({ ...record })));
+  const [records, setRecords] = useState<EditableImportRecord[]>(() =>
+    exception.canonical_records.map((record, index) => ({
+      ...record,
+      editorKey: `${record.line_external_id ?? "line"}-${index}`,
+      rateDirection: "value-per-amount",
+      rateDecimal: lineRate(record, "value-per-amount"),
+      rateChanges: "value",
+    })));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
-  const postableAccounts = accounts.filter((account) => !account.archivedAt && !account.placeholder)
+  const postableAccounts = useMemo(() => accounts.filter((account) => !account.archivedAt && !account.placeholder)
     .map((account) => ({ account, fullName: fullNames.get(account.id) ?? account.name }))
-    .sort((left, right) => left.fullName.localeCompare(right.fullName));
+    .sort((left, right) => left.fullName.localeCompare(right.fullName)), [accounts, fullNames]);
+  const accountByFullName = useMemo(() => new Map(postableAccounts.map(({ account, fullName }) => [fullName, account])),
+    [postableAccounts]);
   const first = records[0];
+
+  function synchronizeRate(record: EditableImportRecord) {
+    const account = accountByFullName.get(record.account_full_name);
+    if (account?.currencyCode === record.valuation_currency_code) {
+      return { ...record, value_decimal: record.amount_decimal, rateDecimal: "1" };
+    }
+    return { ...record, rateDecimal: lineRate(record, record.rateDirection) };
+  }
 
   function updateTransaction(patch: Partial<Pick<CanonicalImportRecord,
     "transaction_date" | "description" | "valuation_currency_code">>) {
-    setRecords((current) => current.map((record) => ({ ...record, ...patch })));
+    setRecords((current) => current.map((record) => synchronizeRate({ ...record, ...patch })));
   }
 
   function updateLine(index: number, patch: Partial<CanonicalImportRecord>) {
-    setRecords((current) => current.map((record, recordIndex) => recordIndex === index ? { ...record, ...patch } : record));
+    setRecords((current) => current.map((record, recordIndex) => recordIndex === index
+      ? synchronizeRate({ ...record, ...patch }) : record));
+  }
+
+  function updateLineAmount(index: number, side: "debit" | "credit", value: string) {
+    setRecords((current) => current.map((record, recordIndex) => {
+      if (recordIndex !== index) return record;
+      const amount = signedAmountForSide(side, value);
+      const account = accountByFullName.get(record.account_full_name);
+      const next = { ...record, amount_decimal: amount };
+      if (account?.currencyCode === record.valuation_currency_code) next.value_decimal = amount;
+      return synchronizeRate(next);
+    }));
+  }
+
+  function updateLineValue(index: number, value: string) {
+    setRecords((current) => current.map((record, recordIndex) => recordIndex === index
+      ? synchronizeRate({ ...record, value_decimal: value }) : record));
+  }
+
+  function updateLineRate(index: number, rateDecimal: string) {
+    setRecords((current) => current.map((record, recordIndex) => {
+      if (recordIndex !== index) return record;
+      const valuationCurrency = currencies.find((currency) => currency.code === record.valuation_currency_code);
+      const account = accountByFullName.get(record.account_full_name);
+      if (record.rateChanges === "amount") {
+        const calculatedAmount = record.rateDirection === "value-per-amount"
+          ? decimalQuotientToScale(record.value_decimal ?? "", rateDecimal, account?.scale ?? 2)
+          : decimalProductToScale(record.value_decimal ?? "", rateDecimal, account?.scale ?? 2);
+        return { ...record, rateDecimal, amount_decimal: calculatedAmount ?? record.amount_decimal };
+      }
+      const calculatedValue = record.rateDirection === "value-per-amount"
+        ? decimalProductToScale(record.amount_decimal, rateDecimal, valuationCurrency?.scale ?? 2)
+        : decimalQuotientToScale(record.amount_decimal, rateDecimal, valuationCurrency?.scale ?? 2);
+      return { ...record, rateDecimal, value_decimal: calculatedValue ?? record.value_decimal };
+    }));
+  }
+
+  function invertLineRate(index: number) {
+    setRecords((current) => current.map((record, recordIndex) => {
+      if (recordIndex !== index) return record;
+      const rateDirection = record.rateDirection === "value-per-amount" ? "amount-per-value" : "value-per-amount";
+      return { ...record, rateDirection, rateDecimal: lineRate(record, rateDirection) };
+    }));
   }
 
   function addSplit() {
@@ -493,21 +765,30 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
       amount_decimal: "",
       value_decimal: "",
       memo: null,
+      editorKey: `new-${crypto.randomUUID()}`,
+      rateDirection: "value-per-amount",
+      rateDecimal: "",
+      rateChanges: "value",
     }]);
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const corrected = records.map((record) => ({
-        ...record,
-        description: record.description?.trim() || null,
-        memo: record.memo?.trim() || null,
-        line_external_id: record.line_external_id?.trim() || null,
-        account_full_name: record.account_full_name.trim(),
-        amount_decimal: record.amount_decimal.trim(),
-        value_decimal: record.value_decimal == null || record.value_decimal.trim() === "" ? null : record.value_decimal.trim(),
-      }));
+      const corrected = records.map((record) => {
+        const { editorKey: _editorKey, rateDecimal: _rateDecimal, rateDirection: _rateDirection,
+          rateChanges: _rateChanges, ...canonical } = record;
+        return {
+          ...canonical,
+          description: canonical.description?.trim() || null,
+          memo: canonical.memo?.trim() || null,
+          line_external_id: canonical.line_external_id?.trim() || null,
+          account_full_name: canonical.account_full_name.trim(),
+          amount_decimal: canonical.amount_decimal.trim(),
+          value_decimal: canonical.value_decimal == null || canonical.value_decimal.trim() === ""
+            ? null : canonical.value_decimal.trim(),
+        };
+      });
       await api(`/transaction-import-jobs/${importJobId}/exceptions/${encodeURIComponent(exception.source_identity.transaction_external_id)}/retry`, {
         method: "POST",
         body: JSON.stringify({ retryId: crypto.randomUUID(), records: corrected }),
@@ -519,6 +800,7 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
 
   if (!first) return null;
   return <form className="misfit-editor" onSubmit={submit}>
+    <p className="transaction-editor-rule">Amount + value determine the rate. When changing a rate, choose whether its amount or value should be recalculated.</p>
     <div className="misfit-meta">
       <label>Date<input type="date" required value={first.transaction_date}
         onChange={(event) => updateTransaction({ transaction_date: event.target.value })} /></label>
@@ -530,23 +812,65 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
       </select></label>
     </div>
     <div className="misfit-lines">
-      <div className="misfit-line-head"><span>Account</span><span>Native amount</span><span>Value</span><span>Memo</span><span /></div>
-      {records.map((record, index) => <div className="misfit-line" key={`${record.line_external_id ?? "new"}-${index}`}>
-        <select required value={record.account_full_name}
-          onChange={(event) => updateLine(index, { account_full_name: event.target.value })}>
-          <option value="">Choose a postable account…</option>
-          {postableAccounts.map(({ account, fullName }) => <option key={account.id} value={fullName}>
-            {fullName} ({account.currencyCode})
-          </option>)}
-        </select>
-        <input required value={record.amount_decimal}
-          onChange={(event) => updateLine(index, { amount_decimal: event.target.value })} placeholder="-12.34" />
-        <input value={record.value_decimal ?? ""}
-          onChange={(event) => updateLine(index, { value_decimal: event.target.value })} placeholder="Same-currency may be blank" />
-        <input value={record.memo ?? ""} onChange={(event) => updateLine(index, { memo: event.target.value })} />
-        <button type="button" className="quiet" aria-label="Remove split" disabled={records.length === 1}
-          onClick={() => setRecords((current) => current.filter((_, recordIndex) => recordIndex !== index))}>×</button>
-      </div>)}
+      <div className="misfit-line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
+      {records.map((record, index) => {
+        const selectedAccount = accountByFullName.get(record.account_full_name);
+        const amountCurrencyCode = selectedAccount?.currencyCode ?? "account currency";
+        const isNative = selectedAccount?.currencyCode === first.valuation_currency_code;
+        const rateIsInvalid = record.rateDecimal.trim() !== ""
+          && (!decimalParts(record.rateDecimal) || decimalParts(record.rateDecimal)!.units <= 0n);
+        const hasDifferentRate = !isNative && Boolean(selectedAccount) && records.some((candidate, candidateIndex) =>
+          candidateIndex !== index
+          && accountByFullName.get(candidate.account_full_name)?.currencyCode === selectedAccount?.currencyCode
+          && !sameLineRate(record, candidate));
+        const rateUnits = record.rateDirection === "value-per-amount"
+          ? `${first.valuation_currency_code} / ${amountCurrencyCode}`
+          : `${amountCurrencyCode} / ${first.valuation_currency_code}`;
+        return <div className="misfit-line-wrapper" key={record.editorKey}>
+          <div className="misfit-line">
+            <input value={record.memo ?? ""} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
+            <select required value={record.account_full_name}
+              onChange={(event) => updateLine(index, { account_full_name: event.target.value })}>
+              <option value="">Choose a postable account…</option>
+              {postableAccounts.map(({ account, fullName }) => <option key={account.id} value={fullName}>
+                {fullName} ({account.currencyCode})
+              </option>)}
+            </select>
+            <input inputMode="decimal" aria-label={`Debit for imported line ${index + 1}`}
+              value={amountForSide(record.amount_decimal, "debit")}
+              onChange={(event) => updateLineAmount(index, "debit", event.target.value)} />
+            <input inputMode="decimal" aria-label={`Credit for imported line ${index + 1}`}
+              value={amountForSide(record.amount_decimal, "credit")}
+              onChange={(event) => updateLineAmount(index, "credit", event.target.value)} />
+            <button type="button" className="quiet" aria-label="Remove split" disabled={records.length === 1}
+              onClick={() => setRecords((current) => current.filter((_, recordIndex) => recordIndex !== index))}>×</button>
+          </div>
+          <div className={`line-value-rate ${hasDifferentRate ? "different-rate" : ""}`}>
+            <label>Value in {first.valuation_currency_code}
+              <input inputMode="decimal" disabled={isNative} value={record.value_decimal ?? ""}
+                onChange={(event) => updateLineValue(index, event.target.value)} />
+            </label>
+            <label>Exchange rate
+              <span className="rate-input-group"><input inputMode="decimal" disabled={isNative}
+                aria-invalid={rateIsInvalid || undefined} value={isNative ? "1" : record.rateDecimal}
+                onChange={(event) => updateLineRate(index, event.target.value)} />
+                <button type="button" className="rate-invert" disabled={isNative || !record.rateDecimal}
+                  aria-label={`Invert exchange rate for line ${index + 1}`} title="Show the reciprocal rate"
+                  onClick={() => invertLineRate(index)}>1/x</button></span>
+              <small>{rateUnits}</small>
+              {!isNative && <span className="rate-update-choice">Changing rate updates
+                <select aria-label={`Exchange-rate update target for line ${index + 1}`} value={record.rateChanges}
+                  onChange={(event) => setRecords((current) => current.map((candidate, candidateIndex) => candidateIndex === index
+                    ? { ...candidate, rateChanges: event.target.value as "amount" | "value" } : candidate))}>
+                  <option value="value">value</option><option value="amount">amount</option>
+                </select>
+              </span>}
+            </label>
+            {hasDifferentRate && <p className="rate-note">This line uses a different {selectedAccount?.currencyCode} rate.</p>}
+            {rateIsInvalid && <p>Enter a positive exchange rate.</p>}
+          </div>
+        </div>;
+      })}
     </div>
     <div className="misfit-editor-actions">
       <button type="button" className="secondary" onClick={addSplit}>Add balancing split</button>
@@ -556,6 +880,59 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
     </div>
     {error && <p className="error">{error}</p>}
   </form>;
+}
+
+function ImportRestartDialog({ job, token, onClose, onRestarted }: {
+  job: TransactionImportJob; token: string; onClose: () => void; onRestarted: () => Promise<void>;
+}) {
+  const [preview, setPreview] = useState<ImportRestartPreview | null>(null);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    api<ImportRestartPreview>(`/transaction-import-jobs/${job.import_job_id}/restart-preview`, {
+      method: "POST", body: "{}",
+    }, token).then(setPreview).catch((nextError) => setError(errorMessage(nextError))).finally(() => setBusy(false));
+  }, [job.import_job_id, token]);
+
+  async function restart() {
+    if (!preview || confirmation !== "RESTART IMPORT") return;
+    setBusy(true); setError("");
+    try {
+      await api(`/transaction-import-jobs/${job.import_job_id}/restart-commit`, {
+        method: "POST", body: JSON.stringify({
+          restartPlanId: preview.restartPlanId, previewDigest: preview.previewDigest,
+        }),
+      }, token);
+      await onRestarted(); onClose();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(false); }
+  }
+
+  return <TransactionEditorModal eyebrow="Import data"
+    title={`Restart ${job.source_file.name ?? job.source_system}`} onClose={onClose}>
+    {busy && !preview && <p className="muted">Preparing an exact restart preview…</p>}
+    {preview && <>
+      <p className="deletion-explanation">This removes the import job and only the ledger transactions it created. Transactions this import reused are preserved, as are all accounts and currencies.</p>
+      <div className="deletion-summary">
+        <div><span>Import records</span><strong>{preview.summary.importItemCount}</strong></div>
+        <div><span>Created transactions removed</span><strong>{preview.summary.createdTransactionCount}</strong></div>
+        <div><span>Reused transactions preserved</span><strong>{preview.summary.preservedReusedTransactionCount}</strong></div>
+        <div><span>Line items removed</span><strong>{preview.summary.lineItemCount}</strong></div>
+      </div>
+      <label>Type <code>RESTART IMPORT</code> to confirm
+        <input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
+      </label>
+      <div className="destructive-actions"><button type="button" className="link-button" onClick={onClose}>Cancel</button>
+        <button type="button" className="danger-button" disabled={busy || confirmation !== "RESTART IMPORT"}
+          onClick={() => void restart()}>{busy ? "Restarting…" : "Remove this import and start over"}</button></div>
+    </>}
+    {error && <p className="error">{error}</p>}
+  </TransactionEditorModal>;
 }
 
 function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
@@ -569,6 +946,7 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   const [editingExternalId, setEditingExternalId] = useState<string | null>(null);
   const [filter, setFilter] = useState("unresolved");
   const [preview, setPreview] = useState<TransactionImportJob | null>(null);
+  const [restartOpen, setRestartOpen] = useState(false);
   const [busy, setBusy] = useState<"load" | "preview" | "commit" | "exclude" | "">("");
   const [error, setError] = useState("");
 
@@ -648,16 +1026,22 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   const errorCodes = [...new Set(exceptions.flatMap((exception) => exception.error_codes))].sort();
   const visible = exceptions.filter((exception) => filter === "all"
     || filter === exception.resolution.status || exception.error_codes.includes(filter));
+  const editingException = exceptions.find((exception) =>
+    exception.source_identity.transaction_external_id === editingExternalId) ?? null;
 
   return <section className="misfits-page card">
     <div className="section-heading misfits-heading"><div><p className="eyebrow">Import holding area</p>
       <h2>Import misfits</h2><p>Source transactions that need a correction, an accounting choice, or an explicit exclusion.</p></div>
-      {jobs.length > 1 && <select aria-label="Import job" value={selectedJobId ?? ""}
-        onChange={(event) => { setSelectedJobId(event.target.value); setPreview(null); }}>
-        {jobs.map((candidate) => <option key={candidate.import_job_id} value={candidate.import_job_id}>
-          {candidate.source_file.name ?? candidate.source_system} · {candidate.progress.transaction_totals.unresolved_exceptions} unresolved
-        </option>)}
-      </select>}
+      {jobs.length > 0 && <div className="misfit-heading-actions">
+        {jobs.length > 1 && <select aria-label="Import job" value={selectedJobId ?? ""}
+          onChange={(event) => { setSelectedJobId(event.target.value); setPreview(null); }}>
+          {jobs.map((candidate) => <option key={candidate.import_job_id} value={candidate.import_job_id}>
+            {candidate.source_file.name ?? candidate.source_system} · {candidate.progress.transaction_totals.unresolved_exceptions} unresolved
+          </option>)}
+        </select>}
+        {job && <button type="button" className="danger-link" disabled={Boolean(busy)}
+          onClick={() => setRestartOpen(true)}>Restart this import</button>}
+      </div>}
     </div>
     {!jobs.length && <p className="misfits-empty">No transaction import jobs yet.</p>}
     {error && <p className="error">{error}</p>}
@@ -691,7 +1075,6 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       {busy === "load" && <p className="misfits-empty">Loading import exceptions…</p>}
       <div className="misfit-list">{visible.map((exception) => {
         const externalId = exception.source_identity.transaction_external_id;
-        const editing = editingExternalId === externalId;
         return <article className={`misfit-card ${exception.resolution.status}`} key={externalId}>
           <div className="misfit-card-heading"><div><div className="misfit-code-list">
             {exception.error_codes.map((code) => <span key={code}>{code.replaceAll("_", " ")}</span>)}
@@ -706,23 +1089,21 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
           {exception.resolution.status === "excluded" && <p className="exclusion-reason">
             Excluded: {exception.resolution.reason} {exception.resolution.resolved_at && <small>· {new Date(exception.resolution.resolved_at).toLocaleString()}</small>}
           </p>}
-          {!editing && <div className="misfit-source-lines">{exception.canonical_records.map((record, index) => <div key={index}>
+          <div className="misfit-source-lines">{exception.canonical_records.map((record, index) => <div key={index}>
             <span>{record.account_full_name}</span><strong>{record.amount_decimal}</strong>
             <small>{record.memo || "No memo"}{record.value_decimal != null && ` · value ${record.value_decimal}`}</small>
-          </div>)}</div>}
-          {!editing && <details className="misfit-source-identity"><summary>Complete source identity</summary>
+          </div>)}</div>
+          <details className="misfit-source-identity"><summary>Complete source identity</summary>
             <dl><dt>Source system</dt><dd>{exception.source_identity.source_system}</dd>
               <dt>Source file</dt><dd>{exception.source_identity.source_file.name ?? "Unnamed source"}</dd>
               <dt>File SHA-256</dt><dd><code>{exception.source_identity.source_file.sha256}</code></dd>
               <dt>Transaction ID</dt><dd><code>{externalId}</code></dd>
               <dt>Line IDs</dt><dd>{exception.source_identity.line_external_ids.map((id) => id ?? "(none)").join(", ")}</dd></dl>
-          </details>}
-          {editing ? <MisfitEditor exception={exception} accounts={accounts} currencies={currencies} token={token}
-            importJobId={job.import_job_id} onSaved={changed} onCancel={() => setEditingExternalId(null)} />
-            : <div className="misfit-actions"><button className="secondary" onClick={() => setEditingExternalId(externalId)}>
+          </details>
+          <div className="misfit-actions"><button className="secondary" onClick={() => setEditingExternalId(externalId)}>
               {exception.resolution.status === "excluded" ? "Reopen and correct" : "Fix transaction"}</button>
               {exception.resolution.status === "unresolved" && <button className="danger-link" disabled={Boolean(busy)}
-                onClick={() => void exclude(exception)}>Exclude with reason</button>}</div>}
+                onClick={() => void exclude(exception)}>Exclude with reason</button>}</div>
         </article>;
       })}
         {!visible.length && busy !== "load" && <p className="misfits-empty">No exceptions match this view.</p>}
@@ -730,12 +1111,24 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       {nextCursor && <button type="button" className="secondary" disabled={Boolean(busy)}
         onClick={() => void load(true)}>{busy === "load" ? "Loading…" : "Load 100 more"}</button>}
     </>}
+    {job && editingException && <TransactionEditorModal eyebrow="Import correction"
+      title={editingException.transaction_context.description || "Edit transaction"}
+      onClose={() => setEditingExternalId(null)}>
+      <MisfitEditor key={editingException.source_identity.transaction_external_id}
+        exception={editingException} accounts={accounts} currencies={currencies} token={token}
+        importJobId={job.import_job_id} onSaved={changed} onCancel={() => setEditingExternalId(null)} />
+    </TransactionEditorModal>}
+    {job && restartOpen && <ImportRestartDialog job={job} token={token} onClose={() => setRestartOpen(false)}
+      onRestarted={async () => {
+        setPreview(null); setJob(null); setExceptions([]); setNextCursor(null); setEditingExternalId(null);
+        setSelectedJobId(null); await onChanged();
+      }} />}
   </section>;
 }
 
-function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
+function Ledger({ transactions, selected, onSelect, onVerify, onDelete, verification }: {
   transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void;
-  onVerify: () => void; verification: string;
+  onVerify: () => void; onDelete: (id: number) => void; verification: string;
 }) {
   return <section className="ledger card"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Ledger</h2></div>
     <button className="secondary" onClick={onVerify}>Verify ledger</button></div>{verification && <p className="verification">{verification}</p>}
@@ -743,7 +1136,9 @@ function Ledger({ transactions, selected, onSelect, onVerify, verification }: {
       className={`transaction-row ${selected?.id === transaction.id ? "selected" : ""}`} onClick={() => onSelect(transaction.id)}>
       <span>{transaction.date}</span><strong>{transaction.description || "Untitled transaction"}</strong><small>{transaction.lineItemCount} lines · {transaction.state}</small>
     </button>)}</div>
-    <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p></div><span>#{selected.id}</span></div>
+    <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p></div>
+      <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="danger-link"
+        onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
       {selected.lineItems.map((line) => <div className="detail-line" key={line.id}><div><strong>{line.accountName}</strong><small>{line.memo}</small>
         {line.tags.length > 0 && <div className="tag-list">{line.tags.map((tag) => <span key={`${tag.key}:${tag.value}`}>{tag.key}:{tag.value}</span>)}</div>}</div>
         <b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
@@ -896,6 +1291,172 @@ function displayDate(value: string | null) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
+function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, token, onClose, onDeleted }: {
+  scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean; token: string;
+  onClose: () => void; onDeleted: () => Promise<void>;
+}) {
+  const [preview, setPreview] = useState<TransactionDeletionPreview | null>(null);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    api<TransactionDeletionPreview>("/data/transactions/delete-preview", {
+      method: "POST", body: JSON.stringify({ scope,
+        transactionIds: scope === "selected" ? transactionIds : [], deleteAccounts }),
+    }, token).then(setPreview).catch((nextError) => setError(errorMessage(nextError))).finally(() => setBusy(false));
+  }, [scope, token, transactionIds, deleteAccounts]);
+
+  function requiredConfirmation(candidate: TransactionDeletionPreview) {
+    if (candidate.summary.deleteAccounts) {
+      return `DELETE ${candidate.summary.transactionCount} TRANSACTIONS AND ${candidate.summary.accountCount} ACCOUNTS`;
+    }
+    return `DELETE ${candidate.summary.transactionCount} ${candidate.summary.transactionCount === 1 ? "TRANSACTION" : "TRANSACTIONS"}`;
+  }
+
+  async function commit() {
+    if (!preview) return;
+    const required = requiredConfirmation(preview);
+    if (confirmation !== required) return;
+    setBusy(true); setError("");
+    try {
+      await api("/data/transactions/delete-commit", { method: "POST", body: JSON.stringify({
+        deletionPlanId: preview.deletionPlanId, previewDigest: preview.previewDigest,
+      }) }, token);
+      await onDeleted(); onClose();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(false); }
+  }
+
+  const required = preview ? requiredConfirmation(preview) : "";
+  return <TransactionEditorModal eyebrow="Danger zone"
+    title={scope === "all" ? deleteAccounts ? "Clear ledger and accounts" : "Clear ledger transactions"
+      : "Delete transaction"} onClose={onClose}>
+    {busy && !preview && <p className="muted">Preparing an exact deletion preview…</p>}
+    {preview && <>
+      <div className="deletion-summary">
+        <div><span>Transactions</span><strong>{preview.summary.transactionCount}</strong></div>
+        <div><span>Line items</span><strong>{preview.summary.lineItemCount}</strong></div>
+        <div><span>Tags</span><strong>{preview.summary.tagAssignmentCount}</strong></div>
+        {preview.summary.deleteAccounts
+          ? <div><span>Accounts</span><strong>{preview.summary.accountCount}</strong></div>
+          : <div><span>Legacy rates</span><strong>{preview.summary.exchangeRateCount}</strong></div>}
+      </div>
+      <p className="deletion-explanation">{preview.summary.deleteAccounts
+        ? `The complete chart of accounts and ${preview.summary.balanceAssertionCount} known-balance records will also be removed. Currencies, import history, and your login remain.`
+        : "Accounts and currencies are preserved. Imported-job references are safely reopened or marked deleted."}</p>
+      <label>Type <code>{required}</code> to confirm
+        <input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
+      </label>
+      <div className="destructive-actions"><button type="button" className="link-button" onClick={onClose}>Cancel</button>
+        <button type="button" className="danger-button" disabled={busy || confirmation !== required}
+          onClick={() => void commit()}>{busy ? "Deleting…" : "Permanently delete"}</button></div>
+    </>}
+    {error && <p className="error">{error}</p>}
+  </TransactionEditorModal>;
+}
+
+function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
+  user: User; token: string;
+  onClearLedger: (deleteAccounts: boolean) => void; onDeleted: () => void; onClose: () => void;
+}) {
+  const [summary, setSummary] = useState<DataSummary | null>(null);
+  const [deleteAccounts, setDeleteAccounts] = useState(false);
+  const [password, setPassword] = useState("");
+  const [preview, setPreview] = useState<UserDeletionPreview | null>(null);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState<"preview" | "delete" | "">("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api<{ summary: DataSummary }>("/data/summary", {}, token)
+      .then((result) => setSummary(result.summary))
+      .catch((nextError) => setError(errorMessage(nextError)));
+  }, [token]);
+
+  async function previewDeletion(event: FormEvent) {
+    event.preventDefault(); setBusy("preview"); setError("");
+    try {
+      setPreview(await api<UserDeletionPreview>("/data/user/delete-preview", {
+        method: "POST", body: JSON.stringify({ currentPassword: password }),
+      }, token));
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function deleteUser() {
+    if (!preview || confirmation !== preview.confirmationText) return;
+    setBusy("delete"); setError("");
+    try {
+      await api("/data/user/delete-commit", { method: "POST", body: JSON.stringify({
+        deletionPlanId: preview.deletionPlanId,
+        previewDigest: preview.previewDigest,
+        currentPassword: password,
+        confirmationText: confirmation,
+      }) }, token);
+      onDeleted();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target === event.currentTarget) onClose();
+  }}><section className="agent-dialog account-data-dialog" role="dialog" aria-modal="true" aria-labelledby="account-data-title">
+    <div className="dialog-heading"><div><p className="eyebrow">Settings</p><h2 id="account-data-title">Account &amp; data</h2></div>
+      <button type="button" className="dialog-close" aria-label="Close account and data settings" onClick={onClose}>×</button></div>
+    <section className="settings-section"><h3>Ledger data</h3>
+      <p>{summary ? `${summary.transactionCount} transactions · ${summary.accountCount} accounts · ${summary.importJobCount} import jobs`
+        : "Counting all stored accounting data…"}</p>
+      <label className="checkbox-field data-delete-choice"><input type="checkbox" checked={deleteAccounts}
+        onChange={(event) => setDeleteAccounts(event.target.checked)} />
+        Also delete the complete chart of accounts and known balances</label>
+      <button type="button" className="danger-button"
+        disabled={!summary || (summary.transactionCount === 0 && (!deleteAccounts || summary.accountCount === 0))}
+        onClick={() => onClearLedger(deleteAccounts)}>{deleteAccounts
+          ? "Review ledger and account deletion" : "Review ledger transaction deletion"}</button>
+      <small>{deleteAccounts ? "Currencies, import history, and your login remain."
+        : "Accounts, currencies, import history, and your login remain."}</small>
+    </section>
+    <section className="settings-section danger-zone"><h3>Delete user account</h3>
+      <p>Permanently deletes {user.email} and all accounting data owned by it.</p>
+      {!preview ? <form onSubmit={previewDeletion}><label>Current password
+        <input type="password" required autoComplete="current-password" value={password}
+          onChange={(event) => setPassword(event.target.value)} /></label>
+        <button className="danger-button" disabled={Boolean(busy)}>{busy === "preview" ? "Preparing preview…" : "Review complete account deletion"}</button>
+      </form> : <>
+        <div className="deletion-summary">
+          <div><span>Transactions</span><strong>{preview.summary.transactionCount}</strong></div>
+          <div><span>Accounts</span><strong>{preview.summary.accountCount}</strong></div>
+          <div><span>Import jobs</span><strong>{preview.summary.importJobCount}</strong></div>
+          <div><span>API tokens</span><strong>{preview.summary.apiTokenCount}</strong></div>
+        </div>
+        <label>Type <code>{preview.confirmationText}</code>
+          <input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
+        </label>
+        <button type="button" className="danger-button" disabled={Boolean(busy) || confirmation !== preview.confirmationText}
+          onClick={() => void deleteUser()}>{busy === "delete" ? "Deleting account…" : "Permanently delete my account"}</button>
+      </>}
+      {error && <p className="error">{error}</p>}
+    </section>
+  </section></div>;
+}
+
+function AppMenu({ open, onToggle, onAgentAccess, onAccountData, onSignOut }: {
+  open: boolean; onToggle: () => void; onAgentAccess: () => void; onAccountData: () => void; onSignOut: () => void;
+}) {
+  return <div className="app-menu"><button type="button" className="header-menu-button" aria-label="Open application menu"
+    aria-expanded={open} onClick={onToggle}><span aria-hidden="true">☰</span></button>
+    {open && <div className="app-menu-popover" role="menu">
+      <button type="button" role="menuitem" onClick={onAccountData}>Account &amp; data</button>
+      <button type="button" role="menuitem" onClick={onAgentAccess}>Agent access</button>
+      <button type="button" role="menuitem" onClick={onSignOut}>Sign out</button>
+    </div>}
+  </div>;
+}
+
 function AgentAccessDialog({ loginToken, onClose }: { loginToken: string; onClose: () => void }) {
   const [credentials, setCredentials] = useState<ApiTokenCredential[]>([]);
   const [name, setName] = useState("My accounting agent");
@@ -1006,6 +1567,11 @@ export default function App() {
   const [showTransactionComposer, setShowTransactionComposer] = useState(false);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
+  const [showAccountData, setShowAccountData] = useState(false);
+  const [showAppMenu, setShowAppMenu] = useState(false);
+  const [deletionRequest, setDeletionRequest] = useState<{
+    scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
+  } | null>(null);
   const [showMisfits, setShowMisfits] = useState(() => window.location.hash === "#import-misfits");
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
@@ -1096,7 +1662,8 @@ export default function App() {
   }
   function logout() {
     localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null);
-    setImportJobs([]); setShowMisfits(false);
+    setImportJobs([]); setTransactions([]); setSelected(null); setShowMisfits(false);
+    setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
   }
   async function refreshAfterTransaction() {
     await refresh();
@@ -1120,8 +1687,10 @@ export default function App() {
   if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
-    <button className="header-action" onClick={() => setShowAgentAccess(true)}>Agent access</button>
-    <button className="link-button" onClick={logout}>Sign out</button></div></header>
+    <AppMenu open={showAppMenu} onToggle={() => setShowAppMenu((current) => !current)}
+      onAccountData={() => { setShowAppMenu(false); setShowAccountData(true); }}
+      onAgentAccess={() => { setShowAppMenu(false); setShowAgentAccess(true); }}
+      onSignOut={logout} /></div></header>
     <main className="workspace"><AccountPanel accounts={accounts} currencies={currencies}
       importJobs={importJobs} selectedAccountId={selectedAccountId} misfitsSelected={showMisfits} token={token}
       onSelectAccount={selectAccount} onSelectMisfits={selectMisfits} onChanged={refresh} />
@@ -1133,8 +1702,19 @@ export default function App() {
               onShowAll={() => setSelectedAccountId(null)} onNewTransaction={() => setShowTransactionComposer(true)}
               onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
+              onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id], deleteAccounts: false })}
               onVerify={() => void verify()} verification={verification} />}</div></main>
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
+    {showAccountData && <AccountDataDialog user={user} token={token} onClose={() => setShowAccountData(false)}
+      onClearLedger={(deleteAccounts) => { setShowAccountData(false);
+        setDeletionRequest({ scope: "all", transactionIds: [], deleteAccounts }); }}
+      onDeleted={logout} />}
+    {deletionRequest && <TransactionDeletionDialog scope={deletionRequest.scope}
+      transactionIds={deletionRequest.transactionIds} deleteAccounts={deletionRequest.deleteAccounts}
+      token={token} onClose={() => setDeletionRequest(null)}
+      onDeleted={async () => {
+        setSelected(null); await refresh(); setAccountLedgerRefresh((current) => current + 1);
+      }} />}
     {showTransactionComposer && <TransactionComposerDialog accounts={accounts} currencies={currencies}
       initialAccountId={selectedAccount && !selectedAccount.placeholder && !selectedAccount.archivedAt ? selectedAccount.id : null}
       token={token} onCreated={refreshAfterTransaction} onClose={() => setShowTransactionComposer(false)} />}

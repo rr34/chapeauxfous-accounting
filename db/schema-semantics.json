@@ -8,8 +8,8 @@
   "database": {
     "engine": "mariadb",
     "name": "cfaccounting",
-    "schemaVersion": 13,
-    "schemaFingerprint": "42f91dce2754a1f4c7755ab7aaf75edd0975c069b4226070870c7520ff3d9ce2",
+    "schemaVersion": 15,
+    "schemaFingerprint": "6ec283a34d529a3fcdd308e29766ad431ad4940295fa0451e6cd077c5e5a4439",
     "extractedAt": "2026-08-27T20:59:50.879Z"
   },
   "instructions": {
@@ -377,7 +377,7 @@
             "present": true,
             "name": "import_kind",
             "ordinal": 2,
-            "type": "enum('account_tree','transactions','account_delete','transaction_delete')",
+            "type": "enum('account_tree','transactions','account_delete','transaction_delete','import_restart','user_delete')",
             "nullable": false,
             "default": null,
             "primaryKeyPosition": 0,
@@ -387,7 +387,9 @@
               "account_tree",
               "transactions",
               "account_delete",
-              "transaction_delete"
+              "transaction_delete",
+              "import_restart",
+              "user_delete"
             ]
           },
           "semantics": {
@@ -399,7 +401,9 @@
               "account_tree": "A complete account-tree import plan.",
               "transactions": "A complete transaction-batch import plan.",
               "account_delete": "A verified single-account permanent-deletion plan.",
-              "transaction_delete": "A verified permanent-deletion plan bound to an exact transaction set."
+              "transaction_delete": "A verified permanent-deletion plan bound to an exact transaction set.",
+              "import_restart": "A verified plan that removes one import job and only the ledger transactions that job created.",
+              "user_delete": "A password-verified plan that permanently removes one user and all accounting data they own."
             },
             "synonyms": [
               "plan kind",
@@ -2714,6 +2718,7 @@
         "routingWeight": 0.8,
         "importantRules": [
           "amount_units is a signed integer in the referenced account's currency.",
+          "value_units is the signed value in the containing transaction's valuation currency and determines this line's implied exchange rate.",
           "Every transaction requires at least two line items.",
           "The application centrally validates that transaction values sum exactly to zero in the valuation currency."
         ],
@@ -2801,11 +2806,47 @@
             "sensitivity": "Private accounting data belonging to the authenticated user."
           }
         },
+        "value_units": {
+          "mechanics": {
+            "present": true,
+            "name": "value_units",
+            "ordinal": 3,
+            "type": "bigint(20)",
+            "nullable": true,
+            "default": "NULL",
+            "primaryKeyPosition": 0,
+            "generated": false,
+            "hidden": false,
+            "allowedValues": []
+          },
+          "semantics": {
+            "inheritsFrom": null,
+            "meaning": "Signed value of this posting in the containing transaction's valuation currency.",
+            "units": "Signed integer valuation units interpreted using the transaction valuation currency's scale.",
+            "format": "base-10 integer",
+            "allowedValueMeanings": {},
+            "synonyms": [
+              "valuation value",
+              "line value"
+            ],
+            "keywords": [
+              "exchange rate",
+              "valuation"
+            ],
+            "routingWeight": 0.7,
+            "examples": [],
+            "importantRules": [
+              "For native-currency lines this equals amount_units.",
+              "For foreign-currency lines the ratio between value_units and amount_units is the line's exchange rate."
+            ],
+            "sensitivity": "Private accounting data belonging to the authenticated user."
+          }
+        },
         "memo": {
           "mechanics": {
             "present": true,
             "name": "memo",
-            "ordinal": 3,
+            "ordinal": 4,
             "type": "text",
             "nullable": true,
             "default": "NULL",
@@ -2832,7 +2873,7 @@
           "mechanics": {
             "present": true,
             "name": "account_id",
-            "ordinal": 4,
+            "ordinal": 5,
             "type": "int(11)",
             "nullable": false,
             "default": null,
@@ -2859,7 +2900,7 @@
           "mechanics": {
             "present": true,
             "name": "reconciliation_state",
-            "ordinal": 5,
+            "ordinal": 6,
             "type": "enum('unreconciled','cleared','reconciled')",
             "nullable": false,
             "default": "'unreconciled'",
@@ -2890,7 +2931,7 @@
           "mechanics": {
             "present": true,
             "name": "reconciled_at",
-            "ordinal": 6,
+            "ordinal": 7,
             "type": "date",
             "nullable": true,
             "default": "NULL",
@@ -2917,7 +2958,7 @@
           "mechanics": {
             "present": true,
             "name": "source_id",
-            "ordinal": 7,
+            "ordinal": 8,
             "type": "varchar(128)",
             "nullable": true,
             "default": "NULL",

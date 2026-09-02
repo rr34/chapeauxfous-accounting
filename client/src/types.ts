@@ -101,6 +101,7 @@ export type TransactionDetail = {
   lineItems: Array<{
     id: number;
     amountUnits: string;
+    valueUnits: string | null;
     memo: string | null;
     accountId: number;
     accountName: string;

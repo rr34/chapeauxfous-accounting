@@ -91,7 +91,7 @@ async function ledgerSnapshot(connection, personId, { lock = false } = {}) {
     [personId],
   );
   const [lines] = await connection.query(
-    `SELECT li.line_item_id, li.transaction_id, li.amount_units, li.memo, li.account_id,
+    `SELECT li.line_item_id, li.transaction_id, li.amount_units, li.value_units, li.memo, li.account_id,
             li.reconciliation_state, li.reconciled_at, li.source_id
        FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
       WHERE t.owner_person_id = ? ORDER BY li.transaction_id, li.line_item_id${suffix}`,
@@ -129,7 +129,7 @@ function snapshotHash(snapshot) {
   return sha256(JSON.stringify(snapshot));
 }
 
-function summarize(scope, selected) {
+function summarize(scope, selected, { deleteAccounts = false, accountCount = 0, assertionCount = 0 } = {}) {
   const dates = selected.transactions.map((row) => String(row.TransactionDate).slice(0, 10)).sort();
   const states = { draft: 0, posted: 0, voided: 0 };
   selected.transactions.forEach((row) => { states[String(row.TransactionState)] += 1; });
@@ -141,19 +141,29 @@ function summarize(scope, selected) {
     exchangeRateCount: selected.rates.length,
     tagAssignmentCount: selected.tags.length,
     affectedAccountCount: affectedAccountIds.size,
+    deleteAccounts,
+    accountCount: deleteAccounts ? accountCount : 0,
+    balanceAssertionCount: deleteAccounts ? assertionCount : 0,
     transactionStates: states,
     dateRange: { first: dates[0] ?? null, last: dates.at(-1) ?? null },
   };
 }
 
-async function accountFingerprint(connection, personId, lock = false) {
-  const [rows] = await connection.query(
+async function accountDataFingerprint(connection, personId, lock = false) {
+  const [accounts] = await connection.query(
     `SELECT account_id, AccountName, description, is_placeholder, parent_account_id,
             AccountType, account_currency_id, archived_at, source_system, source_id
        FROM accounts WHERE owner_person_id = ? ORDER BY account_id${lock ? " FOR UPDATE" : ""}`,
     [personId],
   );
-  return { count: rows.length, sha256: sha256(JSON.stringify(rows)) };
+  const [assertions] = await connection.query(
+    `SELECT account_balance_assertion_id, account_id, balance_date, balance_units, note
+       FROM account_balance_assertions WHERE owner_person_id = ?
+      ORDER BY account_balance_assertion_id${lock ? " FOR UPDATE" : ""}`,
+    [personId],
+  );
+  return { count: accounts.length, assertionCount: assertions.length,
+    sha256: sha256(JSON.stringify({ accounts, assertions })) };
 }
 
 async function invalidate(connection, planId, personId, code) {
@@ -165,8 +175,9 @@ async function invalidate(connection, planId, personId, code) {
   );
 }
 
-export async function previewTransactionDeletion({ pool, personId, scope, transactionIds = [] }) {
+export async function previewTransactionDeletion({ pool, personId, scope, transactionIds = [], deleteAccounts = false }) {
   const normalizedScope = String(scope ?? "").trim();
+  const removeAccounts = deleteAccounts === true;
   if (!["all", "selected"].includes(normalizedScope)) {
     throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "scope must be all or selected.");
   }
@@ -176,6 +187,9 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
   }
   if (normalizedScope === "selected" && (!requestedIds.length || requestedIds.length > 1000)) {
     throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "selected scope requires between 1 and 1,000 transaction IDs.");
+  }
+  if (normalizedScope === "selected" && removeAccounts) {
+    throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Accounts can be deleted only when clearing the whole ledger.");
   }
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
@@ -188,12 +202,17 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "One or more selected transactions do not exist or are not owner-scoped.",
         { missingTransactionIds: ids.filter((id) => !found.has(id)) });
     }
-    if (!ids.length) throw planError("TRANSACTIONS_REQUIRED", "There are no owner-scoped transactions to delete.");
-    const summary = summarize(normalizedScope, selected);
-    const payload = { scope: normalizedScope, transactionIds: ids, snapshotSha256: snapshotHash(selected) };
+    const accountData = await accountDataFingerprint(connection, personId);
+    if (!ids.length && !(removeAccounts && accountData.count > 0)) {
+      throw planError("TRANSACTIONS_REQUIRED", "There are no owner-scoped transactions or requested accounts to delete.");
+    }
+    const summary = summarize(normalizedScope, selected, { deleteAccounts: removeAccounts,
+      accountCount: accountData.count, assertionCount: accountData.assertionCount });
+    const payload = { scope: normalizedScope, transactionIds: ids, snapshotSha256: snapshotHash(selected),
+      deleteAccounts: removeAccounts, accountDataSha256: removeAccounts ? accountData.sha256 : null };
     const preview = { ...summary, targetDigest: `sha256:${sha256(JSON.stringify(ids))}`,
       effect: "permanently_delete_exact_transactions_and_dependent_postings",
-      accountsPreserved: true, accountTreeChanged: false };
+      accountsPreserved: !removeAccounts, accountTreeChanged: removeAccounts };
     const planId = randomUUID();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
     const payloadJson = JSON.stringify(payload);
@@ -222,10 +241,12 @@ export async function refreshTransactionDeletionPlan({ pool, personId, deletionP
     }
     const payload = parseJson(row.payload_json, "payload");
     const transactionIds = normalizeIds(payload.transactionIds);
-    if (!["all", "selected"].includes(payload.scope) || !transactionIds.length) {
+    if (!["all", "selected"].includes(payload.scope)
+      || (!transactionIds.length && payload.deleteAccounts !== true)) {
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Transaction-deletion plan payload is invalid.");
     }
-    return { scope: payload.scope, transactionIds: payload.scope === "selected" ? transactionIds : [] };
+    return { scope: payload.scope, transactionIds: payload.scope === "selected" ? transactionIds : [],
+      deleteAccounts: payload.deleteAccounts === true };
   });
   return previewTransactionDeletion({ pool, personId, ...request });
 }
@@ -325,6 +346,11 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     }
     const payload = parseJson(row.payload_json, "payload");
     const transactionIds = normalizeIds(payload.transactionIds);
+    const deleteAccounts = payload.deleteAccounts === true;
+    if (deleteAccounts && payload.scope !== "all") {
+      await invalidate(connection, planId, personId, "INVALID_ACCOUNT_DELETE_SCOPE");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "Account deletion requires whole-ledger scope.") };
+    }
     const snapshot = await ledgerSnapshot(connection, personId, { lock: true });
     const currentIds = snapshot.transactions.map((item) => Number(item.transaction_id));
     if (payload.scope === "all" && JSON.stringify(currentIds) !== JSON.stringify(transactionIds)) {
@@ -346,7 +372,11 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
         "A transaction outside the plan reverses a planned transaction.",
         { transactionIds: externalReversals.map((item) => Number(item.transaction_id)) }) };
     }
-    const accountsBefore = await accountFingerprint(connection, personId, true);
+    const accountsBefore = await accountDataFingerprint(connection, personId, true);
+    if (deleteAccounts && accountsBefore.sha256 !== payload.accountDataSha256) {
+      await invalidate(connection, planId, personId, "ACCOUNT_DATA_CHANGED");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The chart of accounts changed after preview.") };
+    }
     await createTargetTable(connection, transactionIds);
     try {
       const importReferences = await updateImportReferences(connection);
@@ -393,19 +423,39 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
          WHERE t.owner_person_id = ?`, [personId],
       );
       if (remaining.length) throw new Error("Deleted transactions remained visible after deletion.");
-      const accountsAfter = await accountFingerprint(connection, personId);
-      if (accountsAfter.count !== accountsBefore.count || accountsAfter.sha256 !== accountsBefore.sha256) {
-        throw new Error("Account tree changed during transaction deletion.");
+      let deletedAccountCount = 0;
+      let deletedAssertionCount = 0;
+      if (deleteAccounts) {
+        const [assertionDelete] = await connection.query(
+          "DELETE FROM account_balance_assertions WHERE owner_person_id = ?", [personId],
+        );
+        await connection.query("UPDATE accounts SET parent_account_id = NULL WHERE owner_person_id = ?", [personId]);
+        const [accountDelete] = await connection.query(
+          "DELETE FROM accounts WHERE owner_person_id = ?", [personId],
+        );
+        deletedAssertionCount = Number(assertionDelete.affectedRows);
+        deletedAccountCount = Number(accountDelete.affectedRows);
+        if (deletedAssertionCount !== accountsBefore.assertionCount || deletedAccountCount !== accountsBefore.count) {
+          throw new Error("Account deletion affected counts did not match the bound preview.");
+        }
+      }
+      const accountsAfter = await accountDataFingerprint(connection, personId);
+      if (deleteAccounts ? accountsAfter.count !== 0 || accountsAfter.assertionCount !== 0
+        : accountsAfter.count !== accountsBefore.count || accountsAfter.sha256 !== accountsBefore.sha256) {
+        throw new Error(deleteAccounts ? "Deleted accounts remained visible after deletion."
+          : "Account tree changed during transaction deletion.");
       }
       const planIdentity = identity(row);
       const result = {
         readyToCommit: false, status: "committed", ...planIdentity,
         deleted: { transactionCount: Number(transactionDelete.affectedRows),
           lineItemCount: Number(lineDelete.affectedRows), exchangeRateCount: Number(rateDelete.affectedRows),
-          tagAssignmentCount: Number(tagDelete.affectedRows) },
+          tagAssignmentCount: Number(tagDelete.affectedRows),
+          ...(deleteAccounts ? { accountCount: deletedAccountCount,
+            balanceAssertionCount: deletedAssertionCount } : {}) },
         importReferences,
-        verification: { targetTransactionsAbsent: true, accountTreeUnchanged: true,
-          accountCount: accountsAfter.count },
+        verification: { targetTransactionsAbsent: true, accountTreeUnchanged: !deleteAccounts,
+          accountsAbsent: deleteAccounts, accountCount: accountsAfter.count },
         alreadyCommitted: false,
       };
       await connection.query(

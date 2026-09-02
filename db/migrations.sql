@@ -7,6 +7,41 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0015: add-data-deletion-plans
+-- writer downtime: not required; destructive data actions must remain
+-- unavailable until this migration completes.
+-- deployment order: apply before exposing import_restart or user_delete plans.
+-- locking: the enum change requires a brief metadata lock on the short-lived
+-- accounting_import_plans workflow table.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE accounting_import_plans
+  MODIFY import_kind
+    ENUM('account_tree','transactions','account_delete','transaction_delete','import_restart','user_delete') NOT NULL;
+
+-- end migration 0015
+
+-- migration 0014: store-line-valuation-values
+-- writer downtime: not required; the nullable column is additive.
+-- deployment order: apply before accepting imports with distinct per-line
+-- exchange rates.
+-- locking: adding the column requires a brief metadata lock on line_items.
+-- recovery: the new column is nullable and does not alter existing amounts;
+-- restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE line_items
+  ADD COLUMN IF NOT EXISTS value_units BIGINT NULL AFTER amount_units;
+
+-- Native-currency values are exact and can be populated without rounding.
+UPDATE line_items li
+JOIN accounts a ON a.account_id = li.account_id
+JOIN transactions t ON t.transaction_id = li.transaction_id
+   SET li.value_units = li.amount_units
+ WHERE li.value_units IS NULL
+   AND a.account_currency_id = t.valuation_currency_id;
+
+-- end migration 0014
+
 -- migration 0013: add-transaction-deletion-plans
 -- writer downtime: not required; transaction deletion must remain unavailable
 -- until this migration completes.

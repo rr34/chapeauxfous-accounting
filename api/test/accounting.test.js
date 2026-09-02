@@ -173,6 +173,22 @@ test("BTC purchased with PEN balances without USD", async () => {
   assert.deepEqual(result.foreignCurrencyIds, [2]);
 });
 
+test("explicit line values allow different rates for the same foreign currency", async () => {
+  const result = await validateTransaction(fakeConnection({
+    lines: [
+      { line_item_id: 1, amount_units: "1000", value_units: "10000", account_id: 10,
+        account_owner_person_id: 7, account_currency_id: 2 },
+      { line_item_id: 2, amount_units: "-500", value_units: "-6000", account_id: 10,
+        account_owner_person_id: 7, account_currency_id: 2 },
+      { line_item_id: 3, amount_units: "-4000", value_units: "-4000", account_id: 11,
+        account_owner_person_id: 7, account_currency_id: 3 },
+    ],
+    rates: [],
+  }), 44, 7);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.foreignCurrencyIds, [2]);
+});
+
 test("posting fails when a foreign commodity has no transaction rate", async () => {
   await assert.rejects(
     validateTransaction(fakeConnection({

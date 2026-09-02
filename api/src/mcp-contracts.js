@@ -132,6 +132,7 @@ export const transactionListItemSchema = z.object({
 const transactionLineSchema = z.object({
   id: z.number().int().positive(),
   amountUnits: z.string().regex(/^-?\d+$/),
+  valueUnits: z.string().regex(/^-?\d+$/).nullable(),
   memo: z.string().nullable(),
   accountId: z.number().int().positive(),
   accountName: z.string().min(1),

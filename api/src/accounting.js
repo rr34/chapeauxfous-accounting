@@ -402,7 +402,7 @@ export async function validateTransaction(connection, transactionId, personId, {
   if (!transaction) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
 
   const [lines] = await connection.query(
-    `SELECT li.line_item_id, li.amount_units, li.account_id,
+    `SELECT li.line_item_id, li.amount_units, li.value_units, li.account_id,
             a.owner_person_id AS account_owner_person_id, a.account_currency_id, a.is_placeholder
        FROM line_items li
        JOIN accounts a ON a.account_id = li.account_id
@@ -429,6 +429,35 @@ export async function validateTransaction(connection, transactionId, personId, {
   const usedForeignCurrencies = new Set(
     lines.map((line) => Number(line.account_currency_id)).filter((currencyId) => currencyId !== valuationCurrencyId),
   );
+  if (lines.every((line) => line.value_units != null)) {
+    let valueTotal = 0n;
+    for (const line of lines) {
+      const amount = BigInt(line.amount_units);
+      const value = BigInt(line.value_units);
+      const currencyId = Number(line.account_currency_id);
+      if (currencyId === valuationCurrencyId && value !== amount) {
+        throw applicationError("A native-currency line's amount and value must match.", 400, "NATIVE_VALUE_MISMATCH", {
+          lineItemId: Number(line.line_item_id), amountUnits: amount.toString(), valueUnits: value.toString(),
+        });
+      }
+      if (currencyId !== valuationCurrencyId && ((amount === 0n) !== (value === 0n))) {
+        throw applicationError("A foreign line must have either two zero amount/value fields or two non-zero fields.",
+          400, "EXCHANGE_RATE_REQUIRED", { lineItemId: Number(line.line_item_id) });
+      }
+      if ((amount < 0n) !== (value < 0n)) {
+        throw applicationError("A line's amount and valuation value must have the same sign.",
+          400, "INVALID_EXCHANGE_RATE_SIGN", { lineItemId: Number(line.line_item_id) });
+      }
+      valueTotal += value;
+    }
+    if (valueTotal !== 0n) {
+      throw applicationError("Transaction values do not balance.", 400, "UNBALANCED_TRANSACTION", {
+        imbalanceUnits: valueTotal.toString(), valuationCurrencyId,
+      });
+    }
+    return { valid: true, lineItemCount: lines.length, valuationCurrencyId,
+      foreignCurrencyIds: [...usedForeignCurrencies] };
+  }
   const rateByCurrency = new Map();
   for (const rate of rates) {
     const fromCurrencyId = Number(rate.from_currency_id);
@@ -487,17 +516,20 @@ export async function createTransaction({ personId, description, transactionDate
         const accountId = Number(line.accountId);
         const amountUnits = integerString(line.amountUnits, "amountUnits");
         const [accountRows] = await connection.query(
-          "SELECT account_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
+          "SELECT account_id, account_currency_id, is_placeholder FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
           [accountId, personId],
         );
         if (!accountRows.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
         if (Boolean(accountRows[0].is_placeholder)) {
           throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
         }
+        const valueUnits = line.valueUnits != null
+          ? integerString(line.valueUnits, "valueUnits")
+          : Number(accountRows[0].account_currency_id) === Number(valuationCurrencyId) ? amountUnits : null;
         const [lineResult] = await connection.query(
-          `INSERT INTO line_items (transaction_id, amount_units, memo, account_id, source_id)
-           VALUES (?, ?, ?, ?, ?)`,
-          [transactionId, amountUnits, optionalBoundedText(line.memo, "line memo", 16000), accountId,
+          `INSERT INTO line_items (transaction_id, amount_units, value_units, memo, account_id, source_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [transactionId, amountUnits, valueUnits, optionalBoundedText(line.memo, "line memo", 16000), accountId,
             optionalBoundedText(line.sourceId, "line source id", 128)],
         );
         await attachTags(connection, personId, Number(lineResult.insertId), line.tags);
@@ -579,7 +611,7 @@ export async function getTransaction(pool, personId, transactionId) {
   );
   if (!transactions.length) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
   const [lines] = await pool.query(
-    `SELECT li.line_item_id, li.amount_units, li.memo, li.account_id, a.AccountName,
+    `SELECT li.line_item_id, li.amount_units, li.value_units, li.memo, li.account_id, a.AccountName,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale
        FROM line_items li JOIN accounts a ON a.account_id = li.account_id
        JOIN currencies c ON c.currency_id = a.account_currency_id
@@ -607,7 +639,8 @@ export async function getTransaction(pool, personId, transactionId) {
     id: Number(transactions[0].transaction_id), date: transactions[0].TransactionDate,
     description: transactions[0].description, state: transactions[0].TransactionState,
     valuationCurrencyId: Number(transactions[0].valuation_currency_id),
-    lineItems: lines.map((line) => ({ id: Number(line.line_item_id), amountUnits: String(line.amount_units), memo: line.memo,
+    lineItems: lines.map((line) => ({ id: Number(line.line_item_id), amountUnits: String(line.amount_units),
+      valueUnits: line.value_units == null ? null : String(line.value_units), memo: line.memo,
       accountId: Number(line.account_id), accountName: line.AccountName, currencyId: Number(line.account_currency_id),
       currencyCode: line.CurrencyAbbreviation.trim(), scale: Number(line.scale), tags: tagsByLine.get(Number(line.line_item_id)) ?? [] })),
     rates: rates.map((rate) => ({ id: Number(rate.xrate_id), fromUnits: String(rate.from_units),

@@ -8,10 +8,14 @@ import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
-  createAccount, createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
+  createAccount, createTransaction, getTransaction, listAccountLedger, listAccounts,
   listTransactions, updateAccount, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
+import { commitAccountDeletion, previewAccountDeletion } from "./account-delete.js";
+import { commitTransactionDeletion, previewTransactionDeletion } from "./transaction-delete.js";
+import { commitImportRestart, previewImportRestart } from "./import-restart.js";
+import { commitUserDeletion, getUserDataSummary, previewUserDeletion } from "./user-delete.js";
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
 import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, resolveArtifactUploadRoot } from "./artifact-upload.js";
 import {
@@ -103,12 +107,6 @@ app.post("/api/accounts", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createAccount({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
 });
 
-app.delete("/api/accounts/:accountId", requireAuth, async (req, res, next) => {
-  try {
-    res.json(await deleteAccount({ personId: req.auth.personId, accountId: req.params.accountId }));
-  } catch (error) { next(error); }
-});
-
 app.patch("/api/accounts/:accountId", requireAuth, async (req, res, next) => {
   try {
     res.json(await updateAccount({ personId: req.auth.personId, accountId: req.params.accountId, ...req.body }));
@@ -188,6 +186,70 @@ app.post("/api/transaction-import-jobs/:importJobId/commit", requireAuth, async 
   try {
     res.json({ job: await commitTransactionImportJob({ pool, personId: req.auth.personId,
       importJobId: req.params.importJobId, previewDigest: req.body?.previewDigest }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/transaction-import-jobs/:importJobId/restart-preview", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await previewImportRestart({ pool, personId: req.auth.personId,
+      importJobId: req.params.importJobId }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/transaction-import-jobs/:importJobId/restart-commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await commitImportRestart({ pool, personId: req.auth.personId,
+      restartPlanId: req.body?.restartPlanId, previewDigest: req.body?.previewDigest }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/transactions/delete-preview", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await previewTransactionDeletion({ pool, personId: req.auth.personId,
+      scope: req.body?.scope, transactionIds: req.body?.transactionIds,
+      deleteAccounts: req.body?.deleteAccounts }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/transactions/delete-commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await commitTransactionDeletion({ pool, personId: req.auth.personId,
+      deletionPlanId: req.body?.deletionPlanId, previewDigest: req.body?.previewDigest }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/accounts/:accountId/delete-preview", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await previewAccountDeletion({ pool, personId: req.auth.personId,
+      accountId: req.params.accountId }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/accounts/:accountId/delete-commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await commitAccountDeletion({ pool, personId: req.auth.personId,
+      deletionPlanId: req.body?.deletionPlanId }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/user/delete-preview", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await previewUserDeletion({ pool, personId: req.auth.personId,
+      currentPassword: req.body?.currentPassword }));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/data/summary", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ summary: await getUserDataSummary({ pool, personId: req.auth.personId }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/data/user/delete-commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await commitUserDeletion({ pool, personId: req.auth.personId,
+      deletionPlanId: req.body?.deletionPlanId, previewDigest: req.body?.previewDigest,
+      currentPassword: req.body?.currentPassword, confirmationText: req.body?.confirmationText }));
   } catch (error) { next(error); }
 });
 

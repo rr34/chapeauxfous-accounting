@@ -43,6 +43,8 @@ function deletionPool() {
       { account_id: 3, AccountName: "Tax", description: null, is_placeholder: 0, parent_account_id: null,
         AccountType: "expense", account_currency_id: 1, archived_at: null, source_system: null, source_id: null },
     ],
+    assertions: [{ account_balance_assertion_id: 30, account_id: 1, balance_date: "2026-01-03",
+      balance_units: "0", note: "opening check" }],
     importJobs: new Map([["job-committed", "committed"], ["job-preview", "review_ready"]]),
     importItems: [
       { import_job_id: "job-committed", transaction_external_id: "one", ledger_transaction_id: 10,
@@ -92,6 +94,7 @@ function deletionPool() {
           if (sql.includes("SELECT xrate_id, transaction_id")) return [state.rates.map((row) => ({ ...row }))];
           if (sql.includes("SELECT j.tagged_line_item_id")) return [state.tags.map((row) => ({ ...row }))];
           if (sql.includes("SELECT account_id, AccountName")) return [state.accounts.map((row) => ({ ...row }))];
+          if (sql.includes("SELECT account_balance_assertion_id")) return [state.assertions.map((row) => ({ ...row }))];
           if (sql.startsWith("DROP TEMPORARY TABLE")) {
             state.targetIds = new Set();
             return [{ affectedRows: 0 }];
@@ -145,6 +148,13 @@ function deletionPool() {
             state.transactions = state.transactions.filter((row) => !state.targetIds.has(Number(row.transaction_id)));
             return [{ affectedRows: before - state.transactions.length }];
           }
+          if (sql.startsWith("DELETE FROM account_balance_assertions")) {
+            const before = state.assertions.length; state.assertions = []; return [{ affectedRows: before }];
+          }
+          if (sql.startsWith("UPDATE accounts SET parent_account_id")) return [{ affectedRows: 0 }];
+          if (sql.startsWith("DELETE FROM accounts")) {
+            const before = state.accounts.length; state.accounts = []; return [{ affectedRows: before }];
+          }
           if (sql.includes("SELECT t.transaction_id FROM transactions")) {
             return [state.transactions.filter((row) => state.targetIds.has(Number(row.transaction_id)))];
           }
@@ -189,6 +199,23 @@ test("all-transaction deletion freezes scope, deletes dependencies, and proves a
       previewDigest: `sha256:${"0".repeat(64)}` }),
     (error) => error.code === "TRANSACTION_DELETE_PREVIEW_MISMATCH",
   );
+});
+
+test("whole-ledger deletion can explicitly include accounts and known balances", async () => {
+  const pool = deletionPool();
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "all", deleteAccounts: true });
+  assert.equal(preview.summary.transactionCount, 2);
+  assert.equal(preview.summary.deleteAccounts, true);
+  assert.equal(preview.summary.accountCount, 3);
+  assert.equal(preview.summary.balanceAssertionCount, 1);
+
+  const result = await commitTransactionDeletion({ pool, personId: 7,
+    deletionPlanId: preview.deletionPlanId, previewDigest: preview.previewDigest });
+  assert.equal(result.deleted.accountCount, 3);
+  assert.equal(result.deleted.balanceAssertionCount, 1);
+  assert.equal(result.verification.accountsAbsent, true);
+  assert.equal(pool.state.accounts.length, 0);
+  assert.equal(pool.state.assertions.length, 0);
 });
 
 test("preview digest mismatch preserves the ready plan and names the bound-argument recovery", async () => {

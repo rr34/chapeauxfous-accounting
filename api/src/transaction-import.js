@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { currencyKey } from "./currencies.js";
-import { decimalToUnits, greatestCommonDivisor } from "./money.js";
+import { decimalToUnits } from "./money.js";
 import { validateTransaction } from "./accounting.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
 import {
@@ -308,46 +308,22 @@ function resolveTransaction(input, context, conflictingExternalIds) {
     }
   }
 
-  const rates = [];
   if (valuationCurrency && resolvedLines.length === input.lineItems.length) {
-    const foreignByCurrency = new Map();
     for (const line of resolvedLines) {
       if (line.accountCurrencyId === valuationCurrency.id) continue;
-      if (!foreignByCurrency.has(line.accountCurrencyId)) foreignByCurrency.set(line.accountCurrencyId, []);
-      foreignByCurrency.get(line.accountCurrencyId).push(line);
-    }
-    for (const [fromCurrencyId, lines] of foreignByCurrency) {
-      const usable = lines.find((line) => BigInt(line.amountUnits) !== 0n && BigInt(line.valueUnits ?? "0") !== 0n);
-      if (!usable) {
-        errors.push(issue("EXCHANGE_RATE_REQUIRED", "A foreign currency has no non-zero amount/value pair from which to validate its rate.", {
-          currencyCode: lines[0].accountCurrencyCode,
+      const amount = BigInt(line.amountUnits);
+      const value = BigInt(line.valueUnits ?? "0");
+      if ((amount === 0n) !== (value === 0n)) {
+        errors.push(issue("EXCHANGE_RATE_REQUIRED", "A foreign line must have either two zero amount/value fields or two non-zero fields.", {
+          currencyCode: line.accountCurrencyCode, accountFullName: line.accountFullName,
         }));
         continue;
       }
-      const amount = BigInt(usable.amountUnits);
-      const value = BigInt(usable.valueUnits);
       if ((amount < 0n) !== (value < 0n)) {
         errors.push(issue("INVALID_EXCHANGE_RATE_SIGN", "Foreign amount and valuation value must have the same sign.", {
-          currencyCode: usable.accountCurrencyCode, accountFullName: usable.accountFullName,
+          currencyCode: line.accountCurrencyCode, accountFullName: line.accountFullName,
         }));
-        continue;
       }
-      const absoluteAmount = amount < 0n ? -amount : amount;
-      const absoluteValue = value < 0n ? -value : value;
-      const divisor = greatestCommonDivisor(absoluteAmount, absoluteValue);
-      const fromUnits = absoluteAmount / divisor;
-      const toUnits = absoluteValue / divisor;
-      const inconsistent = lines.find((line) =>
-        BigInt(line.amountUnits) * toUnits !== BigInt(line.valueUnits ?? "0") * fromUnits);
-      if (inconsistent) {
-        errors.push(issue("INCONSISTENT_EXCHANGE_RATE",
-          `Lines in ${inconsistent.accountCurrencyCode} do not use one consistent transaction exchange rate.`, {
-            currencyCode: inconsistent.accountCurrencyCode, accountFullName: inconsistent.accountFullName,
-          }));
-        continue;
-      }
-      rates.push({ fromCurrencyId, fromUnits: fromUnits.toString(), toCurrencyId: valuationCurrency.id,
-        toUnits: toUnits.toString() });
     }
 
     const valueTotal = resolvedLines.reduce((sum, line) => sum + BigInt(line.valueUnits ?? "0"), 0n);
@@ -365,7 +341,7 @@ function resolveTransaction(input, context, conflictingExternalIds) {
     valuationCurrencyId: valuationCurrency.id,
     valuationCurrencyCode: valuationCurrency.code,
     lineItems: resolvedLines,
-    rates,
+    rates: [],
   };
   resolved.fingerprint = fingerprintFor(resolved);
   return { input, resolved, errors: [] };
@@ -645,9 +621,9 @@ export async function insertImportedTransaction(connection, personId, sourceSyst
   const transactionId = Number(insert.insertId);
   for (const line of resolved.lineItems) {
     await connection.query(
-      `INSERT INTO line_items (transaction_id, amount_units, memo, account_id, source_id)
-       VALUES (?, ?, ?, ?, ?)`,
-      [transactionId, line.amountUnits, line.memo, line.accountId, line.externalId],
+      `INSERT INTO line_items (transaction_id, amount_units, value_units, memo, account_id, source_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [transactionId, line.amountUnits, line.valueUnits, line.memo, line.accountId, line.externalId],
     );
   }
   for (const rate of resolved.rates) {
