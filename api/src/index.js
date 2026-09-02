@@ -207,7 +207,8 @@ app.post("/api/data/transactions/delete-preview", requireAuth, async (req, res, 
   try {
     res.json(await previewTransactionDeletion({ pool, personId: req.auth.personId,
       scope: req.body?.scope, transactionIds: req.body?.transactionIds,
-      deleteAccounts: req.body?.deleteAccounts }));
+      deleteAccounts: req.body?.deleteAccounts,
+      deleteImportHistory: req.body?.deleteImportHistory }));
   } catch (error) { next(error); }
 });
 

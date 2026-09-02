@@ -35,6 +35,10 @@ type TransactionDeletionPreview = {
     deleteAccounts: boolean;
     accountCount: number;
     balanceAssertionCount: number;
+    deleteImportHistory: boolean;
+    importJobCount: number;
+    importItemCount: number;
+    importRequestCount: number;
     dateRange: { first: string | null; last: string | null };
   };
 };
@@ -1291,8 +1295,10 @@ function displayDate(value: string | null) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
-function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, token, onClose, onDeleted }: {
-  scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean; token: string;
+function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, deleteImportHistory,
+  token, onClose, onDeleted }: {
+  scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
+  deleteImportHistory: boolean; token: string;
   onClose: () => void; onDeleted: () => Promise<void>;
 }) {
   const [preview, setPreview] = useState<TransactionDeletionPreview | null>(null);
@@ -1306,15 +1312,15 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, toke
     started.current = true;
     api<TransactionDeletionPreview>("/data/transactions/delete-preview", {
       method: "POST", body: JSON.stringify({ scope,
-        transactionIds: scope === "selected" ? transactionIds : [], deleteAccounts }),
+        transactionIds: scope === "selected" ? transactionIds : [], deleteAccounts, deleteImportHistory }),
     }, token).then(setPreview).catch((nextError) => setError(errorMessage(nextError))).finally(() => setBusy(false));
-  }, [scope, token, transactionIds, deleteAccounts]);
+  }, [scope, token, transactionIds, deleteAccounts, deleteImportHistory]);
 
   function requiredConfirmation(candidate: TransactionDeletionPreview) {
-    if (candidate.summary.deleteAccounts) {
-      return `DELETE ${candidate.summary.transactionCount} TRANSACTIONS AND ${candidate.summary.accountCount} ACCOUNTS`;
-    }
-    return `DELETE ${candidate.summary.transactionCount} ${candidate.summary.transactionCount === 1 ? "TRANSACTION" : "TRANSACTIONS"}`;
+    const parts = [`${candidate.summary.transactionCount} ${candidate.summary.transactionCount === 1 ? "TRANSACTION" : "TRANSACTIONS"}`];
+    if (candidate.summary.deleteAccounts) parts.push(`${candidate.summary.accountCount} ACCOUNTS`);
+    if (candidate.summary.deleteImportHistory) parts.push(`${candidate.summary.importJobCount} IMPORT JOBS`);
+    return `DELETE ${parts.join(" AND ")}`;
   }
 
   async function commit() {
@@ -1333,7 +1339,9 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, toke
 
   const required = preview ? requiredConfirmation(preview) : "";
   return <TransactionEditorModal eyebrow="Danger zone"
-    title={scope === "all" ? deleteAccounts ? "Clear ledger and accounts" : "Clear ledger transactions"
+    title={scope === "all" ? deleteAccounts && deleteImportHistory ? "Clear ledger, accounts, and imports"
+      : deleteAccounts ? "Clear ledger and accounts"
+      : deleteImportHistory ? "Clear ledger and import history" : "Clear ledger transactions"
       : "Delete transaction"} onClose={onClose}>
     {busy && !preview && <p className="muted">Preparing an exact deletion preview…</p>}
     {preview && <>
@@ -1344,10 +1352,18 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, toke
         {preview.summary.deleteAccounts
           ? <div><span>Accounts</span><strong>{preview.summary.accountCount}</strong></div>
           : <div><span>Legacy rates</span><strong>{preview.summary.exchangeRateCount}</strong></div>}
+        {preview.summary.deleteImportHistory
+          && <div><span>Import jobs</span><strong>{preview.summary.importJobCount}</strong></div>}
       </div>
-      <p className="deletion-explanation">{preview.summary.deleteAccounts
-        ? `The complete chart of accounts and ${preview.summary.balanceAssertionCount} known-balance records will also be removed. Currencies, import history, and your login remain.`
-        : "Accounts and currencies are preserved. Imported-job references are safely reopened or marked deleted."}</p>
+      <p className="deletion-explanation">
+        {preview.summary.deleteAccounts
+          ? `The complete chart of accounts and ${preview.summary.balanceAssertionCount} known-balance records will also be removed. `
+          : "Accounts are preserved. "}
+        {preview.summary.deleteImportHistory
+          ? `${preview.summary.importItemCount} imported transaction records and their import receipts will be removed, so they will not become misfits. `
+          : "Import history is preserved and affected references are safely reopened or marked deleted. "}
+        Currencies and your login remain.
+      </p>
       <label>Type <code>{required}</code> to confirm
         <input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
       </label>
@@ -1361,10 +1377,12 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, toke
 
 function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
   user: User; token: string;
-  onClearLedger: (deleteAccounts: boolean) => void; onDeleted: () => void; onClose: () => void;
+  onClearLedger: (deleteAccounts: boolean, deleteImportHistory: boolean) => void;
+  onDeleted: () => void; onClose: () => void;
 }) {
   const [summary, setSummary] = useState<DataSummary | null>(null);
   const [deleteAccounts, setDeleteAccounts] = useState(false);
+  const [deleteImportHistory, setDeleteImportHistory] = useState(false);
   const [password, setPassword] = useState("");
   const [preview, setPreview] = useState<UserDeletionPreview | null>(null);
   const [confirmation, setConfirmation] = useState("");
@@ -1413,12 +1431,15 @@ function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
       <label className="checkbox-field data-delete-choice"><input type="checkbox" checked={deleteAccounts}
         onChange={(event) => setDeleteAccounts(event.target.checked)} />
         Also delete the complete chart of accounts and known balances</label>
+      <label className="checkbox-field data-delete-choice"><input type="checkbox" checked={deleteImportHistory}
+        onChange={(event) => setDeleteImportHistory(event.target.checked)} />
+        Also delete all {summary?.importJobCount ?? ""} import jobs and their staged or misfit records</label>
       <button type="button" className="danger-button"
-        disabled={!summary || (summary.transactionCount === 0 && (!deleteAccounts || summary.accountCount === 0))}
-        onClick={() => onClearLedger(deleteAccounts)}>{deleteAccounts
-          ? "Review ledger and account deletion" : "Review ledger transaction deletion"}</button>
-      <small>{deleteAccounts ? "Currencies, import history, and your login remain."
-        : "Accounts, currencies, import history, and your login remain."}</small>
+        disabled={!summary || (summary.transactionCount === 0 && (!deleteAccounts || summary.accountCount === 0)
+          && (!deleteImportHistory || summary.importJobCount === 0))}
+        onClick={() => onClearLedger(deleteAccounts, deleteImportHistory)}>Review exact data deletion</button>
+      <small>{deleteImportHistory ? "Selected import history will be removed instead of resurfacing as misfits. " : "Import history remains. "}
+        {!deleteAccounts && "Accounts remain. "}Currencies and your login remain.</small>
     </section>
     <section className="settings-section danger-zone"><h3>Delete user account</h3>
       <p>Permanently deletes {user.email} and all accounting data owned by it.</p>
@@ -1571,6 +1592,7 @@ export default function App() {
   const [showAppMenu, setShowAppMenu] = useState(false);
   const [deletionRequest, setDeletionRequest] = useState<{
     scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
+    deleteImportHistory: boolean;
   } | null>(null);
   const [showMisfits, setShowMisfits] = useState(() => window.location.hash === "#import-misfits");
   const [loading, setLoading] = useState(true);
@@ -1702,15 +1724,17 @@ export default function App() {
               onShowAll={() => setSelectedAccountId(null)} onNewTransaction={() => setShowTransactionComposer(true)}
               onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
-              onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id], deleteAccounts: false })}
+              onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id],
+                deleteAccounts: false, deleteImportHistory: false })}
               onVerify={() => void verify()} verification={verification} />}</div></main>
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
     {showAccountData && <AccountDataDialog user={user} token={token} onClose={() => setShowAccountData(false)}
-      onClearLedger={(deleteAccounts) => { setShowAccountData(false);
-        setDeletionRequest({ scope: "all", transactionIds: [], deleteAccounts }); }}
+      onClearLedger={(deleteAccounts, deleteImportHistory) => { setShowAccountData(false);
+        setDeletionRequest({ scope: "all", transactionIds: [], deleteAccounts, deleteImportHistory }); }}
       onDeleted={logout} />}
     {deletionRequest && <TransactionDeletionDialog scope={deletionRequest.scope}
       transactionIds={deletionRequest.transactionIds} deleteAccounts={deletionRequest.deleteAccounts}
+      deleteImportHistory={deletionRequest.deleteImportHistory}
       token={token} onClose={() => setDeletionRequest(null)}
       onDeleted={async () => {
         setSelected(null); await refresh(); setAccountLedgerRefresh((current) => current + 1);

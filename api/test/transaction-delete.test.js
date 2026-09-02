@@ -44,13 +44,19 @@ function deletionPool() {
         AccountType: "expense", account_currency_id: 1, archived_at: null, source_system: null, source_id: null },
     ],
     assertions: [{ account_balance_assertion_id: 30, account_id: 1, balance_date: "2026-01-03",
-      balance_units: "0", note: "opening check" }],
+      known_balance_units: "0" }],
     importJobs: new Map([["job-committed", "committed"], ["job-preview", "review_ready"]]),
     importItems: [
       { import_job_id: "job-committed", transaction_external_id: "one", ledger_transaction_id: 10,
         item_status: "committed", errors_json: null },
       { import_job_id: "job-preview", transaction_external_id: "two", ledger_transaction_id: 11,
         item_status: "reused", errors_json: null },
+    ],
+    importRequests: [
+      { import_job_id: "job-committed", request_kind: "chunk", request_id: "request-1",
+        payload_sha256: "d".repeat(64), created_at: "2026-01-01" },
+      { import_job_id: "job-preview", request_kind: "chunk", request_id: "request-2",
+        payload_sha256: "e".repeat(64), created_at: "2026-01-02" },
     ],
     plans: new Map(),
     targetIds: new Set(),
@@ -94,7 +100,11 @@ function deletionPool() {
           if (sql.includes("SELECT xrate_id, transaction_id")) return [state.rates.map((row) => ({ ...row }))];
           if (sql.includes("SELECT j.tagged_line_item_id")) return [state.tags.map((row) => ({ ...row }))];
           if (sql.includes("SELECT account_id, AccountName")) return [state.accounts.map((row) => ({ ...row }))];
-          if (sql.includes("SELECT account_balance_assertion_id")) return [state.assertions.map((row) => ({ ...row }))];
+          if (sql.includes("SELECT account_balance_assertion_id")) {
+            assert.match(sql, /known_balance_units/);
+            assert.doesNotMatch(sql, /,\s*balance_units\b|,\s*note\b/);
+            return [state.assertions.map((row) => ({ ...row }))];
+          }
           if (sql.startsWith("DROP TEMPORARY TABLE")) {
             state.targetIds = new Set();
             return [{ affectedRows: 0 }];
@@ -103,6 +113,28 @@ function deletionPool() {
           if (sql.startsWith("INSERT INTO transaction_delete_targets")) {
             params.forEach((id) => state.targetIds.add(Number(id)));
             return [{ affectedRows: params.length }];
+          }
+          if (sql.includes("COALESCE(SUM(j.job_status = 'committed')")) {
+            const references = state.importItems.filter((row) => state.targetIds.has(Number(row.ledger_transaction_id)));
+            return [[{
+              deleted_audit_references: references.filter((row) => state.importJobs.get(row.import_job_id) === "committed").length,
+              reopened_import_jobs: new Set(references.filter((row) => state.importJobs.get(row.import_job_id) !== "committed")
+                .map((row) => row.import_job_id)).size,
+            }]];
+          }
+          if (sql.includes("SELECT import_job_id, client_request_id")
+            && sql.includes("FROM accounting_transaction_import_jobs")) {
+            return [[...state.importJobs].map(([import_job_id, job_status], index) => ({
+              import_job_id, client_request_id: `client-${index}`, source_system: "test",
+              source_file_name: `${import_job_id}.csv`, expected_record_count: 1, job_status,
+              preview_sha256: null, created_at: "2026-01-01", updated_at: "2026-01-02",
+            }))];
+          }
+          if (sql.includes("FROM accounting_transaction_import_requests r")) {
+            return [state.importRequests.map((row) => ({ ...row }))];
+          }
+          if (sql.includes("SELECT i.import_job_id, i.transaction_external_id, i.canonical_sha256")) {
+            return [state.importItems.map((row) => ({ ...row }))];
           }
           if (sql.includes("FROM accounting_transaction_import_items i")) {
             return [state.importItems.filter((row) => state.targetIds.has(Number(row.ledger_transaction_id))).map((row) => ({
@@ -126,6 +158,28 @@ function deletionPool() {
           if (sql.includes("UPDATE accounting_transaction_import_jobs SET job_status = 'receiving'")) {
             state.importJobs.set(params[0], "receiving");
             return [{ affectedRows: 1 }];
+          }
+          if (sql.includes("UPDATE accounting_transaction_import_jobs j") && sql.includes("j.job_status = 'receiving'")) {
+            const reopened = new Set(state.importItems.filter((row) => state.targetIds.has(Number(row.ledger_transaction_id))
+              && state.importJobs.get(row.import_job_id) !== "committed").map((row) => row.import_job_id));
+            reopened.forEach((jobId) => state.importJobs.set(jobId, "receiving"));
+            return [{ affectedRows: reopened.size }];
+          }
+          if (sql.includes("UPDATE accounting_transaction_import_items i") && sql.includes("CASE WHEN j.job_status")) {
+            let affectedRows = 0;
+            for (const item of state.importItems.filter((row) => state.targetIds.has(Number(row.ledger_transaction_id)))) {
+              const committed = state.importJobs.get(item.import_job_id) === "committed";
+              item.item_status = committed ? "deleted" : "exception";
+              item.ledger_transaction_id = null;
+              item.errors_json = committed ? null : params[0];
+              affectedRows += 1;
+            }
+            return [{ affectedRows }];
+          }
+          if (sql.startsWith("DELETE FROM accounting_transaction_import_jobs WHERE owner_person_id")) {
+            const affectedRows = state.importJobs.size;
+            state.importJobs.clear(); state.importItems = []; state.importRequests = [];
+            return [{ affectedRows }];
           }
           if (sql.startsWith("DELETE j FROM lineitems_tags_join")) {
             const before = state.tags.length;
@@ -216,6 +270,26 @@ test("whole-ledger deletion can explicitly include accounts and known balances",
   assert.equal(result.verification.accountsAbsent, true);
   assert.equal(pool.state.accounts.length, 0);
   assert.equal(pool.state.assertions.length, 0);
+});
+
+test("import history can be removed after ledger transactions were already cleared", async () => {
+  const pool = deletionPool();
+  pool.state.transactions = []; pool.state.lines = []; pool.state.rates = []; pool.state.tags = [];
+  const preview = await previewTransactionDeletion({ pool, personId: 7, scope: "all",
+    deleteImportHistory: true });
+  assert.equal(preview.summary.transactionCount, 0);
+  assert.equal(preview.summary.importJobCount, 2);
+  assert.equal(preview.summary.importItemCount, 2);
+  assert.equal(preview.summary.importRequestCount, 2);
+
+  const result = await commitTransactionDeletion({ pool, personId: 7,
+    deletionPlanId: preview.deletionPlanId, previewDigest: preview.previewDigest });
+  assert.equal(result.deleted.transactionCount, 0);
+  assert.equal(result.deleted.importJobCount, 2);
+  assert.equal(result.deleted.importItemCount, 2);
+  assert.equal(result.importReferences.importHistoryDeleted, true);
+  assert.equal(pool.state.importJobs.size, 0);
+  assert.equal(pool.state.importItems.length, 0);
 });
 
 test("preview digest mismatch preserves the ready plan and names the bound-argument recovery", async () => {

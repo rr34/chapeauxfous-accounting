@@ -129,7 +129,8 @@ function snapshotHash(snapshot) {
   return sha256(JSON.stringify(snapshot));
 }
 
-function summarize(scope, selected, { deleteAccounts = false, accountCount = 0, assertionCount = 0 } = {}) {
+function summarize(scope, selected, { deleteAccounts = false, accountCount = 0, assertionCount = 0,
+  deleteImportHistory = false, importJobCount = 0, importItemCount = 0, importRequestCount = 0 } = {}) {
   const dates = selected.transactions.map((row) => String(row.TransactionDate).slice(0, 10)).sort();
   const states = { draft: 0, posted: 0, voided: 0 };
   selected.transactions.forEach((row) => { states[String(row.TransactionState)] += 1; });
@@ -144,9 +145,43 @@ function summarize(scope, selected, { deleteAccounts = false, accountCount = 0, 
     deleteAccounts,
     accountCount: deleteAccounts ? accountCount : 0,
     balanceAssertionCount: deleteAccounts ? assertionCount : 0,
+    deleteImportHistory,
+    importJobCount: deleteImportHistory ? importJobCount : 0,
+    importItemCount: deleteImportHistory ? importItemCount : 0,
+    importRequestCount: deleteImportHistory ? importRequestCount : 0,
     transactionStates: states,
     dateRange: { first: dates[0] ?? null, last: dates.at(-1) ?? null },
   };
+}
+
+async function importHistoryFingerprint(connection, personId, lock = false) {
+  const suffix = lock ? " FOR UPDATE" : "";
+  const [jobs] = await connection.query(
+    `SELECT import_job_id, client_request_id, source_system, source_file_name,
+            expected_record_count, job_status, preview_sha256, created_at, updated_at
+       FROM accounting_transaction_import_jobs
+      WHERE owner_person_id = ? ORDER BY import_job_id${suffix}`,
+    [personId],
+  );
+  const [items] = await connection.query(
+    `SELECT i.import_job_id, i.transaction_external_id, i.canonical_sha256,
+            i.item_status, i.ledger_transaction_id, i.source_record_count, i.updated_at
+       FROM accounting_transaction_import_items i
+       JOIN accounting_transaction_import_jobs j ON j.import_job_id = i.import_job_id
+      WHERE j.owner_person_id = ?
+      ORDER BY i.import_job_id, i.transaction_external_id${suffix}`,
+    [personId],
+  );
+  const [requests] = await connection.query(
+    `SELECT r.import_job_id, r.request_kind, r.request_id, r.payload_sha256, r.created_at
+       FROM accounting_transaction_import_requests r
+       JOIN accounting_transaction_import_jobs j ON j.import_job_id = r.import_job_id
+      WHERE j.owner_person_id = ?
+      ORDER BY r.import_job_id, r.request_kind, r.request_id${suffix}`,
+    [personId],
+  );
+  return { jobCount: jobs.length, itemCount: items.length, requestCount: requests.length,
+    sha256: sha256(JSON.stringify({ jobs, items, requests })) };
 }
 
 async function accountDataFingerprint(connection, personId, lock = false) {
@@ -157,7 +192,7 @@ async function accountDataFingerprint(connection, personId, lock = false) {
     [personId],
   );
   const [assertions] = await connection.query(
-    `SELECT account_balance_assertion_id, account_id, balance_date, balance_units, note
+    `SELECT account_balance_assertion_id, account_id, balance_date, known_balance_units
        FROM account_balance_assertions WHERE owner_person_id = ?
       ORDER BY account_balance_assertion_id${lock ? " FOR UPDATE" : ""}`,
     [personId],
@@ -175,9 +210,11 @@ async function invalidate(connection, planId, personId, code) {
   );
 }
 
-export async function previewTransactionDeletion({ pool, personId, scope, transactionIds = [], deleteAccounts = false }) {
+export async function previewTransactionDeletion({ pool, personId, scope, transactionIds = [],
+  deleteAccounts = false, deleteImportHistory = false }) {
   const normalizedScope = String(scope ?? "").trim();
   const removeAccounts = deleteAccounts === true;
+  const removeImportHistory = deleteImportHistory === true;
   if (!["all", "selected"].includes(normalizedScope)) {
     throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "scope must be all or selected.");
   }
@@ -188,8 +225,9 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
   if (normalizedScope === "selected" && (!requestedIds.length || requestedIds.length > 1000)) {
     throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "selected scope requires between 1 and 1,000 transaction IDs.");
   }
-  if (normalizedScope === "selected" && removeAccounts) {
-    throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Accounts can be deleted only when clearing the whole ledger.");
+  if (normalizedScope === "selected" && (removeAccounts || removeImportHistory)) {
+    throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT",
+      "Accounts and import history can be deleted only when clearing the whole ledger.");
   }
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
@@ -203,16 +241,24 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
         { missingTransactionIds: ids.filter((id) => !found.has(id)) });
     }
     const accountData = await accountDataFingerprint(connection, personId);
-    if (!ids.length && !(removeAccounts && accountData.count > 0)) {
-      throw planError("TRANSACTIONS_REQUIRED", "There are no owner-scoped transactions or requested accounts to delete.");
+    const importHistory = removeImportHistory
+      ? await importHistoryFingerprint(connection, personId) : { jobCount: 0, itemCount: 0, requestCount: 0, sha256: null };
+    if (!ids.length && !(removeAccounts && accountData.count > 0)
+      && !(removeImportHistory && importHistory.jobCount > 0)) {
+      throw planError("TRANSACTIONS_REQUIRED", "There are no requested transactions, accounts, or import jobs to delete.");
     }
     const summary = summarize(normalizedScope, selected, { deleteAccounts: removeAccounts,
-      accountCount: accountData.count, assertionCount: accountData.assertionCount });
+      accountCount: accountData.count, assertionCount: accountData.assertionCount,
+      deleteImportHistory: removeImportHistory, importJobCount: importHistory.jobCount,
+      importItemCount: importHistory.itemCount, importRequestCount: importHistory.requestCount });
     const payload = { scope: normalizedScope, transactionIds: ids, snapshotSha256: snapshotHash(selected),
-      deleteAccounts: removeAccounts, accountDataSha256: removeAccounts ? accountData.sha256 : null };
+      deleteAccounts: removeAccounts, accountDataSha256: removeAccounts ? accountData.sha256 : null,
+      deleteImportHistory: removeImportHistory,
+      importHistorySha256: removeImportHistory ? importHistory.sha256 : null };
     const preview = { ...summary, targetDigest: `sha256:${sha256(JSON.stringify(ids))}`,
       effect: "permanently_delete_exact_transactions_and_dependent_postings",
-      accountsPreserved: !removeAccounts, accountTreeChanged: removeAccounts };
+      accountsPreserved: !removeAccounts, accountTreeChanged: removeAccounts,
+      importHistoryPreserved: !removeImportHistory };
     const planId = randomUUID();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
     const payloadJson = JSON.stringify(payload);
@@ -246,7 +292,8 @@ export async function refreshTransactionDeletionPlan({ pool, personId, deletionP
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "Transaction-deletion plan payload is invalid.");
     }
     return { scope: payload.scope, transactionIds: payload.scope === "selected" ? transactionIds : [],
-      deleteAccounts: payload.deleteAccounts === true };
+      deleteAccounts: payload.deleteAccounts === true,
+      deleteImportHistory: payload.deleteImportHistory === true };
   });
   return previewTransactionDeletion({ pool, personId, ...request });
 }
@@ -285,42 +332,36 @@ async function createTargetTable(connection, transactionIds) {
 }
 
 async function updateImportReferences(connection) {
-  const [rows] = await connection.query(
-    `SELECT i.import_job_id, i.transaction_external_id, i.ledger_transaction_id,
-            j.job_status
+  const [countRows] = await connection.query(
+    `SELECT COALESCE(SUM(j.job_status = 'committed'), 0) AS deleted_audit_references,
+            COUNT(DISTINCT CASE WHEN j.job_status <> 'committed' THEN i.import_job_id END)
+              AS reopened_import_jobs
        FROM accounting_transaction_import_items i
        JOIN accounting_transaction_import_jobs j ON j.import_job_id = i.import_job_id
        JOIN transaction_delete_targets d ON d.transaction_id = i.ledger_transaction_id
       FOR UPDATE`,
   );
-  const reopenedJobs = new Set();
-  let deletedAuditReferences = 0;
-  for (const row of rows) {
-    if (row.job_status === "committed") {
-      await connection.query(
-        `UPDATE accounting_transaction_import_items SET item_status = 'deleted',
-                ledger_transaction_id = NULL, errors_json = NULL, updated_at = UTC_TIMESTAMP(6)
-          WHERE import_job_id = ? AND transaction_external_id = ?`,
-        [row.import_job_id, row.transaction_external_id],
-      );
-      deletedAuditReferences += 1;
-    } else {
-      await connection.query(
-        `UPDATE accounting_transaction_import_items SET item_status = 'exception',
-                ledger_transaction_id = NULL, errors_json = ?, updated_at = UTC_TIMESTAMP(6)
-          WHERE import_job_id = ? AND transaction_external_id = ?`,
-        [JSON.stringify([{ code: "REFERENCED_TRANSACTION_DELETED",
-          message: "The previously reused ledger transaction was explicitly deleted after staging." }]),
-        row.import_job_id, row.transaction_external_id],
-      );
-      reopenedJobs.add(String(row.import_job_id));
-    }
-  }
-  for (const jobId of reopenedJobs) await connection.query(
-    `UPDATE accounting_transaction_import_jobs SET job_status = 'receiving',
-            preview_sha256 = NULL, updated_at = UTC_TIMESTAMP(6) WHERE import_job_id = ?`, [jobId],
+  await connection.query(
+    `UPDATE accounting_transaction_import_jobs j
+       JOIN accounting_transaction_import_items i ON i.import_job_id = j.import_job_id
+       JOIN transaction_delete_targets d ON d.transaction_id = i.ledger_transaction_id
+        SET j.job_status = 'receiving', j.preview_sha256 = NULL,
+            j.updated_at = UTC_TIMESTAMP(6)
+      WHERE j.job_status <> 'committed'`,
   );
-  return { deletedAuditReferences, reopenedImportJobs: reopenedJobs.size };
+  await connection.query(
+    `UPDATE accounting_transaction_import_items i
+       JOIN accounting_transaction_import_jobs j ON j.import_job_id = i.import_job_id
+       JOIN transaction_delete_targets d ON d.transaction_id = i.ledger_transaction_id
+        SET i.item_status = CASE WHEN j.job_status = 'committed' THEN 'deleted' ELSE 'exception' END,
+            i.ledger_transaction_id = NULL,
+            i.errors_json = CASE WHEN j.job_status = 'committed' THEN NULL ELSE ? END,
+            i.updated_at = UTC_TIMESTAMP(6)`,
+    [JSON.stringify([{ code: "REFERENCED_TRANSACTION_DELETED",
+      message: "The previously reused ledger transaction was explicitly deleted after staging." }])],
+  );
+  return { deletedAuditReferences: Number(countRows[0]?.deleted_audit_references ?? 0),
+    reopenedImportJobs: Number(countRows[0]?.reopened_import_jobs ?? 0) };
 }
 
 export async function commitTransactionDeletion({ pool, personId, deletionPlanId, previewDigest }) {
@@ -347,9 +388,11 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     const payload = parseJson(row.payload_json, "payload");
     const transactionIds = normalizeIds(payload.transactionIds);
     const deleteAccounts = payload.deleteAccounts === true;
-    if (deleteAccounts && payload.scope !== "all") {
-      await invalidate(connection, planId, personId, "INVALID_ACCOUNT_DELETE_SCOPE");
-      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "Account deletion requires whole-ledger scope.") };
+    const deleteImportHistory = payload.deleteImportHistory === true;
+    if ((deleteAccounts || deleteImportHistory) && payload.scope !== "all") {
+      await invalidate(connection, planId, personId, "INVALID_EXTENDED_DELETE_SCOPE");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED",
+        "Account and import-history deletion require whole-ledger scope.") };
     }
     const snapshot = await ledgerSnapshot(connection, personId, { lock: true });
     const currentIds = snapshot.transactions.map((item) => Number(item.transaction_id));
@@ -377,9 +420,33 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
       await invalidate(connection, planId, personId, "ACCOUNT_DATA_CHANGED");
       return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The chart of accounts changed after preview.") };
     }
+    const importHistoryBefore = deleteImportHistory
+      ? await importHistoryFingerprint(connection, personId, true) : null;
+    if (deleteImportHistory && importHistoryBefore.sha256 !== payload.importHistorySha256) {
+      await invalidate(connection, planId, personId, "IMPORT_HISTORY_CHANGED");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "Import history changed after preview.") };
+    }
     await createTargetTable(connection, transactionIds);
     try {
-      const importReferences = await updateImportReferences(connection);
+      let importReferences;
+      if (deleteImportHistory) {
+        const [jobDelete] = await connection.query(
+          "DELETE FROM accounting_transaction_import_jobs WHERE owner_person_id = ?", [personId],
+        );
+        if (Number(jobDelete.affectedRows) !== importHistoryBefore.jobCount) {
+          throw new Error("Import-history deletion affected counts did not match the bound preview.");
+        }
+        const importHistoryAfter = await importHistoryFingerprint(connection, personId);
+        if (importHistoryAfter.jobCount || importHistoryAfter.itemCount || importHistoryAfter.requestCount) {
+          throw new Error("Deleted import history remained visible after deletion.");
+        }
+        importReferences = { deletedAuditReferences: 0, reopenedImportJobs: 0,
+          importHistoryDeleted: true, deletedImportJobCount: importHistoryBefore.jobCount,
+          deletedImportItemCount: importHistoryBefore.itemCount,
+          deletedImportRequestCount: importHistoryBefore.requestCount };
+      } else {
+        importReferences = await updateImportReferences(connection);
+      }
       const [tagDelete] = await connection.query(
         `DELETE j FROM lineitems_tags_join j
           JOIN line_items li ON li.line_item_id = j.tagged_line_item_id
@@ -452,7 +519,10 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
           lineItemCount: Number(lineDelete.affectedRows), exchangeRateCount: Number(rateDelete.affectedRows),
           tagAssignmentCount: Number(tagDelete.affectedRows),
           ...(deleteAccounts ? { accountCount: deletedAccountCount,
-            balanceAssertionCount: deletedAssertionCount } : {}) },
+            balanceAssertionCount: deletedAssertionCount } : {}),
+          ...(deleteImportHistory ? { importJobCount: importHistoryBefore.jobCount,
+            importItemCount: importHistoryBefore.itemCount,
+            importRequestCount: importHistoryBefore.requestCount } : {}) },
         importReferences,
         verification: { targetTransactionsAbsent: true, accountTreeUnchanged: !deleteAccounts,
           accountsAbsent: deleteAccounts, accountCount: accountsAfter.count },
