@@ -148,10 +148,12 @@ test("the final job preview publishes an executable confirmation handoff", async
       }]];
       if (sql.includes("COALESCE(SUM(CASE")) return [[{
         staged_records: 2,
+        pending_staged_records: 2,
         reused_records: 1,
         exception_records: 1,
         received_records: 4,
         staged_transactions: 1,
+        pending_staged_transactions: 1,
         reused_transactions: 1,
         exception_transactions: 1,
       }]];
@@ -172,7 +174,25 @@ test("the final job preview publishes an executable confirmation handoff", async
 
   assert.equal(result.requiredAction, "REQUEST_USER_CONFIRMATION");
   assert.equal(result.nextAction.type, "request_user_confirmation");
-  assert.match(result.nextAction.instruction, /^Commit \d+ pending staged transactions from this preview now\?/);
+  assert.match(result.nextAction.instruction, /^Import succeeded\./);
+  assert.match(result.nextAction.instruction, /All \d+ source records are in Accounting\./);
+  assert.match(result.nextAction.instruction, /in Import misfits and can be corrected there/i);
+  assert.doesNotMatch(result.nextAction.instruction, /commit|uncommitted|staged|validat/i);
+  assert.deepEqual(result.user_outcome, {
+    import_status: "succeeded",
+    all_source_data_in_system: true,
+    source_records_imported: 4,
+    transactions_ready_for_ledger: 1,
+    transactions_already_in_ledger: 1,
+    transactions_in_import_misfits: 1,
+  });
+  assert.deepEqual(result.exception_handling, {
+    retained_in: "import_misfits",
+    retained_after_ledger_addition: true,
+    correctable_in_system: true,
+    list_with: { tool: "list_transaction_import_exceptions", arguments: { import_job_id: importJobId } },
+    correct_with: { tool: "retry_transaction_import_exception", arguments: { import_job_id: importJobId } },
+  });
   assert.doesNotMatch(result.nextAction.instruction, /ask the user|explicitly confirm/i);
   assert.deepEqual(result.nextAction.onApproval, {
     tool: "commit_transaction_import_job",

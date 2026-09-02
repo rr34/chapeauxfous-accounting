@@ -410,7 +410,16 @@ export async function validateTransaction(connection, transactionId, personId, {
       ORDER BY li.line_item_id${lockSql}`,
     [transactionId],
   );
-  if (lines.length < 2) throw applicationError("A transaction requires at least two line items.", 400, "TOO_FEW_LINE_ITEMS");
+  const valuationCurrencyId = Number(transaction.valuation_currency_id);
+  const isSingleLineQuantityAdjustment = lines.length === 1
+    && Number(lines[0].account_currency_id) !== valuationCurrencyId
+    && BigInt(lines[0].amount_units) !== 0n
+    && lines[0].value_units != null
+    && BigInt(lines[0].value_units) === 0n;
+  if (lines.length === 0 || (lines.length === 1 && !isSingleLineQuantityAdjustment)) {
+    throw applicationError("A transaction requires at least two line items unless it is a single-line zero-value quantity adjustment.",
+      400, "TOO_FEW_LINE_ITEMS");
+  }
   if (lines.some((line) => Number(line.account_owner_person_id) !== Number(personId))) {
     throw applicationError("A transaction cannot use another user's account.", 403, "CROSS_USER_ACCOUNT");
   }
@@ -425,7 +434,6 @@ export async function validateTransaction(connection, transactionId, personId, {
       ORDER BY xrate_id${lockSql}`,
     [transactionId, personId],
   );
-  const valuationCurrencyId = Number(transaction.valuation_currency_id);
   const usedForeignCurrencies = new Set(
     lines.map((line) => Number(line.account_currency_id)).filter((currencyId) => currencyId !== valuationCurrencyId),
   );
@@ -440,11 +448,11 @@ export async function validateTransaction(connection, transactionId, personId, {
           lineItemId: Number(line.line_item_id), amountUnits: amount.toString(), valueUnits: value.toString(),
         });
       }
-      if (currencyId !== valuationCurrencyId && ((amount === 0n) !== (value === 0n))) {
-        throw applicationError("A foreign line must have either two zero amount/value fields or two non-zero fields.",
-          400, "EXCHANGE_RATE_REQUIRED", { lineItemId: Number(line.line_item_id) });
+      if (currencyId !== valuationCurrencyId && amount === 0n && value !== 0n) {
+        throw applicationError("A foreign line cannot carry valuation value without an account-currency amount.",
+          400, "VALUE_WITHOUT_AMOUNT", { lineItemId: Number(line.line_item_id) });
       }
-      if ((amount < 0n) !== (value < 0n)) {
+      if (amount !== 0n && value !== 0n && (amount < 0n) !== (value < 0n)) {
         throw applicationError("A line's amount and valuation value must have the same sign.",
           400, "INVALID_EXCHANGE_RATE_SIGN", { lineItemId: Number(line.line_item_id) });
       }
@@ -495,7 +503,7 @@ export async function validateTransaction(connection, transactionId, personId, {
 
 export async function createTransaction({ personId, description, transactionDate, valuationCurrencyId, lineItems, rates, post = true, sourceSystem, sourceId }, runInTransaction = withTransaction) {
   const resolvedTransactionDate = calendarDate(transactionDate);
-  if (!Array.isArray(lineItems) || lineItems.length < 2) throw applicationError("At least two line items are required.");
+  if (!Array.isArray(lineItems) || lineItems.length === 0) throw applicationError("At least one line item is required.");
   const resolvedDescription = optionalBoundedText(description, "transaction description", 16000);
   const resolvedSourceSystem = optionalBoundedText(sourceSystem, "source system", 32);
   const resolvedSourceId = optionalBoundedText(sourceId, "source id", 128);
@@ -561,6 +569,123 @@ export async function createTransaction({ personId, description, transactionDate
     }
     throw error;
   }
+}
+
+export async function updateTransaction({ personId, transactionId, description, transactionDate,
+  valuationCurrencyId, lineItems, rates }, runInTransaction = withTransaction) {
+  const resolvedTransactionId = Number(transactionId);
+  if (!Number.isInteger(resolvedTransactionId) || resolvedTransactionId <= 0) {
+    throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
+  }
+  const resolvedTransactionDate = calendarDate(transactionDate);
+  if (!Array.isArray(lineItems) || lineItems.length === 0) throw applicationError("At least one line item is required.");
+  const resolvedDescription = optionalBoundedText(description, "transaction description", 16000);
+
+  return runInTransaction(async (connection) => {
+    const [transactionRows] = await connection.query(
+      `SELECT transaction_id, TransactionState
+         FROM transactions
+        WHERE transaction_id = ? AND owner_person_id = ?
+        FOR UPDATE`,
+      [resolvedTransactionId, personId],
+    );
+    if (!transactionRows.length) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
+    await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
+
+    const [existingRows] = await connection.query(
+      `SELECT line_item_id, account_id
+         FROM line_items
+        WHERE transaction_id = ?
+        ORDER BY line_item_id
+        FOR UPDATE`,
+      [resolvedTransactionId],
+    );
+    const existingIds = new Set(existingRows.map((row) => Number(row.line_item_id)));
+    const existingAccountByLineId = new Map(existingRows.map((row) =>
+      [Number(row.line_item_id), Number(row.account_id)]));
+    const retainedIds = new Set();
+    for (const line of lineItems) {
+      if (line.id == null) continue;
+      const lineItemId = Number(line.id);
+      if (!Number.isInteger(lineItemId) || lineItemId <= 0 || !existingIds.has(lineItemId)) {
+        throw applicationError("A line item does not belong to this transaction.", 400, "INVALID_LINE_ITEM");
+      }
+      if (retainedIds.has(lineItemId)) {
+        throw applicationError("A line item cannot appear twice.", 400, "DUPLICATE_LINE_ITEM");
+      }
+      retainedIds.add(lineItemId);
+    }
+
+    await connection.query(
+      `UPDATE transactions
+          SET description = ?, valuation_currency_id = ?, TransactionDate = ?, UpdatedAt = CURRENT_TIMESTAMP()
+        WHERE transaction_id = ? AND owner_person_id = ?`,
+      [resolvedDescription, Number(valuationCurrencyId), resolvedTransactionDate, resolvedTransactionId, personId],
+    );
+
+    for (const line of lineItems) {
+      const accountId = Number(line.accountId);
+      const amountUnits = integerString(line.amountUnits, "amountUnits");
+      const [accountRows] = await connection.query(
+        `SELECT account_id, account_currency_id, is_placeholder, archived_at
+           FROM accounts
+          WHERE account_id = ? AND owner_person_id = ?`,
+        [accountId, personId],
+      );
+      if (!accountRows.length) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+      const retainsArchivedAccount = line.id != null
+        && existingAccountByLineId.get(Number(line.id)) === accountId;
+      if (accountRows[0].archived_at != null && !retainsArchivedAccount) {
+        throw applicationError("An archived account cannot receive a new posting.", 400, "ARCHIVED_ACCOUNT");
+      }
+      if (Boolean(accountRows[0].is_placeholder)) {
+        throw applicationError("A transaction cannot post to a placeholder account.", 400, "PLACEHOLDER_ACCOUNT");
+      }
+      const valueUnits = line.valueUnits != null
+        ? integerString(line.valueUnits, "valueUnits")
+        : Number(accountRows[0].account_currency_id) === Number(valuationCurrencyId) ? amountUnits : null;
+      const memo = optionalBoundedText(line.memo, "line memo", 16000);
+      if (line.id == null) {
+        const [lineResult] = await connection.query(
+          `INSERT INTO line_items (transaction_id, amount_units, value_units, memo, account_id, source_id)
+           VALUES (?, ?, ?, ?, ?, NULL)`,
+          [resolvedTransactionId, amountUnits, valueUnits, memo, accountId],
+        );
+        await attachTags(connection, personId, Number(lineResult.insertId), line.tags);
+      } else {
+        await connection.query(
+          `UPDATE line_items
+              SET amount_units = ?, value_units = ?, memo = ?, account_id = ?
+            WHERE line_item_id = ? AND transaction_id = ?`,
+          [amountUnits, valueUnits, memo, accountId, Number(line.id), resolvedTransactionId],
+        );
+      }
+    }
+
+    for (const lineItemId of existingIds) {
+      if (retainedIds.has(lineItemId)) continue;
+      await connection.query(
+        "DELETE FROM line_items WHERE line_item_id = ? AND transaction_id = ?",
+        [lineItemId, resolvedTransactionId],
+      );
+    }
+
+    await connection.query(
+      "DELETE FROM xrates WHERE transaction_id = ? AND owner_person_id = ? AND xrate_type = 'transaction'",
+      [resolvedTransactionId, personId],
+    );
+    for (const rate of Array.isArray(rates) ? rates : []) {
+      await connection.query(
+        `INSERT INTO xrates
+          (owner_person_id, xrate_type, ValidAt, transaction_id, from_units, from_currency_id, to_units, to_currency_id)
+         VALUES (?, 'transaction', NULL, ?, ?, ?, ?, ?)`,
+        [personId, resolvedTransactionId, integerString(rate.fromUnits, "fromUnits"), Number(rate.fromCurrencyId),
+          integerString(rate.toUnits, "toUnits"), Number(rate.toCurrencyId)],
+      );
+    }
+    const validation = await validateTransaction(connection, resolvedTransactionId, personId, { lock: true });
+    return { transactionId: resolvedTransactionId, state: transactionRows[0].TransactionState, validation };
+  });
 }
 
 export async function listTransactionsPage(pool, personId, { limit = 100, beforeTransactionId = null } = {}) {

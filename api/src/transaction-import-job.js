@@ -445,7 +445,8 @@ async function bindArtifactToJob({ pool, artifactRoot, personId, importJobId, ar
   await withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, importJobId, true);
     if (job.job_status === "committed") throw jobError(
-      "The import job is already committed.", "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409,
+      "This file is already imported and its ready transactions are in the ledger.",
+      "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409,
     );
     if (Number(job.expected_record_count) !== recordCount) throw jobError(
       "The canonical artifact record count does not match the job's final expected record count.",
@@ -505,7 +506,10 @@ export async function stageTransactionImportChunk({ pool, personId, importJobId,
   const payloadSha256 = hashJson(records);
   return withPoolTransaction(pool, async (connection) => {
     const job = await loadJob(connection, personId, normalizedJobId, true);
-    if (job.job_status === "committed") throw jobError("The import job is already committed.", "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409);
+    if (job.job_status === "committed") throw jobError(
+      "This file is already imported and its ready transactions are in the ledger.",
+      "IMPORT_JOB_ALREADY_COMMITTED", undefined, 409,
+    );
     if (await requestReplay(connection, normalizedJobId, "chunk", normalizedChunkId, payloadSha256)) {
       return { ...await currentJobResult(connection, job), chunk_id: normalizedChunkId,
         idempotent_replay: true, exceptions: [] };
@@ -689,7 +693,7 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
     if (job.job_status === "committed") return { ...parseJson(job.result_json, "transaction import result"), already_committed: true };
     const progress = await aggregateProgress(connection, job);
     if (progress.remaining_records !== 0) throw jobError(
-      "The final preview requires every expected source record to be staged, reused, or represented by an exception.",
+      "Some file data is not in Accounting yet. Resume the import, then try again.",
       "IMPORT_JOB_HAS_REMAINING_RECORDS", { progress }, 409,
     );
     const previewSha256 = await entryDigest(connection, normalizedJobId);
@@ -705,11 +709,27 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
       ready_to_commit: true,
       unresolved_exceptions: progress.transaction_totals.unresolved_exceptions,
       excluded_exceptions: progress.transaction_totals.excluded,
-      commit_scope: `${progress.transaction_totals.pending_commit} pending staged transactions; ${progress.transaction_totals.previously_committed} previously committed and ${progress.transaction_totals.reused} reused transactions remain unchanged; unresolved and explicitly excluded exceptions remain uncommitted.`,
+      user_outcome: {
+        import_status: "succeeded",
+        all_source_data_in_system: true,
+        source_records_imported: progress.expected_source_records,
+        transactions_ready_for_ledger: progress.transaction_totals.pending_commit,
+        transactions_already_in_ledger: progress.transaction_totals.previously_committed
+          + progress.transaction_totals.reused,
+        transactions_in_import_misfits: progress.transaction_totals.exceptions,
+      },
+      exception_handling: {
+        retained_in: "import_misfits",
+        retained_after_ledger_addition: true,
+        correctable_in_system: true,
+        list_with: { tool: "list_transaction_import_exceptions", arguments: { import_job_id: normalizedJobId } },
+        correct_with: { tool: "retry_transaction_import_exception", arguments: { import_job_id: normalizedJobId } },
+      },
+      commit_scope: `Import succeeded. All ${progress.expected_source_records} source records are in Accounting. ${progress.transaction_totals.pending_commit} transactions are ready to add to the ledger, ${progress.transaction_totals.previously_committed + progress.transaction_totals.reused} are already there, and ${progress.transaction_totals.exceptions} are in Import misfits where they can be corrected.`,
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Commit ${progress.transaction_totals.pending_commit} pending staged transactions from this preview now? ${progress.transaction_totals.previously_committed} previously committed and ${progress.transaction_totals.reused} reused transactions will remain unchanged; ${progress.transaction_totals.unresolved_exceptions} unresolved and ${progress.transaction_totals.excluded} excluded exceptions will remain uncommitted.`,
+        instruction: `Import succeeded. All ${progress.expected_source_records} source records are in Accounting. Add ${progress.transaction_totals.pending_commit} ready transactions to the ledger now? ${progress.transaction_totals.exceptions} transactions are in Import misfits and can be corrected there.`,
         onApproval: {
           tool: "commit_transaction_import_job",
           arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },
@@ -802,16 +822,18 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
     const job = await loadJob(connection, personId, normalizedJobId, true);
     if (job.job_status === "committed") {
       if (String(job.preview_sha256 ?? "") !== normalizedDigest) throw jobError(
-        "The supplied digest does not identify the preview that was committed.",
+        "That review does not match the imported data already added to the ledger. Refresh the import status.",
         "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
       );
       return { ...parseJson(job.result_json, "transaction import result"), already_committed: true };
     }
     if (job.job_status !== "review_ready" || String(job.preview_sha256 ?? "") !== normalizedDigest) throw jobError(
-      "The job is not bound to that final preview. Create a new preview after the latest staging or correction.", "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
+      "The imported data changed. Review the ledger addition again, then retry.",
+      "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
     );
     if (await entryDigest(connection, normalizedJobId) !== normalizedDigest) throw jobError(
-      "The staged job changed after preview.", "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
+      "The imported data changed. Review the ledger addition again, then retry.",
+      "IMPORT_JOB_PREVIEW_MISMATCH", undefined, 409,
     );
     const [itemRows] = await connection.query(
       `SELECT transaction_external_id, resolved_json, source_record_count

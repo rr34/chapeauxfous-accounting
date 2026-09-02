@@ -347,6 +347,25 @@ test("transaction import preserves distinct per-line exchange rates", async () =
   assert.deepEqual(pool.state.rates, []);
 });
 
+test("transaction import accepts a zero-value commodity quantity adjustment", async () => {
+  const pool = memoryPool();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "source_app", transactions: [{
+      externalId: "stock-split", transactionDate: "2023-10-11", description: "150x Stock Split",
+      valuationCurrencyCode: "USD", lineItems: [
+        { externalId: "shares", accountFullName: "Assets:Investments:VTSAX",
+          amountDecimal: "14274.200", valueDecimal: "0.00" },
+      ],
+    }],
+  });
+
+  assert.equal(preview.readyToCommit, true);
+  assert.equal(preview.rejectedTransactionCount, 0);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.deepEqual(pool.state.lineItems.map((line) => line.value_units), ["0"]);
+  assert.deepEqual(pool.state.rates, []);
+});
+
 test("transaction commit persists plan invalidation after an integrity failure", async () => {
   const pool = memoryPool();
   const preview = await previewTransactionImport({

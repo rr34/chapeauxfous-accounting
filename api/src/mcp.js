@@ -753,7 +753,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       state: z.enum(["draft", "posted"]),
       validation: z.object({
         valid: z.literal(true),
-        lineItemCount: z.number().int().min(2),
+        lineItemCount: z.number().int().min(1),
         valuationCurrencyId: z.number().int().positive(),
         foreignCurrencyIds: z.array(z.number().int().positive()),
       }),
@@ -806,7 +806,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transactions: z.array(z.object({
       externalId: z.string().min(1), transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       description: z.string().nullable(), valuationCurrencyCode: z.string().min(1),
-      lineItemCount: z.number().int().min(2), status: z.enum(["planned", "existing", "created", "rejected"]),
+      lineItemCount: z.number().int().min(1), status: z.enum(["planned", "existing", "created", "rejected"]),
       transactionId: z.number().int().positive().nullable(), errors: z.array(importIssueSchema),
     })),
     expiresAt: z.string().datetime().optional(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
@@ -1481,7 +1481,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     account_id: positiveInteger("Account id owned by the token owner."),
     amount_units: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the account currency's native units."),
     value_units: z.string().regex(/^-?\d+$/).optional()
-      .describe("Signed value in valuation-currency units. Supply this for every foreign line to use per-line exchange rates."),
+      .describe("Signed value in valuation-currency units. Supply this for every foreign line; zero with a nonzero amount records a quantity-only adjustment without an exchange rate."),
     memo: z.string().trim().max(16000).nullable().optional(),
     source_id: z.string().trim().max(128).nullable().optional(),
     tags: z.array(z.object({
@@ -1497,12 +1497,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("create_transaction", {
     title: "Create transaction",
-    description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each line can carry its own implied exchange rate; rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
+    description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each nonzero value can carry its own implied exchange rate; a nonzero amount with zero value is a quantity-only adjustment. rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
     inputSchema: {
       description: z.string().trim().max(16000).nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
       valuation_currency_id: positiveInteger("Currency in which transaction balance is evaluated."),
-      line_items: z.array(lineItemSchema).min(2),
+      line_items: z.array(lineItemSchema).min(1),
       rates: z.array(rateSchema).optional(),
       post: z.boolean().default(true).describe("Post after validation; false leaves a validated draft."),
       source_system: z.string().trim().max(32).nullable().optional(),
@@ -1615,6 +1615,27 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     ready_to_commit: z.literal(true),
     unresolved_exceptions: z.number().int().nonnegative(),
     excluded_exceptions: z.number().int().nonnegative(),
+    user_outcome: z.object({
+      import_status: z.literal("succeeded"),
+      all_source_data_in_system: z.literal(true),
+      source_records_imported: z.number().int().positive(),
+      transactions_ready_for_ledger: z.number().int().nonnegative(),
+      transactions_already_in_ledger: z.number().int().nonnegative(),
+      transactions_in_import_misfits: z.number().int().nonnegative(),
+    }),
+    exception_handling: z.object({
+      retained_in: z.literal("import_misfits"),
+      retained_after_ledger_addition: z.literal(true),
+      correctable_in_system: z.literal(true),
+      list_with: z.object({
+        tool: z.literal("list_transaction_import_exceptions"),
+        arguments: z.object({ import_job_id: z.string().uuid() }),
+      }),
+      correct_with: z.object({
+        tool: z.literal("retry_transaction_import_exception"),
+        arguments: z.object({ import_job_id: z.string().uuid() }),
+      }),
+    }),
     commit_scope: z.string().min(1),
     requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
     nextAction: z.object({
@@ -1789,7 +1810,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
-    description: "After every expected source record is staged, reused, or represented by an exception, bind the current job state to one final preview digest. This changes no ledger data. The preview reports unresolved exceptions, exact commit scope, and one direct yes-or-no question with the exact commit tool arguments. Present that question once.",
+    description: "After every source record is in Accounting, return a user outcome of Import succeeded, the number ready to add to the ledger, and the number already available for correction in Import misfits. Never describe Misfits data as uncommitted or not imported. Give one direct yes-or-no question about adding the ready transactions to the ledger, using the exact internal action arguments.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
     outputSchema: transactionImportPreviewOutput,
     annotations: idempotentWrite,
@@ -1799,8 +1820,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }), { retryTool: "preview_transaction_import_job" }));
 
   server.registerTool("commit_transaction_import_job", {
-    title: "Commit final transaction import preview",
-    description: "Commit the exact final job preview after the user confirms it. The server revalidates staged accounting transactions, atomically creates only valid new transactions, reuses stable source-ID matches, leaves structured exceptions uncommitted, and returns one idempotent final job summary with transaction and line-item created/reused/exception totals.",
+    title: "Add imported transactions to the ledger",
+    description: "After the user confirms, add the ready imported transactions to the ledger. All other imported data remains available in Import misfits for correction. Report Import succeeded and give the Import misfits correction path for every transaction that still needs attention. Do not expose internal commit, staging, or validation terminology to the user.",
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       preview_digest: z.string().trim().regex(/^sha256:[0-9a-f]{64}$/),
@@ -1830,11 +1851,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     description: z.string().trim().max(16000).nullable().optional(),
     valuation_currency_code: z.string().trim().min(1).max(50),
-    line_items: z.array(importedLineItemSchema).min(2).max(1000),
+    line_items: z.array(importedLineItemSchema).min(1).max(1000),
   });
   server.registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate; the transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate, except that a nonzero amount with zero value is an intentional zero-value quantity adjustment with no exchange rate. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),

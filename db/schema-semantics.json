@@ -2718,8 +2718,8 @@
         "routingWeight": 0.8,
         "importantRules": [
           "amount_units is a signed integer in the referenced account's currency.",
-          "value_units is the signed value in the containing transaction's valuation currency and determines this line's implied exchange rate.",
-          "Every transaction requires at least two line items.",
+          "value_units is the signed value in the containing transaction's valuation currency; with nonzero amount and value it determines this line's implied exchange rate, while zero value may record a quantity-only adjustment.",
+          "Every transaction requires at least two line items, except that a zero-value quantity adjustment may contain one foreign-currency line with a nonzero amount and zero value.",
           "The application centrally validates that transaction values sum exactly to zero in the valuation currency."
         ],
         "sensitivity": "Contains private financial structure or metadata; expose only within the authenticated user's session."
@@ -2837,7 +2837,8 @@
             "examples": [],
             "importantRules": [
               "For native-currency lines this equals amount_units.",
-              "For foreign-currency lines the ratio between value_units and amount_units is the line's exchange rate."
+              "For foreign-currency lines with nonzero amount and value, their ratio is the line's exchange rate.",
+              "A foreign-currency line with a nonzero amount and zero value is a quantity-only adjustment and has no exchange rate."
             ],
             "sensitivity": "Private accounting data belonging to the authenticated user."
           }

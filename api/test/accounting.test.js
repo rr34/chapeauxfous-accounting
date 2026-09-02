@@ -6,7 +6,8 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { createTransaction, deleteAccount, listAccountLedger, listAccounts, updateAccount, validateTransaction } = await import("../src/accounting.js");
+const { createTransaction, deleteAccount, listAccountLedger, listAccounts, updateAccount, updateTransaction,
+  validateTransaction } = await import("../src/accounting.js");
 
 test("account balances follow each account type's normal side", async () => {
   const accountTypes = [
@@ -146,6 +147,59 @@ test("transaction source identity must be complete", async () => {
   );
 });
 
+test("an existing transaction is updated atomically without replacing retained line items", async () => {
+  const statements = [];
+  const runInTransaction = async (work) => work({
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.includes("SELECT transaction_id, TransactionState")) {
+        return [[{ transaction_id: 44, TransactionState: "posted" }]];
+      }
+      if (sql.includes("FROM currencies")) {
+        return [[{ currency_id: 3, owner_person_id: null, CurrencyAbbreviation: "USD",
+          display_name: "US Dollar", currency_type: "iso_4217", scale: 2 }]];
+      }
+      if (sql.includes("SELECT line_item_id") && !sql.includes("JOIN accounts")) {
+        return [[{ line_item_id: 10, account_id: 20 }, { line_item_id: 11, account_id: 21 }]];
+      }
+      if (sql.includes("FROM accounts") && sql.includes("owner_person_id")) {
+        return [[{ account_id: params[0], account_currency_id: 3, is_placeholder: 0, archived_at: null }]];
+      }
+      if (sql.includes("SELECT transaction_id, owner_person_id")) {
+        return [[{ transaction_id: 44, owner_person_id: 7, valuation_currency_id: 3,
+          TransactionState: "posted" }]];
+      }
+      if (sql.includes("FROM line_items li") && sql.includes("JOIN accounts")) {
+        return [[
+          { line_item_id: 10, amount_units: "1250", value_units: "1250", account_id: 20,
+            account_owner_person_id: 7, account_currency_id: 3, is_placeholder: 0 },
+          { line_item_id: 11, amount_units: "-1250", value_units: "-1250", account_id: 21,
+            account_owner_person_id: 7, account_currency_id: 3, is_placeholder: 0 },
+        ]];
+      }
+      if (sql.includes("FROM xrates")) return [[]];
+      if (sql.startsWith("UPDATE") || sql.startsWith("DELETE")) return [{ affectedRows: 1 }];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+
+  const result = await updateTransaction({
+    personId: 7, transactionId: 44, description: "Corrected", transactionDate: "2026-08-12",
+    valuationCurrencyId: 3, rates: [], lineItems: [
+      { id: 10, accountId: 20, amountUnits: "1250", valueUnits: "1250", memo: "Debit" },
+      { id: 11, accountId: 21, amountUnits: "-1250", valueUnits: "-1250", memo: "Credit" },
+    ],
+  }, runInTransaction);
+
+  assert.equal(result.transactionId, 44);
+  assert.equal(result.state, "posted");
+  assert.equal(result.validation.valid, true);
+  const lineUpdates = statements.filter(({ sql }) => sql.includes("UPDATE line_items"));
+  assert.equal(lineUpdates.length, 2);
+  assert.deepEqual(lineUpdates.map(({ params }) => params.slice(-2)), [[10, 44], [11, 44]]);
+  assert.equal(statements.some(({ sql }) => sql.startsWith("INSERT INTO line_items")), false);
+});
+
 function fakeConnection({ lines, rates }) {
   return {
     async query(sql) {
@@ -187,6 +241,46 @@ test("explicit line values allow different rates for the same foreign currency",
   }), 44, 7);
   assert.equal(result.valid, true);
   assert.deepEqual(result.foreignCurrencyIds, [2]);
+});
+
+test("a foreign commodity amount may intentionally carry zero transaction value", async () => {
+  const result = await validateTransaction(fakeConnection({
+    lines: [
+      { line_item_id: 1, amount_units: "142742", value_units: "0", account_id: 10,
+        account_owner_person_id: 7, account_currency_id: 2, is_placeholder: 0 },
+    ],
+    rates: [],
+  }), 44, 7);
+  assert.equal(result.valid, true);
+  assert.equal(result.lineItemCount, 1);
+});
+
+test("an ordinary one-line transaction is still rejected", async () => {
+  await assert.rejects(
+    validateTransaction(fakeConnection({
+      lines: [
+        { line_item_id: 1, amount_units: "100", value_units: "100", account_id: 10,
+          account_owner_person_id: 7, account_currency_id: 2, is_placeholder: 0 },
+      ],
+      rates: [],
+    }), 44, 7),
+    (error) => error.code === "TOO_FEW_LINE_ITEMS",
+  );
+});
+
+test("a foreign line cannot carry transaction value without a commodity amount", async () => {
+  await assert.rejects(
+    validateTransaction(fakeConnection({
+      lines: [
+        { line_item_id: 1, amount_units: "0", value_units: "100", account_id: 10,
+          account_owner_person_id: 7, account_currency_id: 2, is_placeholder: 0 },
+        { line_item_id: 2, amount_units: "-100", value_units: "-100", account_id: 11,
+          account_owner_person_id: 7, account_currency_id: 3, is_placeholder: 0 },
+      ],
+      rates: [],
+    }), 44, 7),
+    (error) => error.code === "VALUE_WITHOUT_AMOUNT",
+  );
 });
 
 test("posting fails when a foreign commodity has no transaction rate", async () => {

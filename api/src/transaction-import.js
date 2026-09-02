@@ -82,8 +82,8 @@ function normalizeLine(line, transactionExternalId) {
 
 function normalizeTransaction(transaction) {
   const externalId = limitedRequiredText(transaction?.externalId, "external transaction ID", 128);
-  if (!Array.isArray(transaction?.lineItems) || transaction.lineItems.length < 2) {
-    throw importError(`Transaction "${externalId}" requires at least two line items.`, "TOO_FEW_LINE_ITEMS", { externalId });
+  if (!Array.isArray(transaction?.lineItems) || transaction.lineItems.length === 0) {
+    throw importError(`Transaction "${externalId}" requires at least one line item.`, "TOO_FEW_LINE_ITEMS", { externalId });
   }
   return {
     externalId,
@@ -309,17 +309,29 @@ function resolveTransaction(input, context, conflictingExternalIds) {
   }
 
   if (valuationCurrency && resolvedLines.length === input.lineItems.length) {
+    const onlyLine = resolvedLines.length === 1 ? resolvedLines[0] : null;
+    const singleLineQuantityAdjustment = onlyLine != null
+      && onlyLine.accountCurrencyId !== valuationCurrency.id
+      && BigInt(onlyLine.amountUnits) !== 0n
+      && onlyLine.valueUnits != null
+      && BigInt(onlyLine.valueUnits) === 0n;
+    if (resolvedLines.length === 1 && !singleLineQuantityAdjustment) {
+      errors.push(issue("TOO_FEW_LINE_ITEMS",
+        "A transaction requires at least two line items unless it is a single-line zero-value quantity adjustment.", {
+          externalId: input.externalId,
+        }));
+    }
     for (const line of resolvedLines) {
       if (line.accountCurrencyId === valuationCurrency.id) continue;
       const amount = BigInt(line.amountUnits);
       const value = BigInt(line.valueUnits ?? "0");
-      if ((amount === 0n) !== (value === 0n)) {
-        errors.push(issue("EXCHANGE_RATE_REQUIRED", "A foreign line must have either two zero amount/value fields or two non-zero fields.", {
+      if (amount === 0n && value !== 0n) {
+        errors.push(issue("VALUE_WITHOUT_AMOUNT", "A foreign line cannot carry valuation value without an account-currency amount.", {
           currencyCode: line.accountCurrencyCode, accountFullName: line.accountFullName,
         }));
         continue;
       }
-      if ((amount < 0n) !== (value < 0n)) {
+      if (amount !== 0n && value !== 0n && (amount < 0n) !== (value < 0n)) {
         errors.push(issue("INVALID_EXCHANGE_RATE_SIGN", "Foreign amount and valuation value must have the same sign.", {
           currencyCode: line.accountCurrencyCode, accountFullName: line.accountFullName,
         }));

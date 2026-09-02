@@ -9,7 +9,7 @@ import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
   createAccount, createTransaction, getTransaction, listAccountLedger, listAccounts,
-  listTransactions, updateAccount, verifyAllPostedTransactions,
+  listTransactions, updateAccount, updateTransaction, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies } from "./currencies.js";
 import { commitAccountDeletion, previewAccountDeletion } from "./account-delete.js";
@@ -133,6 +133,13 @@ app.get("/api/transactions/:transactionId", requireAuth, async (req, res, next) 
 
 app.post("/api/transactions", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createTransaction({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
+});
+
+app.patch("/api/transactions/:transactionId", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await updateTransaction({ ...req.body, personId: req.auth.personId,
+      transactionId: req.params.transactionId }));
+  } catch (error) { next(error); }
 });
 
 app.get("/api/transaction-import-jobs", requireAuth, async (req, res, next) => {

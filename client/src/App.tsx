@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
 import type {
@@ -149,6 +149,40 @@ function accountFullNames(accounts: Account[]) {
   }
   for (const account of accounts) resolve(account);
   return names;
+}
+
+type AccountChoice = { value: string; label: string; currencyCode: string };
+
+function AccountCombobox({ value, choices, onChange, label }: {
+  value: string; choices: AccountChoice[]; onChange: (value: string) => void; label: string;
+}) {
+  const listId = useId();
+  const selected = choices.find((choice) => choice.value === value) ?? null;
+  const [query, setQuery] = useState(selected?.label ?? "");
+  const [open, setOpen] = useState(false);
+  useEffect(() => { if (!open) setQuery(selected?.label ?? ""); }, [selected?.label, open]);
+  const normalized = query.trim().toLocaleLowerCase("en-US");
+  const matches = normalized
+    ? choices.filter((choice) => `${choice.label} ${choice.currencyCode}`.toLocaleLowerCase("en-US").includes(normalized)).slice(0, 40)
+    : [];
+
+  return <div className="account-combobox">
+    <input role="combobox" aria-label={label} aria-expanded={open} aria-controls={listId}
+      aria-autocomplete="list" autoComplete="off" value={query}
+      placeholder="Type to find an account…"
+      onFocus={() => { setOpen(true); setQuery(""); }}
+      onBlur={() => { setOpen(false); setQuery(selected?.label ?? ""); }}
+      onChange={(event) => { setQuery(event.target.value); setOpen(true); onChange(""); }} />
+    {open && <div className="account-combobox-list" id={listId} role="listbox">
+      {!normalized && <span>Type part of an account name to filter.</span>}
+      {normalized && matches.map((choice) => <button type="button" role="option" key={choice.value}
+        aria-selected={choice.value === value} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { onChange(choice.value); setQuery(choice.label); setOpen(false); }}>
+        <strong>{choice.label}</strong><small>{choice.currencyCode}</small>
+      </button>)}
+      {normalized && !matches.length && <span>No postable accounts match “{query}”.</span>}
+    </div>}
+  </div>;
 }
 
 function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
@@ -449,14 +483,22 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
   </aside>;
 }
 
-type EditableLine = { accountId: string; amount: string; memo: string };
-type EditableRate = { fromAmount: string; toAmount: string };
 type RateDirection = "value-per-amount" | "amount-per-value";
+const oppositeRateDirection = (direction: RateDirection): RateDirection => direction === "value-per-amount"
+  ? "amount-per-value"
+  : "value-per-amount";
+const exchangeRateUnits = (direction: RateDirection, valueCurrencyCode: string, amountCurrencyCode: string) =>
+  direction === "value-per-amount"
+    ? `${valueCurrencyCode} per ${amountCurrencyCode}`
+    : `${amountCurrencyCode} per ${valueCurrencyCode}`;
+type EditableLine = { id: number | null; accountId: string; amount: string; value: string; memo: string;
+  rateDecimal: string; rateDirection: RateDirection; rateChanges: "amount" | "value"; autoBalance: boolean };
 type EditableImportRecord = CanonicalImportRecord & {
   editorKey: string;
   rateDecimal: string;
   rateDirection: RateDirection;
   rateChanges: "amount" | "value";
+  autoBalance: boolean;
 };
 
 function amountForSide(amount: string, side: "debit" | "credit") {
@@ -475,7 +517,7 @@ function signedAmountForSide(side: "debit" | "credit", value: string) {
 type DecimalParts = { units: bigint; scale: number };
 
 function decimalParts(value: string | null | undefined): DecimalParts | null {
-  const match = value?.trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  const match = (value == null ? "" : String(value)).trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
   if (!match) return null;
   const fraction = match[3] ?? "";
   const magnitude = BigInt(`${match[2]}${fraction}`);
@@ -492,9 +534,35 @@ function roundedQuotient(numerator: bigint, denominator: bigint) {
   return remainder * 2n >= denominator ? quotient + 1n : quotient;
 }
 
+function signedRoundedQuotient(numerator: bigint, denominator: bigint) {
+  const negative = numerator < 0n !== denominator < 0n;
+  const magnitude = roundedQuotient(numerator < 0n ? -numerator : numerator,
+    denominator < 0n ? -denominator : denominator);
+  return negative ? -magnitude : magnitude;
+}
+
 function formattedDecimal(units: bigint, scale: number) {
   const value = unitsToDecimal(units.toString(), scale);
   return scale === 0 ? value : value.replace(/\.?0+$/, "");
+}
+
+function sumDecimals(values: Array<string | null | undefined>, { ignoreBlank = false } = {}) {
+  const parsed: DecimalParts[] = [];
+  for (const value of values) {
+    if (ignoreBlank && String(value ?? "").trim() === "") continue;
+    const parts = decimalParts(typeof value === "string" ? value : value == null ? "" : String(value));
+    if (!parts) return null;
+    parsed.push(parts);
+  }
+  if (!parsed.length) return "0";
+  const scale = Math.max(...parsed.map((parts) => parts.scale));
+  const units = parsed.reduce((sum, parts) => sum + parts.units * powerOfTen(scale - parts.scale), 0n);
+  return formattedDecimal(units, scale);
+}
+
+function negateDecimal(value: string) {
+  const parts = decimalParts(value);
+  return parts ? formattedDecimal(-parts.units, parts.scale) : "";
 }
 
 function decimalRatio(dividend: string | null | undefined, divisor: string | null | undefined) {
@@ -581,54 +649,187 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
   </div>;
 }
 
-function TransactionComposer({ accounts, currencies, initialAccountId, token, onCreated }: {
+function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null, token, onSaved }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
-  token: string; onCreated: () => Promise<void>;
+  initialTransaction?: TransactionDetail | null; token: string; onSaved: () => Promise<void>;
 }) {
-  const initialAccount = accounts.find((account) => account.id === initialAccountId);
-  const [description, setDescription] = useState("");
-  const [date, setDate] = useState(today());
-  const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(initialAccount?.currencyId ?? "");
-  const [lines, setLines] = useState<EditableLine[]>([
-    { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "" },
-    { accountId: "", amount: "", memo: "" },
-  ]);
-  const [rates, setRates] = useState<Record<number, EditableRate>>({});
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
+  const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const initialAccount = accounts.find((account) => account.id === initialAccountId);
+  const blankLine = (accountId = ""): EditableLine => ({ id: null, accountId, amount: "", value: "", memo: "",
+    rateDecimal: "", rateDirection: "value-per-amount", rateChanges: "value", autoBalance: false });
+  const [description, setDescription] = useState(initialTransaction?.description ?? "");
+  const [date, setDate] = useState(initialTransaction?.date ?? today());
+  const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(
+    initialTransaction?.valuationCurrencyId ?? initialAccount?.currencyId ?? "");
+  const [lines, setLines] = useState<EditableLine[]>(() => {
+    if (!initialTransaction) return [blankLine(initialAccountId == null ? "" : String(initialAccountId))];
+    const valuationScale = currencyMap.get(initialTransaction.valuationCurrencyId)?.scale ?? 2;
+    return initialTransaction.lineItems.map((line) => {
+      const amount = unitsToDecimal(line.amountUnits, line.scale);
+      let valueUnits = line.valueUnits;
+      if (valueUnits == null && line.currencyId === initialTransaction.valuationCurrencyId) valueUnits = line.amountUnits;
+      if (valueUnits == null) {
+        const rate = initialTransaction.rates.find((candidate) => candidate.fromCurrencyId === line.currencyId
+          && candidate.toCurrencyId === initialTransaction.valuationCurrencyId);
+        if (rate && BigInt(rate.fromUnits) !== 0n) {
+          valueUnits = signedRoundedQuotient(BigInt(line.amountUnits) * BigInt(rate.toUnits),
+            BigInt(rate.fromUnits)).toString();
+        }
+      }
+      const value = valueUnits == null ? "" : unitsToDecimal(valueUnits, valuationScale);
+      const rateRecord = { amount_decimal: amount, value_decimal: value };
+      return { id: line.id, accountId: String(line.accountId), amount, value, memo: line.memo ?? "",
+        rateDecimal: lineRate(rateRecord, "value-per-amount"), rateDirection: "value-per-amount" as const,
+        rateChanges: "value" as const, autoBalance: false };
+    });
+  });
+  const [showValuationDetails, setShowValuationDetails] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const initiallyUsedAccountIds = useMemo(() => new Set(initialTransaction?.lineItems.map((line) => line.accountId) ?? []),
+    [initialTransaction]);
+  const accountChoices = useMemo(() => accounts.filter((account) => !account.placeholder
+    && (!account.archivedAt || initiallyUsedAccountIds.has(account.id)))
+    .map((account) => ({ value: String(account.id), label: fullNames.get(account.id) ?? account.name,
+      currencyCode: account.currencyCode })).sort((left, right) => left.label.localeCompare(right.label)),
+  [accounts, fullNames, initiallyUsedAccountIds]);
   const resolvedValuationCurrencyId = Number(valuationCurrencyId);
-  const foreignCurrencyIds = [...new Set(lines.map((line) => accountMap.get(Number(line.accountId))?.currencyId)
-    .filter((currencyId): currencyId is number => Boolean(currencyId) && currencyId !== resolvedValuationCurrencyId))];
+  const valuationCurrency = currencyMap.get(resolvedValuationCurrencyId);
 
-  function updateLine(index: number, patch: Partial<EditableLine>) {
-    setLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line));
+  function synchronizeLine(line: EditableLine, nextValuationCurrencyId = resolvedValuationCurrencyId) {
+    const account = accountMap.get(Number(line.accountId));
+    if (account?.currencyId === nextValuationCurrencyId) return { ...line, value: line.amount, rateDecimal: "1" };
+    return { ...line, rateDecimal: line.rateDirection === "value-per-amount"
+      ? decimalRatio(line.value, line.amount) : decimalRatio(line.amount, line.value) };
   }
 
+  function rebalanceLines(current: EditableLine[], nextValuationCurrencyId = resolvedValuationCurrencyId) {
+    const balanceIndex = current.findIndex((line) => line.autoBalance);
+    if (balanceIndex < 0) return current;
+    const otherTotal = sumDecimals(current.filter((_, index) => index !== balanceIndex).map((line) => line.value));
+    if (otherTotal == null) return current;
+    const value = negateDecimal(otherTotal);
+    const target = current[balanceIndex];
+    const account = accountMap.get(Number(target.accountId));
+    const rate = decimalParts(target.rateDecimal);
+    let amount = value;
+    if (account && account.currencyId !== nextValuationCurrencyId && rate && rate.units > 0n) {
+      amount = target.rateDirection === "value-per-amount"
+        ? decimalQuotientToScale(value, target.rateDecimal, account.scale) ?? target.amount
+        : decimalProductToScale(value, target.rateDecimal, account.scale) ?? target.amount;
+    }
+    return current.map((line, index) => index === balanceIndex
+      ? synchronizeLine({ ...line, amount, value }, nextValuationCurrencyId) : line);
+  }
+
+  function updateLine(index: number, patch: Partial<EditableLine>) {
+    const manualValue = Object.hasOwn(patch, "amount") || Object.hasOwn(patch, "value");
+    setLines((current) => rebalanceLines(current.map((line, lineIndex) => lineIndex === index
+      ? synchronizeLine({ ...line, ...patch, autoBalance: manualValue ? false : line.autoBalance }) : line)));
+  }
+
+  function updateLineAmount(index: number, side: "debit" | "credit", value: string) {
+    updateLine(index, { amount: signedAmountForSide(side, value) });
+  }
+
+  function updateLineRate(index: number, rateDecimal: string) {
+    setLines((current) => rebalanceLines(current.map((line, lineIndex) => {
+      if (lineIndex !== index) return line;
+      const account = accountMap.get(Number(line.accountId));
+      if (line.rateChanges === "amount") {
+        const amount = line.rateDirection === "value-per-amount"
+          ? decimalQuotientToScale(line.value, rateDecimal, account?.scale ?? 2)
+          : decimalProductToScale(line.value, rateDecimal, account?.scale ?? 2);
+        return { ...line, rateDecimal, amount: amount ?? line.amount };
+      }
+      const value = line.rateDirection === "value-per-amount"
+        ? decimalProductToScale(line.amount, rateDecimal, valuationCurrency?.scale ?? 2)
+        : decimalQuotientToScale(line.amount, rateDecimal, valuationCurrency?.scale ?? 2);
+      return { ...line, rateDecimal, value: value ?? line.value };
+    })));
+  }
+
+  function invertLineRate(index: number) {
+    setLines((current) => rebalanceLines(current.map((line, lineIndex) => {
+      if (lineIndex !== index) return line;
+      const rateDirection = oppositeRateDirection(line.rateDirection);
+      return { ...line, rateDirection, rateDecimal: rateDirection === "value-per-amount"
+        ? decimalRatio(line.value, line.amount) : decimalRatio(line.amount, line.value) };
+    })));
+  }
+
+  function addBalancingLine() {
+    setLines((current) => rebalanceLines([...current.map((line) => ({ ...line, autoBalance: false })),
+      { ...blankLine(), autoBalance: true }]));
+  }
+
+  const valueTotal = sumDecimals(lines.map((line) => line.value));
+  const firstIncompleteLine = lines.findIndex((line) => !accountMap.has(Number(line.accountId))
+    || !decimalParts(line.amount) || !decimalParts(line.value));
+  const valueWithoutAmountLine = lines.findIndex((line) => {
+    const account = accountMap.get(Number(line.accountId));
+    const amount = decimalParts(line.amount);
+    const value = decimalParts(line.value);
+    return Boolean(account && account.currencyId !== resolvedValuationCurrencyId && amount && value
+      && amount.units === 0n && value.units !== 0n);
+  });
+  const signMismatchLine = lines.findIndex((line) => {
+    const amount = decimalParts(line.amount);
+    const value = decimalParts(line.value);
+    return Boolean(amount && value && amount.units !== 0n && value.units !== 0n
+      && (amount.units < 0n) !== (value.units < 0n));
+  });
+  const invalidRateLine = lines.findIndex((line) => {
+    const account = accountMap.get(Number(line.accountId));
+    const amount = decimalParts(line.amount);
+    const value = decimalParts(line.value);
+    return Boolean(account && account.currencyId !== resolvedValuationCurrencyId
+      && amount && value && amount.units !== 0n && value.units !== 0n
+      && (!decimalParts(line.rateDecimal) || decimalParts(line.rateDecimal)!.units <= 0n));
+  });
+  const singleLineQuantityAdjustment = lines.length === 1 && (() => {
+    const account = accountMap.get(Number(lines[0].accountId));
+    const amount = decimalParts(lines[0].amount);
+    const value = decimalParts(lines[0].value);
+    return Boolean(account && account.currencyId !== resolvedValuationCurrencyId && amount && value
+      && amount.units !== 0n && value.units === 0n);
+  })();
+  const hasEnoughLines = lines.length >= 2 || singleLineQuantityAdjustment;
+  const balanced = valueTotal === "0";
+  const canSubmit = Boolean(date && valuationCurrency && hasEnoughLines
+    && firstIncompleteLine < 0 && valueWithoutAmountLine < 0 && signMismatchLine < 0
+    && invalidRateLine < 0 && balanced);
+  const liveStatus = !valuationCurrency ? "Choose the transaction value currency."
+    : firstIncompleteLine >= 0 ? `Complete the account, amount, and value for split ${firstIncompleteLine + 1}.`
+    : !hasEnoughLines ? "Add a balancing split; only a zero-value quantity adjustment may contain one split."
+    : valueWithoutAmountLine >= 0 ? `Split ${valueWithoutAmountLine + 1} cannot have value without an amount.`
+    : signMismatchLine >= 0 ? `Amount and value must have the same debit or credit sign on split ${signMismatchLine + 1}.`
+    : invalidRateLine >= 0 ? `Enter a positive exchange rate for split ${invalidRateLine + 1}.`
+    : !balanced ? `Out of balance by ${valueTotal ?? "an invalid value"} ${valuationCurrency.code}.`
+    : `Balanced in ${valuationCurrency.code} and ready to ${initialTransaction ? "save" : "post"}.`;
+
   async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    if (!canSubmit || !valuationCurrency) { setError(liveStatus); return; }
+    setBusy(true); setError("");
     try {
       const payloadLines = lines.map((line) => {
         const account = accountMap.get(Number(line.accountId));
         if (!account) throw new Error("Choose an account for every line.");
-        return { accountId: account.id, amountUnits: decimalToUnits(line.amount, account.scale), memo: line.memo, tags: [] };
+        return { id: line.id, accountId: account.id, amountUnits: decimalToUnits(line.amount, account.scale),
+          valueUnits: decimalToUnits(line.value, valuationCurrency.scale), memo: line.memo, tags: [] };
       });
-      const payloadRates = foreignCurrencyIds.map((fromCurrencyId) => {
-        const fromCurrency = currencyMap.get(fromCurrencyId);
-        const toCurrency = currencyMap.get(resolvedValuationCurrencyId);
-        const rate = rates[fromCurrencyId];
-        if (!fromCurrency || !toCurrency || !rate) throw new Error(`Enter a ${fromCurrency?.code || "foreign"} conversion rate.`);
-        return { fromCurrencyId, toCurrencyId: resolvedValuationCurrencyId,
-          fromUnits: decimalToUnits(rate.fromAmount, fromCurrency.scale), toUnits: decimalToUnits(rate.toAmount, toCurrency.scale) };
-      });
-      await api("/transactions", { method: "POST", body: JSON.stringify({ description, transactionDate: date,
-        valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: payloadRates, post: true }) }, token);
-      setDescription(""); setDate(today()); setLines([
-        { accountId: initialAccountId == null ? "" : String(initialAccountId), amount: "", memo: "" },
-        { accountId: "", amount: "", memo: "" },
-      ]);
-      setRates({}); await onCreated();
+      await api(initialTransaction ? `/transactions/${initialTransaction.id}` : "/transactions",
+        { method: initialTransaction ? "PATCH" : "POST", body: JSON.stringify({ description, transactionDate: date,
+        valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: [], post: true }) }, token);
+      if (!initialTransaction) {
+        setDescription(""); setDate(today()); setLines([
+          blankLine(initialAccountId == null ? "" : String(initialAccountId)),
+        ]);
+      }
+      setShowValuationDetails(false); await onSaved();
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusy(false); }
   }
@@ -638,30 +839,74 @@ function TransactionComposer({ accounts, currencies, initialAccountId, token, on
       <div className="transaction-meta"><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
         <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What happened?" /></label>
         <label>Value currency<select required value={valuationCurrencyId}
-          onChange={(event) => setValuationCurrencyId(event.target.value ? Number(event.target.value) : "")}>
+          onChange={(event) => {
+            const nextId = event.target.value ? Number(event.target.value) : "";
+            setValuationCurrencyId(nextId);
+            setLines((current) => rebalanceLines(current.map((line) => synchronizeLine(line, Number(nextId))), Number(nextId)));
+          }}>
           <option value="">Choose currency…</option>
           {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}</select></label></div>
-      <div className="line-editor"><div className="line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
-        {lines.map((line, index) => <div className="line-grid" key={index}>
-          <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
-          <select value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}><option value="">Choose…</option>
-            {accounts.filter((account) => !account.archivedAt && !account.placeholder).map((account) => <option key={account.id} value={account.id}>{account.name} ({account.currencyCode})</option>)}</select>
-          <input inputMode="decimal" aria-label={`Debit for line ${index + 1}`} value={amountForSide(line.amount, "debit")}
-            onChange={(event) => updateLine(index, { amount: signedAmountForSide("debit", event.target.value) })} />
-          <input inputMode="decimal" aria-label={`Credit for line ${index + 1}`} value={amountForSide(line.amount, "credit")}
-            onChange={(event) => updateLine(index, { amount: signedAmountForSide("credit", event.target.value) })} />
-          <button type="button" className="quiet" disabled={lines.length <= 2} onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}>×</button>
-        </div>)}</div>
-      <button type="button" className="secondary" onClick={() => setLines((current) => [...current, { accountId: "", amount: "", memo: "" }])}>Add split</button>
-      {foreignCurrencyIds.length > 0 && <div className="rates"><h3>Transaction exchange rates</h3>{foreignCurrencyIds.map((currencyId) => {
-        const foreign = currencyMap.get(currencyId)!; const valuation = currencyMap.get(resolvedValuationCurrencyId)!; const rate = rates[currencyId] || { fromAmount: "", toAmount: "" };
-        return <div className="rate-row" key={currencyId}><span>When</span><input placeholder={`1 ${foreign.code}`} value={rate.fromAmount}
-          onChange={(event) => setRates((current) => ({ ...current, [currencyId]: { ...rate, fromAmount: event.target.value } }))} />
-          <span>{foreign.code} equals</span><input placeholder={valuation.code} value={rate.toAmount}
-          onChange={(event) => setRates((current) => ({ ...current, [currencyId]: { ...rate, toAmount: event.target.value } }))} /><span>{valuation.code}</span></div>;
-      })}</div>}
+      <div className="transaction-editor-toolbar"><div><strong>Transaction splits</strong><small>Each row is one posting under this transaction.</small></div>
+        <button type="button" className="secondary" aria-expanded={showValuationDetails}
+          onClick={() => setShowValuationDetails((current) => !current)}>
+          {showValuationDetails ? "Hide values & rates" : "Show values & rates"}</button></div>
+      <div className="line-editor transaction-split-group"><div className="line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
+        {lines.map((line, index) => {
+          const account = accountMap.get(Number(line.accountId));
+          const isNative = Boolean(account && account.currencyId === resolvedValuationCurrencyId);
+          const amount = decimalParts(line.amount);
+          const value = decimalParts(line.value);
+          const isZeroValueAdjustment = Boolean(!isNative && account && amount && value
+            && amount.units !== 0n && value.units === 0n);
+          const canChooseRateDirection = Boolean(account && !isNative && !isZeroValueAdjustment);
+          const amountCurrencyCode = account?.currencyCode ?? "account currency";
+          const valueCurrencyCode = valuationCurrency?.code ?? "value currency";
+          const rateUnits = exchangeRateUnits(line.rateDirection, valueCurrencyCode, amountCurrencyCode);
+          const inverseRateUnits = exchangeRateUnits(oppositeRateDirection(line.rateDirection),
+            valueCurrencyCode, amountCurrencyCode);
+          return <div className={`transaction-split ${line.autoBalance ? "auto-balanced" : ""}`} key={index}><div className="line-grid">
+            <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
+            <AccountCombobox label={`Account for split ${index + 1}`} value={line.accountId}
+              choices={accountChoices} onChange={(accountId) => updateLine(index, { accountId })} />
+            <input inputMode="decimal" aria-label={`Debit for line ${index + 1}`} value={amountForSide(line.amount, "debit")}
+              onChange={(event) => updateLineAmount(index, "debit", event.target.value)} />
+            <input inputMode="decimal" aria-label={`Credit for line ${index + 1}`} value={amountForSide(line.amount, "credit")}
+              onChange={(event) => updateLineAmount(index, "credit", event.target.value)} />
+            <button type="button" className="quiet" aria-label={`Remove split ${index + 1}`} disabled={lines.length <= 1}
+              onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>
+          </div>
+          {showValuationDetails && <div className="line-value-rate"><label>Value in {valuationCurrency?.code ?? "value currency"}
+            <input inputMode="decimal" disabled={isNative} value={line.value}
+              onChange={(event) => updateLine(index, { value: event.target.value })} /></label>
+            <label>Exchange rate<span className="rate-input-group"><input inputMode="decimal"
+              placeholder={isZeroValueAdjustment ? "Not applicable" : undefined}
+              value={isNative ? "1" : isZeroValueAdjustment ? "" : line.rateDecimal}
+              disabled={isNative || isZeroValueAdjustment} onChange={(event) => updateLineRate(index, event.target.value)} />
+              <button type="button" className="rate-invert"
+                disabled={!canChooseRateDirection}
+                aria-label={canChooseRateDirection
+                  ? `Exchange rate shown as ${rateUnits}; click to show ${inverseRateUnits} for line ${index + 1}`
+                  : `Exchange rate units for line ${index + 1}: ${rateUnits}`}
+                title={canChooseRateDirection ? `Show ${inverseRateUnits}` : undefined}
+                onClick={() => invertLineRate(index)}>{rateUnits}</button></span>
+              <small>{isZeroValueAdjustment
+                ? "No exchange rate — zero-value quantity adjustment."
+                : !account ? "Choose an account to set the rate units."
+                : isNative ? `No conversion — amount and value are both ${valueCurrencyCode}.`
+                : `Click “${rateUnits}” to show ${inverseRateUnits}.`}</small>
+              {!isNative && !isZeroValueAdjustment && <span className="rate-update-choice">Changing rate updates<select value={line.rateChanges}
+                onChange={(event) => setLines((current) => current.map((candidate, candidateIndex) => candidateIndex === index
+                  ? { ...candidate, rateChanges: event.target.value as "amount" | "value" } : candidate))}>
+                <option value="value">value</option><option value="amount">amount</option></select></span>}</label></div>}
+          </div>;
+        })}
+        <button type="button" className="add-split-row" onClick={addBalancingLine}><span>＋</span>
+          Add another split <small>The balancing debit or credit will be entered automatically</small></button>
+      </div>
+      <p className={`transaction-live-status ${canSubmit ? "balanced" : "needs-attention"}`}>{liveStatus}</p>
       {error && <p className="error">{error}</p>}
-      <button className="primary" disabled={busy}>{busy ? "Validating…" : "Validate and post"}</button>
+      <button className="primary" disabled={busy || !canSubmit}>{busy ? "Validating…"
+        : initialTransaction ? "Save transaction" : "Validate and post"}</button>
     </form>
   </section>;
 }
@@ -672,7 +917,18 @@ function TransactionComposerDialog({ accounts, currencies, initialAccountId, tok
 }) {
   return <TransactionEditorModal eyebrow="New entry" title="Balanced transaction" onClose={onClose}>
     <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={initialAccountId}
-      token={token} onCreated={onCreated} />
+      token={token} onSaved={onCreated} />
+  </TransactionEditorModal>;
+}
+
+function TransactionEditDialog({ transaction, accounts, currencies, token, onSaved, onClose }: {
+  transaction: TransactionDetail; accounts: Account[]; currencies: Currency[]; token: string;
+  onSaved: () => Promise<void>; onClose: () => void;
+}) {
+  return <TransactionEditorModal eyebrow="Edit transaction"
+    title={transaction.description || "Untitled transaction"} onClose={onClose}>
+    <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={null}
+      initialTransaction={transaction} token={token} onSaved={onSaved} />
   </TransactionEditorModal>;
 }
 
@@ -680,22 +936,43 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
   exception: TransactionImportException; accounts: Account[]; currencies: Currency[]; token: string;
   importJobId: string; onSaved: () => Promise<void>; onCancel: () => void;
 }) {
-  const [records, setRecords] = useState<EditableImportRecord[]>(() =>
-    exception.canonical_records.map((record, index) => ({
-      ...record,
-      editorKey: `${record.line_external_id ?? "line"}-${index}`,
-      rateDirection: "value-per-amount",
-      rateDecimal: lineRate(record, "value-per-amount"),
-      rateChanges: "value",
-    })));
+  const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const initialAccountByFullName = useMemo(() => new Map(accounts.map((account) =>
+    [fullNames.get(account.id) ?? account.name, account])), [accounts, fullNames]);
+  const [records, setRecords] = useState<EditableImportRecord[]>(() => {
+    const prepared = exception.canonical_records.map((record, index) => {
+      const normalized = {
+        ...record,
+        transaction_external_id: String(record.transaction_external_id ?? exception.source_identity.transaction_external_id),
+        line_external_id: record.line_external_id == null ? null : String(record.line_external_id),
+        transaction_date: String(record.transaction_date ?? today()),
+        description: record.description == null ? null : String(record.description),
+        valuation_currency_code: String(record.valuation_currency_code ?? "USD"),
+        account_full_name: String(record.account_full_name ?? ""),
+        amount_decimal: record.amount_decimal == null ? "" : String(record.amount_decimal),
+        value_decimal: record.value_decimal == null ? null : String(record.value_decimal),
+        memo: record.memo == null ? null : String(record.memo),
+      };
+      const account = initialAccountByFullName.get(normalized.account_full_name);
+      if (account?.currencyCode === normalized.valuation_currency_code) normalized.value_decimal = normalized.amount_decimal;
+      return { ...normalized, editorKey: `${normalized.line_external_id ?? "line"}-${index}`,
+        rateDirection: "value-per-amount" as const,
+        rateDecimal: lineRate(normalized, "value-per-amount"), rateChanges: "value" as const,
+        autoBalance: false };
+    });
+    return prepared;
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const [showValuationDetails, setShowValuationDetails] = useState(false);
   const postableAccounts = useMemo(() => accounts.filter((account) => !account.archivedAt && !account.placeholder)
     .map((account) => ({ account, fullName: fullNames.get(account.id) ?? account.name }))
     .sort((left, right) => left.fullName.localeCompare(right.fullName)), [accounts, fullNames]);
   const accountByFullName = useMemo(() => new Map(postableAccounts.map(({ account, fullName }) => [fullName, account])),
     [postableAccounts]);
+  const accountChoices = useMemo(() => postableAccounts.map(({ account, fullName }) => ({
+    value: fullName, label: fullName, currencyCode: account.currencyCode,
+  })), [postableAccounts]);
   const first = records[0];
 
   function synchronizeRate(record: EditableImportRecord) {
@@ -706,34 +983,55 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
     return { ...record, rateDecimal: lineRate(record, record.rateDirection) };
   }
 
+  function rebalanceRecords(current: EditableImportRecord[]) {
+    const balanceIndex = current.findIndex((record) => record.autoBalance);
+    if (balanceIndex < 0) return current;
+    const otherTotal = sumDecimals(current.filter((_, index) => index !== balanceIndex)
+      .map((record) => record.value_decimal));
+    if (otherTotal == null) return current;
+    const value = negateDecimal(otherTotal);
+    const target = current[balanceIndex];
+    const account = accountByFullName.get(target.account_full_name);
+    const rate = decimalParts(target.rateDecimal);
+    let amount = value;
+    if (account && account.currencyCode !== target.valuation_currency_code && rate && rate.units > 0n) {
+      amount = target.rateDirection === "value-per-amount"
+        ? decimalQuotientToScale(value, target.rateDecimal, account.scale) ?? target.amount_decimal
+        : decimalProductToScale(value, target.rateDecimal, account.scale) ?? target.amount_decimal;
+    }
+    return current.map((record, index) => index === balanceIndex
+      ? synchronizeRate({ ...record, amount_decimal: amount, value_decimal: value }) : record);
+  }
+
   function updateTransaction(patch: Partial<Pick<CanonicalImportRecord,
     "transaction_date" | "description" | "valuation_currency_code">>) {
-    setRecords((current) => current.map((record) => synchronizeRate({ ...record, ...patch })));
+    setRecords((current) => rebalanceRecords(current.map((record) => synchronizeRate({ ...record, ...patch }))));
   }
 
   function updateLine(index: number, patch: Partial<CanonicalImportRecord>) {
-    setRecords((current) => current.map((record, recordIndex) => recordIndex === index
-      ? synchronizeRate({ ...record, ...patch }) : record));
+    const changesValue = Object.hasOwn(patch, "amount_decimal") || Object.hasOwn(patch, "value_decimal");
+    setRecords((current) => rebalanceRecords(current.map((record, recordIndex) => recordIndex === index
+      ? synchronizeRate({ ...record, ...patch, autoBalance: changesValue ? false : record.autoBalance }) : record)));
   }
 
   function updateLineAmount(index: number, side: "debit" | "credit", value: string) {
-    setRecords((current) => current.map((record, recordIndex) => {
+    setRecords((current) => rebalanceRecords(current.map((record, recordIndex) => {
       if (recordIndex !== index) return record;
       const amount = signedAmountForSide(side, value);
       const account = accountByFullName.get(record.account_full_name);
-      const next = { ...record, amount_decimal: amount };
+      const next = { ...record, amount_decimal: amount, autoBalance: false };
       if (account?.currencyCode === record.valuation_currency_code) next.value_decimal = amount;
       return synchronizeRate(next);
-    }));
+    })));
   }
 
   function updateLineValue(index: number, value: string) {
-    setRecords((current) => current.map((record, recordIndex) => recordIndex === index
-      ? synchronizeRate({ ...record, value_decimal: value }) : record));
+    setRecords((current) => rebalanceRecords(current.map((record, recordIndex) => recordIndex === index
+      ? synchronizeRate({ ...record, value_decimal: value, autoBalance: false }) : record)));
   }
 
   function updateLineRate(index: number, rateDecimal: string) {
-    setRecords((current) => current.map((record, recordIndex) => {
+    setRecords((current) => rebalanceRecords(current.map((record, recordIndex) => {
       if (recordIndex !== index) return record;
       const valuationCurrency = currencies.find((currency) => currency.code === record.valuation_currency_code);
       const account = accountByFullName.get(record.account_full_name);
@@ -747,41 +1045,97 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
         ? decimalProductToScale(record.amount_decimal, rateDecimal, valuationCurrency?.scale ?? 2)
         : decimalQuotientToScale(record.amount_decimal, rateDecimal, valuationCurrency?.scale ?? 2);
       return { ...record, rateDecimal, value_decimal: calculatedValue ?? record.value_decimal };
-    }));
+    })));
   }
 
   function invertLineRate(index: number) {
-    setRecords((current) => current.map((record, recordIndex) => {
+    setRecords((current) => rebalanceRecords(current.map((record, recordIndex) => {
       if (recordIndex !== index) return record;
-      const rateDirection = record.rateDirection === "value-per-amount" ? "amount-per-value" : "value-per-amount";
+      const rateDirection = oppositeRateDirection(record.rateDirection);
       return { ...record, rateDirection, rateDecimal: lineRate(record, rateDirection) };
-    }));
+    })));
   }
 
   function addSplit() {
-    setRecords((current) => [...current, {
+    setRecords((current) => {
+      const currentTotal = sumDecimals(current.map((record) => record.value_decimal), { ignoreBlank: true });
+      const balancing = currentTotal == null ? "" : negateDecimal(currentTotal);
+      return rebalanceRecords([...current.map((record) => ({ ...record, autoBalance: false })), {
       transaction_external_id: exception.source_identity.transaction_external_id,
       line_external_id: null,
       transaction_date: current[0]?.transaction_date ?? today(),
       description: current[0]?.description ?? null,
       valuation_currency_code: current[0]?.valuation_currency_code ?? "USD",
       account_full_name: "",
-      amount_decimal: "",
-      value_decimal: "",
+      amount_decimal: balancing,
+      value_decimal: balancing,
       memo: null,
       editorKey: `new-${crypto.randomUUID()}`,
       rateDirection: "value-per-amount",
       rateDecimal: "",
       rateChanges: "value",
+      autoBalance: true,
     }]);
+    });
   }
 
+  const valueTotal = sumDecimals(records.map((record) => record.value_decimal));
+  const incompleteLine = records.findIndex((record) => !accountByFullName.has(record.account_full_name)
+    || !decimalParts(record.amount_decimal) || !decimalParts(record.value_decimal));
+  const valueWithoutAmountLine = records.findIndex((record) => {
+    const account = accountByFullName.get(record.account_full_name);
+    const amount = decimalParts(record.amount_decimal);
+    const value = decimalParts(record.value_decimal);
+    return Boolean(account && account.currencyCode !== first?.valuation_currency_code && amount && value
+      && amount.units === 0n && value.units !== 0n);
+  });
+  const signMismatchLine = records.findIndex((record) => {
+    const amount = decimalParts(record.amount_decimal);
+    const value = decimalParts(record.value_decimal);
+    return Boolean(amount && value && amount.units !== 0n && value.units !== 0n
+      && (amount.units < 0n) !== (value.units < 0n));
+  });
+  const invalidRateLine = records.findIndex((record) => {
+    const account = accountByFullName.get(record.account_full_name);
+    const amount = decimalParts(record.amount_decimal);
+    const value = decimalParts(record.value_decimal);
+    return Boolean(account && account.currencyCode !== first?.valuation_currency_code
+      && amount && value && amount.units !== 0n && value.units !== 0n
+      && (!decimalParts(record.rateDecimal) || decimalParts(record.rateDecimal)!.units <= 0n));
+  });
+  const isQuantityAdjustment = (record: EditableImportRecord) => {
+    const account = accountByFullName.get(record.account_full_name);
+    const amount = decimalParts(record.amount_decimal);
+    const value = decimalParts(record.value_decimal);
+    return Boolean(account && account.currencyCode !== first?.valuation_currency_code && amount && value
+      && amount.units !== 0n && value.units === 0n);
+  };
+  const singleLineQuantityAdjustment = records.length === 1 && isQuantityAdjustment(records[0]);
+  const hasEnoughLines = records.length >= 2 || singleLineQuantityAdjustment;
+  const removableIncompleteLine = records.length === 2 && incompleteLine >= 0
+    && isQuantityAdjustment(records[incompleteLine === 0 ? 1 : 0]);
+  const balanced = valueTotal === "0";
+  const canSave = Boolean(first?.transaction_date && first?.valuation_currency_code && hasEnoughLines
+    && incompleteLine < 0 && valueWithoutAmountLine < 0 && signMismatchLine < 0
+    && invalidRateLine < 0 && balanced);
+  const liveStatus = removableIncompleteLine
+    ? `Remove split ${incompleteLine + 1}; this zero-value quantity adjustment is valid with one split.`
+    : incompleteLine >= 0 ? `Complete the account, amount, and value for split ${incompleteLine + 1}.`
+    : !hasEnoughLines ? "Add a balancing split; only a zero-value quantity adjustment may contain one split."
+    : valueWithoutAmountLine >= 0 ? `Split ${valueWithoutAmountLine + 1} cannot have value without an amount.`
+    : signMismatchLine >= 0 ? `Amount and value must have the same debit or credit sign on split ${signMismatchLine + 1}.`
+    : invalidRateLine >= 0 ? `Enter a positive exchange rate for split ${invalidRateLine + 1}.`
+    : !balanced ? `Out of balance by ${valueTotal ?? "an invalid value"} ${first?.valuation_currency_code ?? ""}.`
+    : `Balanced in ${first?.valuation_currency_code ?? "the value currency"} and ready to revalidate.`;
+
   async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    if (!canSave) { setError(liveStatus); return; }
+    setBusy(true); setError("");
     try {
       const corrected = records.map((record) => {
         const { editorKey: _editorKey, rateDecimal: _rateDecimal, rateDirection: _rateDirection,
-          rateChanges: _rateChanges, ...canonical } = record;
+          rateChanges: _rateChanges, autoBalance: _autoBalance, ...canonical } = record;
         return {
           ...canonical,
           description: canonical.description?.trim() || null,
@@ -804,7 +1158,6 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
 
   if (!first) return null;
   return <form className="misfit-editor" onSubmit={submit}>
-    <p className="transaction-editor-rule">Amount + value determine the rate. When changing a rate, choose whether its amount or value should be recalculated.</p>
     <div className="misfit-meta">
       <label>Date<input type="date" required value={first.transaction_date}
         onChange={(event) => updateTransaction({ transaction_date: event.target.value })} /></label>
@@ -815,31 +1168,38 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
         {currencies.map((currency) => <option key={currency.id} value={currency.code}>{currencyLabel(currency)}</option>)}
       </select></label>
     </div>
-    <div className="misfit-lines">
+    <div className="transaction-editor-toolbar"><div><strong>Transaction splits</strong>
+      <small>Each indented row is one posting under this transaction.</small></div>
+      <button type="button" className="secondary" aria-expanded={showValuationDetails}
+        onClick={() => setShowValuationDetails((current) => !current)}>
+        {showValuationDetails ? "Hide values & rates" : "Show values & rates"}</button></div>
+    {showValuationDetails && <p className="transaction-editor-rule">Amount + value determine each line’s rate. A nonzero amount with zero value is a quantity-only adjustment and has no rate. When changing a rate, choose whether its amount or value should be recalculated.</p>}
+    <div className="misfit-lines transaction-split-group">
       <div className="misfit-line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
       {records.map((record, index) => {
         const selectedAccount = accountByFullName.get(record.account_full_name);
         const amountCurrencyCode = selectedAccount?.currencyCode ?? "account currency";
         const isNative = selectedAccount?.currencyCode === first.valuation_currency_code;
-        const rateIsInvalid = record.rateDecimal.trim() !== ""
+        const amount = decimalParts(record.amount_decimal);
+        const value = decimalParts(record.value_decimal);
+        const isZeroValueAdjustment = Boolean(!isNative && selectedAccount && amount && value
+          && amount.units !== 0n && value.units === 0n);
+        const canChooseRateDirection = Boolean(selectedAccount && !isNative && !isZeroValueAdjustment);
+        const rateIsInvalid = !isZeroValueAdjustment && record.rateDecimal.trim() !== ""
           && (!decimalParts(record.rateDecimal) || decimalParts(record.rateDecimal)!.units <= 0n);
-        const hasDifferentRate = !isNative && Boolean(selectedAccount) && records.some((candidate, candidateIndex) =>
+        const hasDifferentRate = !isNative && !isZeroValueAdjustment && Boolean(selectedAccount)
+          && records.some((candidate, candidateIndex) =>
           candidateIndex !== index
           && accountByFullName.get(candidate.account_full_name)?.currencyCode === selectedAccount?.currencyCode
           && !sameLineRate(record, candidate));
-        const rateUnits = record.rateDirection === "value-per-amount"
-          ? `${first.valuation_currency_code} / ${amountCurrencyCode}`
-          : `${amountCurrencyCode} / ${first.valuation_currency_code}`;
-        return <div className="misfit-line-wrapper" key={record.editorKey}>
+        const rateUnits = exchangeRateUnits(record.rateDirection, first.valuation_currency_code, amountCurrencyCode);
+        const inverseRateUnits = exchangeRateUnits(oppositeRateDirection(record.rateDirection),
+          first.valuation_currency_code, amountCurrencyCode);
+        return <div className={`misfit-line-wrapper ${record.autoBalance ? "auto-balanced" : ""}`} key={record.editorKey}>
           <div className="misfit-line">
             <input value={record.memo ?? ""} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
-            <select required value={record.account_full_name}
-              onChange={(event) => updateLine(index, { account_full_name: event.target.value })}>
-              <option value="">Choose a postable account…</option>
-              {postableAccounts.map(({ account, fullName }) => <option key={account.id} value={fullName}>
-                {fullName} ({account.currencyCode})
-              </option>)}
-            </select>
+            <AccountCombobox label={`Account for imported split ${index + 1}`} value={record.account_full_name}
+              choices={accountChoices} onChange={(accountFullName) => updateLine(index, { account_full_name: accountFullName })} />
             <input inputMode="decimal" aria-label={`Debit for imported line ${index + 1}`}
               value={amountForSide(record.amount_decimal, "debit")}
               onChange={(event) => updateLineAmount(index, "debit", event.target.value)} />
@@ -847,22 +1207,33 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
               value={amountForSide(record.amount_decimal, "credit")}
               onChange={(event) => updateLineAmount(index, "credit", event.target.value)} />
             <button type="button" className="quiet" aria-label="Remove split" disabled={records.length === 1}
-              onClick={() => setRecords((current) => current.filter((_, recordIndex) => recordIndex !== index))}>×</button>
+              onClick={() => setRecords((current) => rebalanceRecords(current.filter((_, recordIndex) => recordIndex !== index)))}>×</button>
           </div>
-          <div className={`line-value-rate ${hasDifferentRate ? "different-rate" : ""}`}>
+          {showValuationDetails && <div className={`line-value-rate ${hasDifferentRate ? "different-rate" : ""}`}>
             <label>Value in {first.valuation_currency_code}
               <input inputMode="decimal" disabled={isNative} value={record.value_decimal ?? ""}
                 onChange={(event) => updateLineValue(index, event.target.value)} />
             </label>
             <label>Exchange rate
-              <span className="rate-input-group"><input inputMode="decimal" disabled={isNative}
-                aria-invalid={rateIsInvalid || undefined} value={isNative ? "1" : record.rateDecimal}
+              <span className="rate-input-group"><input inputMode="decimal"
+                disabled={isNative || isZeroValueAdjustment}
+                placeholder={isZeroValueAdjustment ? "Not applicable" : undefined}
+                aria-invalid={rateIsInvalid || undefined}
+                value={isNative ? "1" : isZeroValueAdjustment ? "" : record.rateDecimal}
                 onChange={(event) => updateLineRate(index, event.target.value)} />
-                <button type="button" className="rate-invert" disabled={isNative || !record.rateDecimal}
-                  aria-label={`Invert exchange rate for line ${index + 1}`} title="Show the reciprocal rate"
-                  onClick={() => invertLineRate(index)}>1/x</button></span>
-              <small>{rateUnits}</small>
-              {!isNative && <span className="rate-update-choice">Changing rate updates
+                <button type="button" className="rate-invert"
+                  disabled={!canChooseRateDirection}
+                  aria-label={canChooseRateDirection
+                    ? `Exchange rate shown as ${rateUnits}; click to show ${inverseRateUnits} for line ${index + 1}`
+                    : `Exchange rate units for line ${index + 1}: ${rateUnits}`}
+                  title={canChooseRateDirection ? `Show ${inverseRateUnits}` : undefined}
+                  onClick={() => invertLineRate(index)}>{rateUnits}</button></span>
+              <small>{isZeroValueAdjustment
+                ? "No exchange rate — zero-value quantity adjustment."
+                : !selectedAccount ? "Choose an account to set the rate units."
+                : isNative ? `No conversion — amount and value are both ${first.valuation_currency_code}.`
+                : `Click “${rateUnits}” to show ${inverseRateUnits}.`}</small>
+              {!isNative && !isZeroValueAdjustment && <span className="rate-update-choice">Changing rate updates
                 <select aria-label={`Exchange-rate update target for line ${index + 1}`} value={record.rateChanges}
                   onChange={(event) => setRecords((current) => current.map((candidate, candidateIndex) => candidateIndex === index
                     ? { ...candidate, rateChanges: event.target.value as "amount" | "value" } : candidate))}>
@@ -872,15 +1243,16 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
             </label>
             {hasDifferentRate && <p className="rate-note">This line uses a different {selectedAccount?.currencyCode} rate.</p>}
             {rateIsInvalid && <p>Enter a positive exchange rate.</p>}
-          </div>
+          </div>}
         </div>;
       })}
+      <button type="button" className="add-split-row" onClick={addSplit}><span>＋</span>
+        Add another split <small>The balancing debit or credit will be entered automatically</small></button>
     </div>
+    <p className={`transaction-live-status ${canSave ? "balanced" : "needs-attention"}`}>{liveStatus}</p>
     <div className="misfit-editor-actions">
-      <button type="button" className="secondary" onClick={addSplit}>Add balancing split</button>
-      <span />
       <button type="button" className="link-button" onClick={onCancel}>Cancel</button>
-      <button className="primary" disabled={busy}>{busy ? "Revalidating…" : "Revalidate correction"}</button>
+      <button className="primary" disabled={busy || !canSave}>{busy ? "Checking…" : "Save correction"}</button>
     </div>
     {error && <p className="error">{error}</p>}
   </form>;
@@ -1016,7 +1388,7 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   async function commitPreview() {
     if (!selectedJobId || !preview?.preview_digest) return;
     const pending = preview.progress.transaction_totals.pending_commit;
-    if (!window.confirm(`Commit exactly ${pending} pending corrected or staged transaction${pending === 1 ? "" : "s"}? Previously committed transactions will not be recreated.`)) return;
+    if (!window.confirm(`Add ${pending} imported transaction${pending === 1 ? "" : "s"} to the ledger now? Transactions already in the ledger will not be duplicated.`)) return;
     setBusy("commit"); setError("");
     try {
       await api(`/transaction-import-jobs/${selectedJobId}/commit`, {
@@ -1035,7 +1407,7 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
 
   return <section className="misfits-page card">
     <div className="section-heading misfits-heading"><div><p className="eyebrow">Import holding area</p>
-      <h2>Import misfits</h2><p>Source transactions that need a correction, an accounting choice, or an explicit exclusion.</p></div>
+      <h2>Import misfits</h2><p>Imported transactions that need correction. Fix them here, then add them to the ledger.</p></div>
       {jobs.length > 0 && <div className="misfit-heading-actions">
         {jobs.length > 1 && <select aria-label="Import job" value={selectedJobId ?? ""}
           onChange={(event) => { setSelectedJobId(event.target.value); setPreview(null); }}>
@@ -1053,23 +1425,22 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
     {job && <>
       <div className="misfit-job-summary">
         <div><span>Source</span><strong>{job.source_file.name ?? job.source_system}</strong><small>{job.source_system}</small></div>
-        <div><span>Pending commit</span><strong>{job.progress.transaction_totals.pending_commit}</strong><small>{job.progress.pending_commit_records} source records</small></div>
-        <div><span>Already committed</span><strong>{job.progress.transaction_totals.previously_committed}</strong><small>{job.progress.previously_committed_records} source records</small></div>
+        <div><span>Ready for ledger</span><strong>{job.progress.transaction_totals.pending_commit}</strong><small>{job.progress.pending_commit_records} source records</small></div>
+        <div><span>In ledger</span><strong>{job.progress.transaction_totals.previously_committed}</strong><small>{job.progress.previously_committed_records} source records</small></div>
         <div><span>Unresolved</span><strong>{job.progress.transaction_totals.unresolved_exceptions}</strong><small>{job.progress.exception_record_totals.unresolved} source records</small></div>
         <div><span>Excluded</span><strong>{job.progress.transaction_totals.excluded}</strong><small>{job.progress.exception_record_totals.excluded} source records</small></div>
       </div>
       <p className="reconciliation-equation">{job.progress.equation}</p>
       <div className="misfit-commit-panel">
-        <div><strong>{job.progress.transaction_totals.pending_commit} transactions waiting for commit</strong>
-          <span>Corrections are fully revalidated. Existing committed and reused transactions stay untouched.</span></div>
+        <div><strong>Import succeeded</strong>
+          <span>All source data is in Accounting. {job.progress.transaction_totals.pending_commit} transactions are ready for the ledger; {job.progress.transaction_totals.exceptions} are here for correction.</span></div>
         {!preview ? <button className="secondary" disabled={Boolean(busy) || job.job_status === "committed"}
-          onClick={() => void preparePreview()}>{busy === "preview" ? "Preparing…" : "Prepare exact preview"}</button>
+          onClick={() => void preparePreview()}>{busy === "preview" ? "Preparing…" : "Review ledger addition"}</button>
           : <button className="primary" disabled={Boolean(busy)} onClick={() => void commitPreview()}>
-            {busy === "commit" ? "Committing…" : `Commit ${preview.progress.transaction_totals.pending_commit} pending`}
+            {busy === "commit" ? "Adding…" : `Add ${preview.progress.transaction_totals.pending_commit} to ledger`}
           </button>}
       </div>
-      {preview && <div className="preview-notice"><strong>Exact preview ready.</strong><span>{preview.commit_scope}</span>
-        <code>{preview.preview_digest}</code></div>}
+      {preview && <div className="preview-notice"><strong>Ready to add.</strong><span>{preview.commit_scope}</span></div>}
       <div className="misfit-filters">
         {[{ value: "unresolved", label: "Unresolved" }, { value: "excluded", label: "Excluded" },
           { value: "all", label: "All" }, ...errorCodes.map((code) => ({ value: code, label: code.replaceAll("_", " ") }))]
@@ -1130,9 +1501,10 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   </section>;
 }
 
-function Ledger({ transactions, selected, onSelect, onVerify, onDelete, verification }: {
+function Ledger({ transactions, selected, onSelect, onEdit, onVerify, onDelete, verification }: {
   transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void;
-  onVerify: () => void; onDelete: (id: number) => void; verification: string;
+  onEdit: (transaction: TransactionDetail) => void; onVerify: () => void;
+  onDelete: (id: number) => void; verification: string;
 }) {
   return <section className="ledger card"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Ledger</h2></div>
     <button className="secondary" onClick={onVerify}>Verify ledger</button></div>{verification && <p className="verification">{verification}</p>}
@@ -1141,8 +1513,9 @@ function Ledger({ transactions, selected, onSelect, onVerify, onDelete, verifica
       <span>{transaction.date}</span><strong>{transaction.description || "Untitled transaction"}</strong><small>{transaction.lineItemCount} lines · {transaction.state}</small>
     </button>)}</div>
     <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p></div>
-      <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="danger-link"
-        onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
+      <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="secondary"
+        onClick={() => onEdit(selected)}>Edit transaction</button><button type="button" className="danger-link"
+          onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
       {selected.lineItems.map((line) => <div className="detail-line" key={line.id}><div><strong>{line.accountName}</strong><small>{line.memo}</small>
         {line.tags.length > 0 && <div className="tag-list">{line.tags.map((tag) => <span key={`${tag.key}:${tag.value}`}>{tag.key}:{tag.value}</span>)}</div>}</div>
         <b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
@@ -1153,9 +1526,11 @@ type AccountRegisterRow =
   | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
 
-function AccountRegister({ account, entries, assertions, loading, error, token, onShowAll, onNewTransaction, onChanged }: {
+function AccountRegister({ account, entries, assertions, loading, error, token, onShowAll, onNewTransaction,
+  onEditTransaction, onChanged }: {
   account: Account; entries: AccountLedgerEntry[]; assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
-  onShowAll: () => void; onNewTransaction: () => void; onChanged: () => Promise<void>;
+  onShowAll: () => void; onNewTransaction: () => void; onEditTransaction: (transactionId: number) => void;
+  onChanged: () => Promise<void>;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
   const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
@@ -1180,7 +1555,11 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
   }, [account.id]);
 
   function activateTransaction(transactionId: number) {
-    if (view === "auto-split") setActiveTransactionId(transactionId);
+    if (view === "auto-split") {
+      setActiveTransactionId((current) => current === transactionId ? null : transactionId);
+    } else {
+      onEditTransaction(transactionId);
+    }
   }
 
   function editKnownBalance(assertion: BalanceAssertion) {
@@ -1254,12 +1633,12 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
             : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split transaction";
           const expanded = view === "journal" || (view === "auto-split" && activeTransactionId === entry.transactionId);
           return <Fragment key={entry.lineItemId}>
-            <tr className={`register-entry-row ${view === "auto-split" ? "selectable" : ""} ${expanded ? "expanded" : ""}`}
-              tabIndex={view === "auto-split" ? 0 : undefined}
+            <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""}`}
+              tabIndex={0}
               aria-expanded={view === "auto-split" ? expanded : undefined}
               onClick={() => activateTransaction(entry.transactionId)}
               onKeyDown={(event) => {
-                if (view === "auto-split" && (event.key === "Enter" || event.key === " ")) {
+                if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault(); activateTransaction(entry.transactionId);
                 }
               }}>
@@ -1280,6 +1659,10 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
                   <div><strong>{split.accountName}</strong>{split.memo && <small>{split.memo}</small>}</div>
                   <span>{unitsToDecimal(split.amountUnits, split.scale)} {split.currencyCode}</span>
                 </div>)}
+                {view === "auto-split" && <div className="register-split-actions">
+                  <button type="button" className="secondary"
+                    onClick={() => onEditTransaction(entry.transactionId)}>Edit transaction</button>
+                </div>}
               </div>
             </td></tr>}
           </Fragment>;
@@ -1586,6 +1969,7 @@ export default function App() {
   const [accountLedgerError, setAccountLedgerError] = useState("");
   const [accountLedgerRefresh, setAccountLedgerRefresh] = useState(0);
   const [showTransactionComposer, setShowTransactionComposer] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<TransactionDetail | null>(null);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
   const [showAccountData, setShowAccountData] = useState(false);
@@ -1686,15 +2070,35 @@ export default function App() {
     localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null);
     setImportJobs([]); setTransactions([]); setSelected(null); setShowMisfits(false);
     setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
+    setEditingTransaction(null);
   }
   async function refreshAfterTransaction() {
     await refresh();
     setAccountLedgerRefresh((current) => current + 1);
     setShowTransactionComposer(false);
   }
+  async function refreshAfterTransactionEdit(transactionId: number) {
+    await refresh();
+    if (token) {
+      const result = await api<{ transaction: TransactionDetail }>(`/transactions/${transactionId}`, {}, token);
+      setSelected(result.transaction);
+    }
+    setAccountLedgerRefresh((current) => current + 1);
+    setEditingTransaction(null);
+  }
   async function selectTransaction(id: number) {
     if (!token) return;
     const result = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token); setSelected(result.transaction);
+  }
+  async function editTransaction(id: number) {
+    if (!token) return;
+    if (selected?.id === id) {
+      setEditingTransaction(selected);
+      return;
+    }
+    const result = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token);
+    setSelected(result.transaction);
+    setEditingTransaction(result.transaction);
   }
   async function verify() {
     if (!token) return;
@@ -1722,8 +2126,10 @@ export default function App() {
           ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} assertions={assertions}
               loading={accountLedgerLoading} error={accountLedgerError} token={token}
               onShowAll={() => setSelectedAccountId(null)} onNewTransaction={() => setShowTransactionComposer(true)}
+              onEditTransaction={(id) => void editTransaction(id)}
               onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
+              onEdit={(transaction) => void editTransaction(transaction.id)}
               onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id],
                 deleteAccounts: false, deleteImportHistory: false })}
               onVerify={() => void verify()} verification={verification} />}</div></main>
@@ -1742,5 +2148,8 @@ export default function App() {
     {showTransactionComposer && <TransactionComposerDialog accounts={accounts} currencies={currencies}
       initialAccountId={selectedAccount && !selectedAccount.placeholder && !selectedAccount.archivedAt ? selectedAccount.id : null}
       token={token} onCreated={refreshAfterTransaction} onClose={() => setShowTransactionComposer(false)} />}
+    {editingTransaction && <TransactionEditDialog key={editingTransaction.id} transaction={editingTransaction}
+      accounts={accounts} currencies={currencies} token={token}
+      onSaved={() => refreshAfterTransactionEdit(editingTransaction.id)} onClose={() => setEditingTransaction(null)} />}
   </div>;
 }

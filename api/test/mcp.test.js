@@ -106,11 +106,26 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
         ready_to_commit: true,
         unresolved_exceptions: 23,
         excluded_exceptions: 0,
-        commit_scope: "All staged transactions; reused transactions remain unchanged and exceptions remain uncommitted.",
+        user_outcome: {
+          import_status: "succeeded",
+          all_source_data_in_system: true,
+          source_records_imported: 17275,
+          transactions_ready_for_ledger: 7987,
+          transactions_already_in_ledger: 0,
+          transactions_in_import_misfits: 23,
+        },
+        exception_handling: {
+          retained_in: "import_misfits",
+          retained_after_ledger_addition: true,
+          correctable_in_system: true,
+          list_with: { tool: "list_transaction_import_exceptions", arguments: { import_job_id: input.importJobId } },
+          correct_with: { tool: "retry_transaction_import_exception", arguments: { import_job_id: input.importJobId } },
+        },
+        commit_scope: "Import succeeded. All source records are in Accounting; Misfits can be corrected.",
         requiredAction: "REQUEST_USER_CONFIRMATION",
         nextAction: {
           type: "request_user_confirmation",
-          instruction: "Commit all staged transactions from this preview now? Reused transactions and exceptions will remain unchanged.",
+          instruction: "Import succeeded. All source records are in Accounting. Add ready transactions to the ledger now? Misfits can be corrected there.",
           onApproval: {
             tool: "commit_transaction_import_job",
             arguments: { import_job_id: input.importJobId, preview_digest: previewDigest },
@@ -433,7 +448,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_job_id: "0ed8cb57-efb5-419e-b4e5-59b73724f224" },
   });
   assert.equal(importJobPreview.structuredContent.job.nextAction.type, "request_user_confirmation");
-  assert.match(importJobPreview.structuredContent.job.nextAction.instruction, /^Commit .+\?/);
+  assert.match(importJobPreview.structuredContent.job.nextAction.instruction, /^Import succeeded\./);
+  assert.doesNotMatch(importJobPreview.structuredContent.job.nextAction.instruction,
+    /commit|uncommitted|staged|validat/i);
   assert.doesNotMatch(importJobPreview.structuredContent.job.nextAction.instruction, /ask the user/i);
   assert.deepEqual(previewedImportJob, {
     pool: {}, personId: 7, importJobId: "0ed8cb57-efb5-419e-b4e5-59b73724f224",
