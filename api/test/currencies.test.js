@@ -10,6 +10,7 @@ const {
   createCurrency,
   listCurrencies,
   requireAccessibleCurrency,
+  updateCurrency,
 } = await import("../src/currencies.js");
 
 function memoryPool() {
@@ -19,13 +20,16 @@ function memoryPool() {
       { currency_id: 2, owner_person_id: 8, CurrencyAbbreviation: "PRIVATE", display_name: "Other user's unit", currency_type: "custom", scale: 3 },
     ],
     nextId: 3,
+    referencedCurrencyIds: new Set(),
   };
   const connection = {
     async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
     async query(sql, params = []) {
       if (sql.includes("FROM currencies") && sql.includes("currency_id = ?")) {
         return [state.rows.filter((row) => Number(row.currency_id) === Number(params[0])
-          && (row.owner_person_id == null || Number(row.owner_person_id) === Number(params[1])))];
+          && (sql.includes("currency_id = ? AND owner_person_id = ?")
+            ? Number(row.owner_person_id) === Number(params[1])
+            : row.owner_person_id == null || Number(row.owner_person_id) === Number(params[1])))];
       }
       if (sql.includes("FROM currencies")) {
         return [state.rows.filter((row) => row.owner_person_id == null || Number(row.owner_person_id) === Number(params[0]))];
@@ -35,6 +39,17 @@ function memoryPool() {
         const row = { currency_id: state.nextId++, owner_person_id: owner, scope_owner_person_id: scopeOwner, CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale };
         state.rows.push(row);
         return [{ insertId: row.currency_id }];
+      }
+      if (sql.includes("EXISTS(SELECT 1 FROM accounts")) {
+        return [[{ account_reference: state.referencedCurrencyIds.has(Number(params[1])) ? 1 : 0,
+          transaction_reference: 0, rate_reference: 0 }]];
+      }
+      if (sql.includes("UPDATE currencies")) {
+        const [code, displayName, type, scale, currencyId, ownerPersonId] = params;
+        const row = state.rows.find((candidate) => Number(candidate.currency_id) === Number(currencyId)
+          && Number(candidate.owner_person_id) === Number(ownerPersonId));
+        if (row) Object.assign(row, { CurrencyAbbreviation: code, display_name: displayName, currency_type: type, scale });
+        return [{ affectedRows: row ? 1 : 0 }];
       }
       throw new Error(`Unexpected query: ${sql}`);
     },
@@ -72,4 +87,39 @@ test("another user's currency id is not accessible", async () => {
     (error) => error.code === "CURRENCY_NOT_FOUND",
   );
   assert.equal((await requireAccessibleCurrency(pool.connection, 7, 1)).code, "USD");
+});
+
+test("personal units can be edited until used, then only their display name can change", async () => {
+  const pool = memoryPool();
+  const created = await createCurrency({
+    pool, personId: 7, code: "FUND", displayName: "Old fund", type: "security", scale: 4,
+  });
+  const updated = await updateCurrency({
+    pool, personId: 7, currencyId: created.id, code: "FUND2", displayName: "Renamed fund", type: "security", scale: 6,
+  });
+  assert.equal(updated.code, "FUND2");
+  assert.equal(updated.scale, 6);
+
+  pool.state.referencedCurrencyIds.add(created.id);
+  const renamed = await updateCurrency({
+    pool, personId: 7, currencyId: created.id, code: "FUND2", displayName: "Final fund name", type: "security", scale: 6,
+  });
+  assert.equal(renamed.displayName, "Final fund name");
+  await assert.rejects(
+    updateCurrency({ pool, personId: 7, currencyId: created.id, code: "FUND2", displayName: "Final fund name",
+      type: "security", scale: 8 }),
+    (error) => error.code === "CURRENCY_STRUCTURE_IN_USE",
+  );
+});
+
+test("catalog currencies and another user's units cannot be edited", async () => {
+  const pool = memoryPool();
+  await assert.rejects(
+    updateCurrency({ pool, personId: 7, currencyId: 1, code: "USD", displayName: "Fake dollar", type: "custom", scale: 2 }),
+    (error) => error.code === "CURRENCY_NOT_FOUND",
+  );
+  await assert.rejects(
+    updateCurrency({ pool, personId: 7, currencyId: 2, code: "PRIVATE", displayName: "Stolen", type: "custom", scale: 3 }),
+    (error) => error.code === "CURRENCY_NOT_FOUND",
+  );
 });

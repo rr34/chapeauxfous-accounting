@@ -13,6 +13,18 @@ const currencyLabel = (currency: Currency) => currency.displayName === currency.
   ? currency.code
   : `${currency.code} — ${currency.displayName}`;
 
+function CurrencyOptions({ currencies, accounts, valueBy = "id" }: {
+  currencies: Currency[]; accounts: Account[]; valueBy?: "id" | "code";
+}) {
+  const usedCurrencyIds = new Set(accounts.map((account) => account.currencyId));
+  const inUse = currencies.filter((currency) => usedCurrencyIds.has(currency.id));
+  const other = currencies.filter((currency) => !usedCurrencyIds.has(currency.id));
+  const options = (items: Currency[]) => items.map((currency) =>
+    <option key={currency.id} value={valueBy === "code" ? currency.code : currency.id}>{currencyLabel(currency)}</option>);
+  return <>{inUse.length > 0 && <optgroup label="In use">{options(inUse)}</optgroup>}
+    {other.length > 0 && <optgroup label="Other currencies">{options(other)}</optgroup>}</>;
+}
+
 function errorMessage(error: unknown) {
   if (error instanceof ApiError || error instanceof Error) return error.message;
   return "Something went wrong.";
@@ -352,7 +364,7 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
         <div className="form-row"><label>Type<select value={type} onChange={(event) => setType(event.target.value as Account["type"])}>
           {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
         </select></label><label>Currency<select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
-          {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}
+          <CurrencyOptions currencies={currencies} accounts={accounts} />
         </select></label></div>
         <label>Parent<select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
           <option value="">No parent</option>
@@ -379,11 +391,10 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   </div>;
 }
 
-function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, misfitsSelected,
-  token, onSelectAccount, onSelectMisfits, onChanged }: {
-  accounts: Account[]; currencies: Currency[];
-  importJobs: TransactionImportJob[]; selectedAccountId: number | null; misfitsSelected: boolean; token: string;
-  onSelectAccount: (account: Account) => void; onSelectMisfits: () => void; onChanged: () => Promise<void>;
+function ChartOfAccounts({ accounts, currencies, selectedAccountId,
+  token, onSelectAccount, onChanged }: {
+  accounts: Account[]; currencies: Currency[]; selectedAccountId: number | null; token: string;
+  onSelectAccount: (account: Account) => void; onChanged: () => Promise<void>;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -393,16 +404,7 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
   const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
   const [error, setError] = useState("");
-  const [showCurrencyForm, setShowCurrencyForm] = useState(false);
-  const [currencyCode, setCurrencyCode] = useState("");
-  const [currencyDisplayName, setCurrencyDisplayName] = useState("");
-  const [currencyType, setCurrencyType] = useState<Exclude<CurrencyType, "iso_4217">>("security");
-  const [currencyScale, setCurrencyScale] = useState("4");
-  const [currencyError, setCurrencyError] = useState("");
-  const [currencyBusy, setCurrencyBusy] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
-  const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
-  const excludedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.excluded, 0);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
@@ -413,23 +415,9 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
     } catch (nextError) { setError(errorMessage(nextError)); }
   }
 
-  async function createCurrency(event: FormEvent) {
-    event.preventDefault(); setCurrencyBusy(true); setCurrencyError("");
-    try {
-      await api("/currencies", { method: "POST", body: JSON.stringify({
-        code: currencyCode,
-        displayName: currencyDisplayName,
-        type: currencyType,
-        scale: Number(currencyScale),
-      }) }, token);
-      setCurrencyCode(""); setCurrencyDisplayName(""); setCurrencyType("security"); setCurrencyScale("4");
-      setShowCurrencyForm(false); await onChanged();
-    } catch (nextError) { setCurrencyError(errorMessage(nextError)); }
-    finally { setCurrencyBusy(false); }
-  }
-
-  return <aside className="accounts-panel">
-    <div className="section-heading"><div><p className="eyebrow">Chart</p><h2>Accounts</h2></div><button onClick={() => setShowForm(!showForm)}>＋</button></div>
+  return <section className="accounts-view card">
+    <div className="section-heading"><div><p className="eyebrow">Accounting structure</p><h2>Chart of accounts</h2></div>
+      <button aria-label={showForm ? "Close new account form" : "Add account"} onClick={() => setShowForm(!showForm)}>＋</button></div>
     {showForm && <form className="compact-form" onSubmit={submit}>
       <input placeholder="Account name" value={name} onChange={(event) => setName(event.target.value)} />
       <input placeholder="Description (optional)" value={description} onChange={(event) => setDescription(event.target.value)} />
@@ -438,7 +426,7 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
         {(["asset", "liability", "equity", "income", "expense"] as const).map((value) => <option key={value}>{value}</option>)}
       </select><select required value={currencyId} onChange={(event) => setCurrencyId(event.target.value ? Number(event.target.value) : "")}>
         <option value="">Choose currency…</option>
-        {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}
+        <CurrencyOptions currencies={currencies} accounts={accounts} />
       </select></div>
       <select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
         <option value="">No parent</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
@@ -449,38 +437,9 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
     </form>}
     <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}
       onSelect={onSelectAccount} onEdit={setEditingAccount} />
-    <button type="button" className={`misfits-account ${misfitsSelected ? "selected" : ""}`}
-      aria-controls="import-misfits" aria-pressed={misfitsSelected} onClick={onSelectMisfits}>
-      <span className="misfits-mark" aria-hidden="true">◇</span>
-      <span><strong>Import misfits</strong><small>Transactions needing a home or a decision</small></span>
-      <span className="misfits-count">{unresolvedMisfits}{excludedMisfits > 0 && <small>{excludedMisfits} excluded</small>}</span>
-    </button>
-    <section className="currencies-panel">
-      <div className="section-heading"><div><p className="eyebrow">Units</p><h3>Currencies &amp; securities</h3></div>
-        <button aria-label="Create currency or security" onClick={() => setShowCurrencyForm(!showCurrencyForm)}>＋</button></div>
-      {showCurrencyForm && <form className="compact-form" onSubmit={createCurrency}>
-        <div className="form-row"><input required maxLength={50} placeholder="Code or ticker" value={currencyCode}
-          onChange={(event) => setCurrencyCode(event.target.value.toUpperCase())} />
-          <select value={currencyType} onChange={(event) => setCurrencyType(event.target.value as Exclude<CurrencyType, "iso_4217">)}>
-            <option value="security">Security / fund</option><option value="crypto">Crypto</option>
-            <option value="commodity">Commodity</option><option value="custom">Custom unit</option>
-          </select></div>
-        <input required maxLength={255} placeholder="Display name" value={currencyDisplayName}
-          onChange={(event) => setCurrencyDisplayName(event.target.value)} />
-        <label>Decimal places<input required type="number" min="0" max="18" value={currencyScale}
-          onChange={(event) => setCurrencyScale(event.target.value)} /></label>
-        {currencyError && <p className="error">{currencyError}</p>}
-        <button className="primary" disabled={currencyBusy}>{currencyBusy ? "Creating…" : "Create unit"}</button>
-      </form>}
-      <div className="currency-list">{currencies.map((currency) =>
-        <div className="currency-row" key={currency.id}><div><strong>{currency.code}</strong><span>{currency.displayName}</span></div>
-          <small>{currency.type === "iso_4217" ? "ISO 4217" : currency.type} · {currency.scale} decimals · {currency.userDefined ? "personal" : "catalog"}</small></div>)}
-        {!currencies.length && <p className="assertion-empty">No currencies or securities available.</p>}
-      </div>
-    </section>
     {editingAccount && <AccountEditDialog key={editingAccount.id} account={editingAccount} accounts={accounts} currencies={currencies}
       token={token} onClose={() => setEditingAccount(null)} onChanged={onChanged} />}
-  </aside>;
+  </section>;
 }
 
 type RateDirection = "value-per-amount" | "amount-per-value";
@@ -857,7 +816,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
             setLines((current) => rebalanceLines(current.map((line) => synchronizeLine(line, Number(nextId))), Number(nextId)));
           }}>
           <option value="">Choose currency…</option>
-          {currencies.map((currency) => <option key={currency.id} value={currency.id}>{currencyLabel(currency)}</option>)}</select></label></div>
+          <CurrencyOptions currencies={currencies} accounts={accounts} /></select></label></div>
       <div className="transaction-editor-toolbar"><div><strong>Transaction splits</strong><small>Each row is one posting under this transaction.</small></div>
         <button type="button" className="secondary" aria-expanded={showValuationDetails}
           onClick={() => setShowValuationDetails((current) => !current)}>
@@ -1178,7 +1137,7 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
         onChange={(event) => updateTransaction({ description: event.target.value })} /></label>
       <label>Value currency<select required value={first.valuation_currency_code}
         onChange={(event) => updateTransaction({ valuation_currency_code: event.target.value })}>
-        {currencies.map((currency) => <option key={currency.id} value={currency.code}>{currencyLabel(currency)}</option>)}
+        <CurrencyOptions currencies={currencies} accounts={accounts} valueBy="code" />
       </select></label>
     </div>
     <div className="transaction-editor-toolbar"><div><strong>Transaction splits</strong>
@@ -1554,6 +1513,7 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
   onChanged: () => Promise<void>;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
+  const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
   const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
   const [showKnownBalanceForm, setShowKnownBalanceForm] = useState(false);
   const [knownBalanceDate, setKnownBalanceDate] = useState(today());
@@ -1567,8 +1527,11 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
   const registerRows = useMemo<AccountRegisterRow[]>(() => [
     ...entries.map((entry, order) => ({ kind: "entry" as const, date: entry.date, order, entry })),
     ...accountAssertions.map((assertion) => ({ kind: "assertion" as const, date: assertion.date, order: assertion.id, assertion })),
-  ].sort((left, right) => left.date.localeCompare(right.date)
-    || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1)), [accountAssertions, entries]);
+  ].sort((left, right) => {
+    const chronologicalOrder = left.date.localeCompare(right.date)
+      || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1);
+    return sortOrder === "recent" ? -chronologicalOrder : chronologicalOrder;
+  }), [accountAssertions, entries, sortOrder]);
 
   useEffect(() => {
     setActiveTransactionId(null); setShowKnownBalanceForm(false); setKnownBalanceDate(today());
@@ -1606,9 +1569,10 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
     <div className="section-heading"><div><p className="eyebrow">Account register</p><h2>{account.name}</h2>
       <p className="register-subtitle">Posted transactions · {account.currencyCode}</p></div>
       <div className="register-heading-actions">
-        {!account.placeholder && !account.archivedAt && <button className="secondary" aria-expanded={showKnownBalanceForm}
-          aria-controls="known-balance-form" onClick={() => setShowKnownBalanceForm((current) => !current)}>
-          Enter a known balance</button>}
+        <div className="register-current-balance">
+          <span>Current balance</span>
+          <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong>
+        </div>
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {showKnownBalanceForm && <form id="known-balance-form" className="known-balance-form" onSubmit={saveKnownBalance}>
@@ -1626,6 +1590,10 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
         onClick={() => setView("auto-split")}>Auto-Split Ledger</button>
       <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
         onClick={() => setView("journal")}>Transaction Journal</button>
+      <button className="register-sort-control"
+        title={sortOrder === "recent" ? "Show oldest transactions first" : "Show recent transactions first"}
+        onClick={() => setSortOrder((current) => current === "recent" ? "oldest" : "recent")}>
+        {sortOrder === "recent" ? "Recent first ↓" : "Oldest first ↑"}</button>
     </div>
     {error && <p className="error">{error}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
@@ -1633,7 +1601,11 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>Split account</th>
           <th>Debit <span>({debitEffect} {account.type})</span></th>
-          <th>Credit <span>({creditEffect} {account.type})</span></th><th>Running balance</th><th>Known balance</th></tr></thead>
+          <th>Credit <span>({creditEffect} {account.type})</span></th><th>Running balance</th>
+          <th>Known balance{!account.placeholder && !account.archivedAt && <button type="button"
+            className="known-balance-add" aria-label="Enter a known balance" aria-expanded={showKnownBalanceForm}
+            aria-controls="known-balance-form" title="Enter a known balance"
+            onClick={() => setShowKnownBalanceForm((current) => !current)}>+</button>}</th></tr></thead>
         <tbody>{registerRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
@@ -1871,12 +1843,140 @@ function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
   </section></div>;
 }
 
-function AppMenu({ open, onToggle, onAgentAccess, onAccountData, onSignOut }: {
-  open: boolean; onToggle: () => void; onAgentAccess: () => void; onAccountData: () => void; onSignOut: () => void;
+function CurrencyManagerDialog({ currencies, accounts, token, onClose, onChanged }: {
+  currencies: Currency[]; accounts: Account[]; token: string;
+  onClose: () => void; onChanged: () => Promise<void>;
+}) {
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [editingCurrency, setEditingCurrency] = useState<Currency | null>(null);
+  const [currencyCode, setCurrencyCode] = useState("");
+  const [currencyDisplayName, setCurrencyDisplayName] = useState("");
+  const [currencyType, setCurrencyType] = useState<Exclude<CurrencyType, "iso_4217">>("security");
+  const [currencyScale, setCurrencyScale] = useState("4");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const usageByCurrency = useMemo(() => {
+    const usage = new Map<number, number>();
+    for (const account of accounts) {
+      usage.set(account.currencyId, (usage.get(account.currencyId) ?? 0) + 1);
+    }
+    return usage;
+  }, [accounts]);
+  const inUseCurrencies = currencies.filter((currency) => usageByCurrency.has(currency.id));
+  const personalCurrencies = currencies.filter((currency) => currency.userDefined);
+  const normalizedQuery = catalogQuery.trim().toLocaleLowerCase("en-US");
+  const catalogMatches = normalizedQuery
+    ? currencies.filter((currency) => !currency.userDefined && [currency.code, currency.displayName, currency.type]
+      .some((value) => value.toLocaleLowerCase("en-US").includes(normalizedQuery)))
+    : [];
+  const structuralFieldsLocked = Boolean(editingCurrency && usageByCurrency.has(editingCurrency.id));
+
+  function closeCurrencyForm() {
+    setShowCreateForm(false); setEditingCurrency(null); setError("");
+  }
+
+  function beginCreate() {
+    setEditingCurrency(null); setCurrencyCode(""); setCurrencyDisplayName("");
+    setCurrencyType("security"); setCurrencyScale("4"); setError(""); setShowCreateForm(true);
+  }
+
+  function beginEdit(currency: Currency) {
+    setEditingCurrency(currency); setCurrencyCode(currency.code); setCurrencyDisplayName(currency.displayName);
+    setCurrencyType(currency.type as Exclude<CurrencyType, "iso_4217">); setCurrencyScale(String(currency.scale));
+    setError(""); setShowCreateForm(true);
+  }
+
+  async function saveCurrency(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      await api(editingCurrency ? `/currencies/${editingCurrency.id}` : "/currencies", {
+        method: editingCurrency ? "PATCH" : "POST", body: JSON.stringify({
+        code: currencyCode,
+        displayName: currencyDisplayName,
+        type: currencyType,
+        scale: Number(currencyScale),
+      }) }, token);
+      closeCurrencyForm(); await onChanged();
+    } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(false); }
+  }
+
+  function currencyRow(currency: Currency, showUsage: boolean, editable = false) {
+    const accountCount = usageByCurrency.get(currency.id);
+    return <div className="currency-row" key={currency.id}>
+      <div><strong>{currency.code}</strong><span>{currency.displayName}</span></div>
+      <div className="currency-row-meta">
+        <small>{currency.type === "iso_4217" ? "ISO 4217" : currency.type} · {currency.scale} decimals</small>
+        {showUsage && accountCount && <small>{accountCount} {accountCount === 1 ? "account" : "accounts"}</small>}
+        {!showUsage && <small>{accountCount ? "In use" : currency.userDefined ? "Not currently used" : "Catalog"}</small>}
+        {editable && <button type="button" className="currency-edit-button" onClick={() => beginEdit(currency)}>Edit</button>}
+      </div>
+    </div>;
+  }
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target === event.currentTarget) onClose();
+  }}><section className="agent-dialog currency-manager-dialog" role="dialog" aria-modal="true"
+    aria-labelledby="currency-manager-title">
+    <div className="dialog-heading"><div><p className="eyebrow">Accounting units</p>
+      <h2 id="currency-manager-title">Currencies &amp; securities</h2></div>
+      <button type="button" className="dialog-close" aria-label="Close currencies and securities" onClick={onClose}>×</button></div>
+    <p className="muted">Currencies in the ledger appear first. Search the full catalog only when you need another one.</p>
+
+    <section className="settings-section currency-manager-section"><div className="currency-section-heading">
+      <div><h3>In use</h3><p>Assigned to one or more accounts in your chart.</p></div>
+      <span>{inUseCurrencies.length}</span></div>
+      <div className="currency-list">{inUseCurrencies.map((currency) => currencyRow(currency, true))}
+        {!inUseCurrencies.length && <p className="assertion-empty">No currencies are in use yet.</p>}
+      </div>
+    </section>
+
+    <section className="settings-section currency-manager-section"><div className="currency-section-heading">
+      <div><h3>Personal units</h3><p>Your securities, funds, crypto assets, commodities, and custom units.</p></div>
+      <button type="button" className="secondary" onClick={showCreateForm ? closeCurrencyForm : beginCreate}>
+        {showCreateForm ? "Cancel" : "＋ Add unit"}</button></div>
+      {showCreateForm && <form className="compact-form currency-create-form" onSubmit={saveCurrency}>
+        <strong>{editingCurrency ? `Edit ${editingCurrency.code}` : "Add a personal unit"}</strong>
+        <div className="form-row"><input required disabled={structuralFieldsLocked} maxLength={50} placeholder="Code or ticker" value={currencyCode}
+          onChange={(event) => setCurrencyCode(event.target.value.toUpperCase())} />
+          <select disabled={structuralFieldsLocked} value={currencyType} onChange={(event) => setCurrencyType(event.target.value as Exclude<CurrencyType, "iso_4217">)}>
+            <option value="security">Security / fund</option><option value="crypto">Crypto</option>
+            <option value="commodity">Commodity</option><option value="custom">Custom unit</option>
+          </select></div>
+        <input required maxLength={255} placeholder="Display name" value={currencyDisplayName}
+          onChange={(event) => setCurrencyDisplayName(event.target.value)} />
+        <label>Decimal places<input required disabled={structuralFieldsLocked} type="number" min="0" max="18" value={currencyScale}
+          onChange={(event) => setCurrencyScale(event.target.value)} /></label>
+        {structuralFieldsLocked && <small className="currency-edit-note">This unit is assigned to an account. Its code, type, and decimal places are locked so existing amounts keep their meaning.</small>}
+        {error && <p className="error">{error}</p>}
+        <button className="primary" disabled={busy}>{busy ? "Saving…" : editingCurrency ? "Save unit" : "Create unit"}</button>
+      </form>}
+      <div className="currency-list">{personalCurrencies.map((currency) => currencyRow(currency, false, true))}
+        {!personalCurrencies.length && <p className="assertion-empty">No personal units yet.</p>}
+      </div>
+    </section>
+
+    <section className="settings-section currency-manager-section"><h3>Currency catalog</h3>
+      <p>Search standard currencies and shared accounting units by code or name.</p>
+      <label className="catalog-search">Search catalog<input value={catalogQuery} placeholder="For example, PEN or Peruvian sol"
+        onChange={(event) => setCatalogQuery(event.target.value)} /></label>
+      <div className="currency-list">{catalogMatches.map((currency) => currencyRow(currency, false))}
+        {!normalizedQuery && <p className="assertion-empty">Enter a code or name to browse the catalog.</p>}
+        {normalizedQuery && !catalogMatches.length && <p className="assertion-empty">No catalog currencies match “{catalogQuery.trim()}”.</p>}
+      </div>
+    </section>
+  </section></div>;
+}
+
+function AppMenu({ open, onToggle, onCurrencies, onAgentAccess, onAccountData, onSignOut }: {
+  open: boolean; onToggle: () => void; onCurrencies: () => void; onAgentAccess: () => void;
+  onAccountData: () => void; onSignOut: () => void;
 }) {
   return <div className="app-menu"><button type="button" className="header-menu-button" aria-label="Open application menu"
     aria-expanded={open} onClick={onToggle}><span aria-hidden="true">☰</span></button>
     {open && <div className="app-menu-popover" role="menu">
+      <button type="button" role="menuitem" onClick={onCurrencies}>Currencies &amp; securities</button>
       <button type="button" role="menuitem" onClick={onAccountData}>Account &amp; data</button>
       <button type="button" role="menuitem" onClick={onAgentAccess}>Agent access</button>
       <button type="button" role="menuitem" onClick={onSignOut}>Sign out</button>
@@ -1995,13 +2095,16 @@ export default function App() {
   const [editingTransaction, setEditingTransaction] = useState<TransactionDetail | null>(null);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
+  const [showCurrencyManager, setShowCurrencyManager] = useState(false);
   const [showAccountData, setShowAccountData] = useState(false);
   const [showAppMenu, setShowAppMenu] = useState(false);
   const [deletionRequest, setDeletionRequest] = useState<{
     scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
     deleteImportHistory: boolean;
   } | null>(null);
-  const [showMisfits, setShowMisfits] = useState(() => window.location.hash === "#import-misfits");
+  const [workspaceView, setWorkspaceView] = useState<"chart" | "account" | "activity" | "misfits">(
+    () => window.location.hash === "#import-misfits" ? "misfits" : "chart",
+  );
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
@@ -2016,18 +2119,20 @@ export default function App() {
 
   function selectAccount(account: Account) {
     setSelectedAccountId(account.id);
-    setShowMisfits(false);
+    setWorkspaceView("account");
     if (window.location.hash === "#import-misfits") {
       window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
     }
     revealMainContent();
   }
 
-  function selectMisfits() {
+  function selectWorkspaceView(view: "chart" | "activity" | "misfits") {
     setSelectedAccountId(null);
-    setShowMisfits(true);
-    if (window.location.hash !== "#import-misfits") {
+    setWorkspaceView(view);
+    if (view === "misfits" && window.location.hash !== "#import-misfits") {
       window.history.pushState(null, "", "#import-misfits");
+    } else if (view !== "misfits" && window.location.hash === "#import-misfits") {
+      window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
     }
     revealMainContent();
   }
@@ -2043,8 +2148,12 @@ export default function App() {
   useEffect(() => {
     const syncViewFromUrl = () => {
       const misfits = window.location.hash === "#import-misfits";
-      setShowMisfits(misfits);
-      if (misfits) setSelectedAccountId(null);
+      if (misfits) {
+        setWorkspaceView("misfits");
+        setSelectedAccountId(null);
+      } else {
+        setWorkspaceView((current) => current === "misfits" ? "chart" : current);
+      }
     };
     window.addEventListener("popstate", syncViewFromUrl);
     window.addEventListener("hashchange", syncViewFromUrl);
@@ -2083,7 +2192,10 @@ export default function App() {
   }, [token, selectedAccountId, accountLedgerRefresh]);
 
   useEffect(() => {
-    if (selectedAccountId != null && !accounts.some((account) => account.id === selectedAccountId)) setSelectedAccountId(null);
+    if (selectedAccountId != null && !accounts.some((account) => account.id === selectedAccountId)) {
+      setSelectedAccountId(null);
+      setWorkspaceView("chart");
+    }
   }, [accounts, selectedAccountId]);
 
   function authenticated(nextToken: string, nextUser: User) {
@@ -2091,7 +2203,7 @@ export default function App() {
   }
   function logout() {
     localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null);
-    setImportJobs([]); setTransactions([]); setSelected(null); setShowMisfits(false);
+    setImportJobs([]); setTransactions([]); setSelected(null); setWorkspaceView("chart");
     setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
     setEditingTransaction(null);
   }
@@ -2135,20 +2247,33 @@ export default function App() {
   if (loading) return <div className="loading">Loading accounting…</div>;
   if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
+  const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <AppMenu open={showAppMenu} onToggle={() => setShowAppMenu((current) => !current)}
+      onCurrencies={() => { setShowAppMenu(false); setShowCurrencyManager(true); }}
       onAccountData={() => { setShowAppMenu(false); setShowAccountData(true); }}
       onAgentAccess={() => { setShowAppMenu(false); setShowAgentAccess(true); }}
       onSignOut={logout} /></div></header>
-    <main className="workspace"><AccountPanel accounts={accounts} currencies={currencies}
-      importJobs={importJobs} selectedAccountId={selectedAccountId} misfitsSelected={showMisfits} token={token}
-      onSelectAccount={selectAccount} onSelectMisfits={selectMisfits} onChanged={refresh} />
-      <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>{showMisfits
+    <main className="workspace">
+      <nav className="workspace-nav" aria-label="Accounting views">
+        <button className={workspaceView === "chart" ? "active" : ""} aria-pressed={workspaceView === "chart"}
+          onClick={() => selectWorkspaceView("chart")}>Chart of accounts</button>
+        <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
+          onClick={() => selectWorkspaceView("activity")}>All activity</button>
+        <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
+          onClick={() => selectWorkspaceView("misfits")}>Import misfits
+          {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
+      </nav>
+      <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>
+        {workspaceView === "chart"
+          ? <ChartOfAccounts accounts={accounts} currencies={currencies} selectedAccountId={selectedAccountId}
+              token={token} onSelectAccount={selectAccount} onChanged={refresh} />
+          : workspaceView === "misfits"
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
-          : selectedAccount
+          : workspaceView === "account" && selectedAccount
           ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} assertions={assertions}
               loading={accountLedgerLoading} error={accountLedgerError} token={token}
-              onShowAll={() => setSelectedAccountId(null)} onNewTransaction={() => setShowTransactionComposer(true)}
+              onShowAll={() => selectWorkspaceView("activity")} onNewTransaction={() => setShowTransactionComposer(true)}
               onEditTransaction={(id) => void editTransaction(id)}
               onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
@@ -2157,6 +2282,8 @@ export default function App() {
                 deleteAccounts: false, deleteImportHistory: false })}
               onVerify={() => void verify()} verification={verification} />}</div></main>
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
+    {showCurrencyManager && <CurrencyManagerDialog currencies={currencies} accounts={accounts}
+      token={token} onClose={() => setShowCurrencyManager(false)} onChanged={refresh} />}
     {showAccountData && <AccountDataDialog user={user} token={token} onClose={() => setShowAccountData(false)}
       onClearLedger={(deleteAccounts, deleteImportHistory) => { setShowAccountData(false);
         setDeletionRequest({ scope: "all", transactionIds: [], deleteAccounts, deleteImportHistory }); }}

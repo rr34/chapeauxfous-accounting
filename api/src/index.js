@@ -11,7 +11,7 @@ import {
   createAccount, createTransaction, getTransaction, listAccountLedger, listAccounts,
   listTransactions, updateAccount, updateTransaction, verifyAllPostedTransactions,
 } from "./accounting.js";
-import { createCurrency, listCurrencies } from "./currencies.js";
+import { createCurrency, listCurrencies, updateCurrency } from "./currencies.js";
 import { commitAccountDeletion, previewAccountDeletion } from "./account-delete.js";
 import { commitTransactionDeletion, previewTransactionDeletion } from "./transaction-delete.js";
 import { commitImportRestart, previewImportRestart } from "./import-restart.js";
@@ -59,6 +59,14 @@ app.post("/api/currencies", requireAuth, async (req, res, next) => {
   try {
     const currency = await createCurrency({ pool, personId: req.auth.personId, ...req.body });
     res.status(201).json({ currency });
+  } catch (error) { next(error); }
+});
+
+app.patch("/api/currencies/:currencyId", requireAuth, async (req, res, next) => {
+  try {
+    const currency = await updateCurrency({ pool, personId: req.auth.personId,
+      currencyId: req.params.currencyId, ...req.body });
+    res.json({ currency });
   } catch (error) { next(error); }
 });
 

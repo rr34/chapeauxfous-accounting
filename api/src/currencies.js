@@ -204,3 +204,69 @@ export async function createCurrency({ pool, personId, code, displayName, type, 
     return created;
   });
 }
+
+export async function updateCurrency({ pool, personId, currencyId, code, displayName, type, scale }) {
+  const resolvedCurrencyId = Number(currencyId);
+  if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) {
+    throw currencyError("Personal currency or security not found.", 404, "CURRENCY_NOT_FOUND");
+  }
+  const definition = normalizeUserCurrency({ code, displayName, type, scale });
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT currency_id, owner_person_id, CurrencyAbbreviation, display_name,
+              currency_type, scale
+         FROM currencies
+        WHERE currency_id = ? AND owner_person_id = ?
+        FOR UPDATE`,
+      [resolvedCurrencyId, personId],
+    );
+    if (!rows.length) {
+      throw currencyError("Personal currency or security not found.", 404, "CURRENCY_NOT_FOUND");
+    }
+    const existing = mapCurrency(rows[0]);
+    const structuralFieldsChanged = existing.code !== definition.code
+      || existing.type !== definition.type || existing.scale !== definition.scale;
+
+    if (definition.code !== existing.code) {
+      const accessible = await loadAccessibleCurrencies(connection, personId, { lock: true });
+      const conflict = accessible.find((currency) => currency.id !== resolvedCurrencyId
+        && currencyKey(currency.code) === definition.code);
+      if (conflict && !conflict.userDefined) {
+        throw currencyError(`Currency code "${definition.code}" is reserved by the global catalog.`, 409,
+          "GLOBAL_CURRENCY_CODE_RESERVED", { currencyCode: definition.code });
+      }
+      if (conflict) {
+        throw currencyError(`Currency "${definition.code}" already exists.`, 409,
+          "CURRENCY_ALREADY_EXISTS", { currencyCode: definition.code });
+      }
+    }
+
+    if (structuralFieldsChanged) {
+      const [referenceRows] = await connection.query(
+        `SELECT
+           EXISTS(SELECT 1 FROM accounts WHERE owner_person_id = ? AND account_currency_id = ?) AS account_reference,
+           EXISTS(SELECT 1 FROM transactions WHERE owner_person_id = ? AND valuation_currency_id = ?) AS transaction_reference,
+           EXISTS(SELECT 1 FROM xrates WHERE owner_person_id = ? AND (from_currency_id = ? OR to_currency_id = ?)) AS rate_reference`,
+        [personId, resolvedCurrencyId, personId, resolvedCurrencyId,
+          personId, resolvedCurrencyId, resolvedCurrencyId],
+      );
+      const references = referenceRows[0] ?? {};
+      if (Boolean(references.account_reference) || Boolean(references.transaction_reference)
+        || Boolean(references.rate_reference)) {
+        throw currencyError("Code, type, and decimal places cannot change after a unit is used. Its display name can still be edited.",
+          409, "CURRENCY_STRUCTURE_IN_USE", {
+            currencyId: resolvedCurrencyId,
+            fieldsLocked: ["code", "type", "scale"],
+          });
+      }
+    }
+
+    await connection.query(
+      `UPDATE currencies
+          SET CurrencyAbbreviation = ?, display_name = ?, currency_type = ?, scale = ?
+        WHERE currency_id = ? AND owner_person_id = ?`,
+      [definition.code, definition.displayName, definition.type, definition.scale, resolvedCurrencyId, personId],
+    );
+    return { ...existing, ...definition };
+  });
+}
