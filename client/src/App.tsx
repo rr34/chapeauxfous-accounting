@@ -472,10 +472,10 @@ function AccountPanel({ accounts, currencies, importJobs, selectedAccountId, mis
         {currencyError && <p className="error">{currencyError}</p>}
         <button className="primary" disabled={currencyBusy}>{currencyBusy ? "Creating…" : "Create unit"}</button>
       </form>}
-      <div className="currency-list">{currencies.filter((currency) => currency.userDefined).map((currency) =>
+      <div className="currency-list">{currencies.map((currency) =>
         <div className="currency-row" key={currency.id}><div><strong>{currency.code}</strong><span>{currency.displayName}</span></div>
-          <small>{currency.type} · {currency.scale} decimals</small></div>)}
-        {!currencies.some((currency) => currency.userDefined) && <p className="assertion-empty">No custom units yet.</p>}
+          <small>{currency.type === "iso_4217" ? "ISO 4217" : currency.type} · {currency.scale} decimals · {currency.userDefined ? "personal" : "catalog"}</small></div>)}
+        {!currencies.length && <p className="assertion-empty">No currencies or securities available.</p>}
       </div>
     </section>
     {editingAccount && <AccountEditDialog key={editingAccount.id} account={editingAccount} accounts={accounts} currencies={currencies}
