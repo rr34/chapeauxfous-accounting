@@ -7,7 +7,7 @@ import {
 } from "./artifact-upload.js";
 
 export const MCP_CONTRACT_VERSION = 1;
-export const MCP_SERVER_VERSION = "0.3.0";
+export const MCP_SERVER_VERSION = "0.4.0";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 
@@ -158,6 +158,52 @@ export const transactionSchema = z.object({
   })),
 });
 
+const transactionSearchLineSchema = z.object({
+  id: z.number().int().positive(),
+  amountUnits: z.string().regex(/^-?\d+$/),
+  amountDecimal: z.string().regex(/^-?\d+(?:\.\d+)?$/),
+  valueUnits: z.string().regex(/^-?\d+$/).nullable(),
+  memo: z.string().nullable(),
+  sourceId: z.string().nullable(),
+  reconciliationState: z.enum(["unreconciled", "cleared", "reconciled"]),
+  reconciledAt: z.string().nullable(),
+  accountId: z.number().int().positive(),
+  accountName: z.string().min(1),
+  accountFullName: z.string().min(1),
+  accountDescription: z.string().nullable(),
+  currencyId: z.number().int().positive(),
+  currencyCode: z.string().min(1),
+  scale: z.number().int().min(0).max(18),
+  tags: z.array(z.object({ key: z.string().min(1), value: z.string().min(1) })),
+});
+
+const transactionSearchImportSourceSchema = z.object({
+  importJobId: z.string().uuid(),
+  sourceSystem: z.string().min(1),
+  sourceFileName: z.string().min(1),
+  externalId: z.string().min(1),
+  status: z.enum(["staged", "reused", "exception", "committed"]),
+  issues: z.array(z.object({ code: z.string().min(1), message: z.string().min(1), details: z.json().nullable() })),
+});
+
+export const transactionSearchItemSchema = z.object({
+  id: z.number().int().positive(),
+  date: z.string(),
+  description: z.string().nullable(),
+  state: z.enum(["draft", "posted", "voided"]),
+  valuationCurrencyId: z.number().int().positive(),
+  valuationCurrencyCode: z.string().min(1),
+  valuationScale: z.number().int().min(0).max(18),
+  sourceSystem: z.string().nullable(),
+  externalId: z.string().nullable(),
+  hasIssues: z.boolean(),
+  issueCodes: z.array(z.string().min(1)),
+  matchedFields: z.array(z.string().min(1)),
+  matchedLineItemIds: z.array(z.number().int().positive()),
+  lineItems: z.array(transactionSearchLineSchema),
+  importSources: z.array(transactionSearchImportSourceSchema),
+});
+
 export const balanceAssertionSchema = z.object({
   id: z.number().int().positive(),
   accountId: z.number().int().positive(),
@@ -225,7 +271,7 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Read, create, import, permanently delete, and verify owner-scoped double-entry transactions.",
       aliases: ["transactions", "journal entries", "ledger entries"],
       guidance: "Every posted transaction must balance in its valuation currency. Permanent deletion requires an MCP preview, one explicit confirmation, and the exact matching commit operation.",
-      tools: ["list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
+      tools: ["search_transactions", "list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
         "create_transaction_import_job", "stage_transaction_import_artifact", "stage_transaction_import_chunk", "retry_transaction_import_exception",
         "exclude_transaction_import_exception", "list_transaction_import_jobs", "get_transaction_import_job",
         "list_transaction_import_exceptions", "preview_transaction_import_job",

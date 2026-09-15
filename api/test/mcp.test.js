@@ -26,6 +26,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let createdCurrency;
   let createdImportJob;
   let previewedImportJob;
+  let searchedTransactionFilters;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
     dryRun: !ledgerChanged,
@@ -153,6 +154,20 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       seen.push(personId);
       return [{ id: 10, name: "Wallet", description: null, placeholder: false, parentAccountId: null,
         type: "asset", currencyId: 1, currencyCode: "USD", scale: 2, balanceUnits: "123", archivedAt: null }];
+    },
+    async searchTransactionsPage(_pool, personId, options) {
+      searchedTransactionFilters = { personId, options };
+      return {
+        filters: {
+          text: null, accountId: null, includeAccountDescendants: true,
+          counterAccountId: null, includeCounterAccountDescendants: true,
+          date: null, dateFrom: null, dateTo: null,
+          amount: null, amountTolerance: null, minimumAmount: "10.00", maximumAmount: "20.00",
+          amountSign: "either", transactionId: null, externalId: null, reference: null,
+          currencyCode: "USD", source: null, hasIssues: null, sortBy: "date", sortDirection: "desc",
+        },
+        transactions: [], totalMatches: 0, nextCursor: null,
+      };
     },
     async importAccountTree(input) {
       imported = input;
@@ -318,6 +333,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_exceptions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_transaction_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "search_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "refresh_transaction_delete_plan"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_transaction_delete_plan"), true);
@@ -354,6 +370,20 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   );
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").annotations.idempotentHint, true);
+  const transactionSearchTool = tools.tools.find((tool) => tool.name === "search_transactions");
+  assert.equal(transactionSearchTool.annotations.readOnlyHint, true);
+  assert.equal(transactionSearchTool.inputSchema.properties.include_account_descendants.default, true);
+  assert.equal(transactionSearchTool.inputSchema.properties.amount_sign.default, "either");
+  assert.equal(Object.hasOwn(transactionSearchTool.inputSchema.properties, "minimum_amount"), true);
+  assert.equal(Object.hasOwn(transactionSearchTool.inputSchema.properties, "maximum_amount"), true);
+  assert.match(transactionSearchTool.description, /complete owner-scoped ledger transactions/);
+  assert.deepEqual(transactionSearchTool._meta["agent-slayer/selection"], {
+    protocol: "agent-slayer.tool-description",
+    version: 1,
+    summary: "Search complete owner-scoped ledger transactions by text, accounts, dates, decimal amount or range, identifiers, currency, source, or retained issue evidence. Select this instead of list_transactions whenever any filter is needed.",
+    actionClasses: ["READ"],
+    effectClassifications: ["READ-ONLY"],
+  });
   const artifactImportTool = tools.tools.find((tool) => tool.name === "stage_transaction_import_artifact");
   const createImportJobTool = tools.tools.find((tool) => tool.name === "create_transaction_import_job");
   assert.equal(artifactImportTool.annotations.idempotentHint, true);
@@ -481,6 +511,26 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
 
   const currenciesResult = await client.callTool({ name: "list_currencies", arguments: {} });
   assert.equal(currenciesResult.structuredContent.currencies[0].displayName, "Bitcoin");
+
+  const transactionSearch = await client.callTool({
+    name: "search_transactions",
+    arguments: { minimum_amount: "10.00", maximum_amount: "20.00", currency_code: "usd" },
+  });
+  assert.equal(transactionSearch.structuredContent.status, "success");
+  assert.equal(transactionSearch.structuredContent.totalMatches, 0);
+  assert.equal(transactionSearch.structuredContent.resultMetadata.complete, true);
+  assert.deepEqual(searchedTransactionFilters, {
+    personId: 7,
+    options: {
+      text: undefined, accountId: undefined, includeAccountDescendants: true,
+      counterAccountId: undefined, includeCounterAccountDescendants: true,
+      date: undefined, dateFrom: undefined, dateTo: undefined,
+      amount: undefined, amountTolerance: "0", minimumAmount: "10.00", maximumAmount: "20.00",
+      amountSign: "either", transactionId: undefined, externalId: undefined, reference: undefined,
+      currencyCode: "usd", source: undefined, hasIssues: undefined,
+      sortBy: "date", sortDirection: "desc", limit: 25, cursor: undefined,
+    },
+  });
 
   const createCurrencyResult = await client.callTool({
     name: "create_currency",
@@ -764,7 +814,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.3.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.4.0");
 
   await handler.close();
 });

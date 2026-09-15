@@ -487,10 +487,22 @@ type RateDirection = "value-per-amount" | "amount-per-value";
 const oppositeRateDirection = (direction: RateDirection): RateDirection => direction === "value-per-amount"
   ? "amount-per-value"
   : "value-per-amount";
-const exchangeRateUnits = (direction: RateDirection, valueCurrencyCode: string, amountCurrencyCode: string) =>
+const exchangeRateCurrencies = (direction: RateDirection, valueCurrencyCode: string, amountCurrencyCode: string) =>
   direction === "value-per-amount"
-    ? `${valueCurrencyCode} per ${amountCurrencyCode}`
-    : `${amountCurrencyCode} per ${valueCurrencyCode}`;
+    ? [valueCurrencyCode, amountCurrencyCode] as const
+    : [amountCurrencyCode, valueCurrencyCode] as const;
+const exchangeRateUnits = (direction: RateDirection, valueCurrencyCode: string, amountCurrencyCode: string) =>
+  exchangeRateCurrencies(direction, valueCurrencyCode, amountCurrencyCode).join(" per ");
+
+function ExchangeRateFraction({ direction, valueCurrencyCode, amountCurrencyCode }: {
+  direction: RateDirection; valueCurrencyCode: string; amountCurrencyCode: string;
+}) {
+  const [numerator, denominator] = exchangeRateCurrencies(direction, valueCurrencyCode, amountCurrencyCode);
+  return <span className="rate-unit-fraction" aria-hidden="true">
+    <span className="rate-unit-numerator">{numerator}</span>
+    <span className="rate-unit-denominator">{denominator}</span>
+  </span>;
+}
 type EditableLine = { id: number | null; accountId: string; amount: string; value: string; memo: string;
   rateDecimal: string; rateDirection: RateDirection; rateChanges: "amount" | "value"; autoBalance: boolean };
 type EditableImportRecord = CanonicalImportRecord & {
@@ -888,12 +900,13 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
                   ? `Exchange rate shown as ${rateUnits}; click to show ${inverseRateUnits} for line ${index + 1}`
                   : `Exchange rate units for line ${index + 1}: ${rateUnits}`}
                 title={canChooseRateDirection ? `Show ${inverseRateUnits}` : undefined}
-                onClick={() => invertLineRate(index)}>{rateUnits}</button></span>
+                onClick={() => invertLineRate(index)}><ExchangeRateFraction direction={line.rateDirection}
+                  valueCurrencyCode={valueCurrencyCode} amountCurrencyCode={amountCurrencyCode} /></button></span>
               <small>{isZeroValueAdjustment
                 ? "No exchange rate — zero-value quantity adjustment."
                 : !account ? "Choose an account to set the rate units."
                 : isNative ? `No conversion — amount and value are both ${valueCurrencyCode}.`
-                : `Click “${rateUnits}” to show ${inverseRateUnits}.`}</small>
+                : `Click the unit fraction to show ${inverseRateUnits}.`}</small>
               {!isNative && !isZeroValueAdjustment && <span className="rate-update-choice">Changing rate updates<select value={line.rateChanges}
                 onChange={(event) => setLines((current) => current.map((candidate, candidateIndex) => candidateIndex === index
                   ? { ...candidate, rateChanges: event.target.value as "amount" | "value" } : candidate))}>
@@ -1227,12 +1240,13 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
                     ? `Exchange rate shown as ${rateUnits}; click to show ${inverseRateUnits} for line ${index + 1}`
                     : `Exchange rate units for line ${index + 1}: ${rateUnits}`}
                   title={canChooseRateDirection ? `Show ${inverseRateUnits}` : undefined}
-                  onClick={() => invertLineRate(index)}>{rateUnits}</button></span>
+                  onClick={() => invertLineRate(index)}><ExchangeRateFraction direction={record.rateDirection}
+                    valueCurrencyCode={first.valuation_currency_code} amountCurrencyCode={amountCurrencyCode} /></button></span>
               <small>{isZeroValueAdjustment
                 ? "No exchange rate — zero-value quantity adjustment."
                 : !selectedAccount ? "Choose an account to set the rate units."
                 : isNative ? `No conversion — amount and value are both ${first.valuation_currency_code}.`
-                : `Click “${rateUnits}” to show ${inverseRateUnits}.`}</small>
+                : `Click the unit fraction to show ${inverseRateUnits}.`}</small>
               {!isNative && !isZeroValueAdjustment && <span className="rate-update-choice">Changing rate updates
                 <select aria-label={`Exchange-rate update target for line ${index + 1}`} value={record.rateChanges}
                   onChange={(event) => setRecords((current) => current.map((candidate, candidateIndex) => candidateIndex === index
@@ -1526,6 +1540,13 @@ type AccountRegisterRow =
   | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
 
+function formatRegisterDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(match[2]) - 1];
+  return month ? `${match[3]} ${month} ${match[1]}` : value;
+}
+
 function AccountRegister({ account, entries, assertions, loading, error, token, onShowAll, onNewTransaction,
   onEditTransaction, onChanged }: {
   account: Account; entries: AccountLedgerEntry[]; assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
@@ -1617,7 +1638,7 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
           if (row.kind === "assertion") {
             const { assertion } = row;
             return <tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`} key={`assertion-${assertion.id}`}>
-              <td>{assertion.date}</td>
+              <td>{formatRegisterDate(assertion.date)}</td>
               <td><strong>Known balance</strong><small>{assertion.matches
                 ? "Matches the ledger"
                 : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small></td>
@@ -1630,7 +1651,7 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
           }
           const { entry } = row;
           const splitLabel = entry.splitAccountNames.length === 0 ? "—"
-            : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split transaction";
+            : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split";
           const expanded = view === "journal" || (view === "auto-split" && activeTransactionId === entry.transactionId);
           return <Fragment key={entry.lineItemId}>
             <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""}`}
@@ -1642,10 +1663,12 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
                   event.preventDefault(); activateTransaction(entry.transactionId);
                 }
               }}>
-              <td>{entry.date}</td>
-              <td><strong>{entry.description || "Untitled transaction"}</strong>
-                {entry.memo && <small>{entry.memo}</small>}</td>
-              <td>{splitLabel}{entry.splitAccountNames.length > 1 && <small>{entry.splitAccountNames.join(", ")}</small>}</td>
+              <td>{formatRegisterDate(entry.date)}</td>
+              <td className="register-description"><strong title={entry.description || "Untitled transaction"}>
+                {entry.description || "Untitled transaction"}</strong>
+                {view === "journal" && entry.memo && <small>{entry.memo}</small>}</td>
+              <td>{splitLabel}{view === "journal" && entry.splitAccountNames.length > 1
+                && <small>{entry.splitAccountNames.join(", ")}</small>}</td>
               <td className={`amount ${debitIncreases ? "increase-effect" : "decrease-effect"}`}>
                 {entry.debitUnits == null ? "" : unitsToDecimal(entry.debitUnits, account.scale)}</td>
               <td className={`amount ${debitIncreases ? "decrease-effect" : "increase-effect"}`}>

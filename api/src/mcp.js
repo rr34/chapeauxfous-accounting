@@ -71,6 +71,7 @@ import {
   toolMetadata,
   transactionImportArtifactUpload,
   transactionListItemSchema,
+  transactionSearchItemSchema,
   transactionSchema,
 } from "./mcp-contracts.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
@@ -93,6 +94,7 @@ import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
+import { searchTransactionsPage } from "./transaction-search.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -191,6 +193,22 @@ const operations = Object.freeze({
       transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       line_items: ["line_item_id", "transaction_id"],
+    },
+  },
+  searchTransactions: {
+    name: "search_transactions",
+    purpose: "Search this user's accounting transactions with deterministic text, account, date, amount, identifier, currency, source, issue, sort, and pagination filters.",
+    schemaObjects: ["transactions", "currencies", "line_items", "accounts", "tags", "lineitems_tags_join",
+      "accounting_transaction_import_jobs", "accounting_transaction_import_items"],
+    fields: {
+      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id", "source_system", "source_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "description", "parent_account_id", "account_currency_id"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+      accounting_transaction_import_jobs: ["import_job_id", "owner_person_id", "source_system", "source_file_name"],
+      accounting_transaction_import_items: ["import_job_id", "transaction_external_id", "item_status", "ledger_transaction_id", "errors_json"],
     },
   },
   getTransaction: {
@@ -539,6 +557,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     getAccountTreeImportPlan: services.getAccountTreeImportPlan ?? getAccountTreeImportPlan,
     listTransactions: services.listTransactions ?? listTransactions,
     listTransactionsPage: services.listTransactionsPage ?? (services.listTransactions ? injectedPage(services.listTransactions, "transactions") : listTransactionsPage),
+    searchTransactionsPage: services.searchTransactionsPage ?? searchTransactionsPage,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
@@ -744,6 +763,36 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   const transactionListOutput = successOutputSchema({
     transactions: z.array(transactionListItemSchema), resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const transactionSearchFiltersSchema = z.object({
+    text: z.string().nullable(),
+    accountId: z.number().int().positive().nullable(),
+    includeAccountDescendants: z.boolean(),
+    counterAccountId: z.number().int().positive().nullable(),
+    includeCounterAccountDescendants: z.boolean(),
+    date: z.string().nullable(),
+    dateFrom: z.string().nullable(),
+    dateTo: z.string().nullable(),
+    amount: z.string().nullable(),
+    amountTolerance: z.string().nullable(),
+    minimumAmount: z.string().nullable(),
+    maximumAmount: z.string().nullable(),
+    amountSign: z.enum(["positive", "negative", "either"]),
+    transactionId: z.number().int().positive().nullable(),
+    externalId: z.string().nullable(),
+    reference: z.string().nullable(),
+    currencyCode: z.string().nullable(),
+    source: z.string().nullable(),
+    hasIssues: z.boolean().nullable(),
+    sortBy: z.enum(["date", "amount", "description"]),
+    sortDirection: z.enum(["asc", "desc"]),
+  });
+  const transactionSearchOutput = successOutputSchema({
+    filters: transactionSearchFiltersSchema,
+    transactions: z.array(transactionSearchItemSchema),
+    totalMatches: z.number().int().nonnegative(),
+    resultMetadata: resultMetadataSchema,
     schemaProjection: schemaProjectionSchema,
   });
   const transactionReadOutput = successOutputSchema({ transaction: transactionSchema, schemaProjection: schemaProjectionSchema });
@@ -1447,6 +1496,86 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.deleteTransactions);
   }, { defaultStatus: "committed", retryTool: "preview_delete_transactions",
     failureMapper: transactionDeletePlanFailure }));
+
+  const decimalAmount = z.string().trim().regex(/^\d+(?:\.\d{1,18})?$/)
+    .describe("Nonnegative decimal magnitude with no more than 18 fractional digits.");
+  server.registerTool("search_transactions", {
+    title: "Search transactions",
+    description: "Search complete owner-scoped ledger transactions deterministically. text is one case-insensitive substring search across transaction descriptions and source identifiers, line memos and source identifiers, full account paths and descriptions, tags, currencies, and linked import source/error text. Account and counter-account filters include descendants by default; when both are supplied they must match different postings. Amounts are decimal magnitudes of matching account postings: either sign matches by default, tolerance is inclusive around one amount, and minimum/maximum are inclusive. Use amount+tolerance or minimum/maximum, not both. date is exact and cannot be combined with date_from/date_to. has_issues refers only to retained import exception/error evidence actually linked to a ledger transaction. Results contain complete transactions, identify matching fields and postings, and use a filter-bound stable cursor.",
+    inputSchema: {
+      text: z.string().trim().min(1).max(16000).optional(),
+      account_id: positiveInteger("Exact owner-scoped account id. Descendants are included by default.").optional(),
+      include_account_descendants: z.boolean().default(true),
+      counter_account_id: positiveInteger("Account id that must appear on another posting in the same transaction. Descendants are included by default.").optional(),
+      include_counter_account_descendants: z.boolean().default(true),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      date_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      date_to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      amount: decimalAmount.optional(),
+      amount_tolerance: decimalAmount.default("0"),
+      minimum_amount: decimalAmount.optional(),
+      maximum_amount: decimalAmount.optional(),
+      amount_sign: z.enum(["positive", "negative", "either"]).default("either"),
+      transaction_id: positiveInteger("Exact internal transaction id.").optional(),
+      external_id: z.string().trim().min(1).max(128).optional()
+        .describe("Exact case-insensitive transaction or linked-import external id."),
+      reference: z.string().trim().min(1).max(128).optional()
+        .describe("Exact case-insensitive transaction or line source identifier, including an imported reference when stored there."),
+      currency_code: z.string().trim().min(1).max(50).optional()
+        .describe("Case-insensitive posting currency code; without an amount it may also match the valuation currency."),
+      source: z.string().trim().min(1).max(255).optional()
+        .describe("Exact case-insensitive source system, import job id, or source file name."),
+      has_issues: z.boolean().optional(),
+      sort_by: z.enum(["date", "amount", "description"]).default("date"),
+      sort_direction: z.enum(["asc", "desc"]).default("desc"),
+      limit: z.number().int().min(1).max(100).default(25),
+      cursor: z.string().trim().min(1).max(2048).nullable().optional(),
+    },
+    outputSchema: transactionSearchOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.transactions"),
+      "agent-slayer/selection": {
+        protocol: "agent-slayer.tool-description",
+        version: 1,
+        summary: "Search complete owner-scoped ledger transactions by text, accounts, dates, decimal amount or range, identifiers, currency, source, or retained issue evidence. Select this instead of list_transactions whenever any filter is needed.",
+        actionClasses: ["READ"],
+        effectClassifications: ["READ-ONLY"],
+      },
+    },
+  }, async (input) => safeToolResult(async () => {
+    const page = await accounting.searchTransactionsPage(pool, personId, {
+      text: input.text,
+      accountId: input.account_id,
+      includeAccountDescendants: input.include_account_descendants,
+      counterAccountId: input.counter_account_id,
+      includeCounterAccountDescendants: input.include_counter_account_descendants,
+      date: input.date,
+      dateFrom: input.date_from,
+      dateTo: input.date_to,
+      amount: input.amount,
+      amountTolerance: input.amount_tolerance,
+      minimumAmount: input.minimum_amount,
+      maximumAmount: input.maximum_amount,
+      amountSign: input.amount_sign,
+      transactionId: input.transaction_id,
+      externalId: input.external_id,
+      reference: input.reference,
+      currencyCode: input.currency_code,
+      source: input.source,
+      hasIssues: input.has_issues,
+      sortBy: input.sort_by,
+      sortDirection: input.sort_direction,
+      limit: input.limit,
+      cursor: input.cursor,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      filters: page.filters,
+      transactions: page.transactions,
+      totalMatches: page.totalMatches,
+      resultMetadata: pageMetadata(page.transactions, page.nextCursor, "transactions"),
+    }, operations.searchTransactions);
+  }));
 
   server.registerTool("list_transactions", {
     title: "List transactions",
