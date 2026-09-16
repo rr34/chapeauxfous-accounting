@@ -87,6 +87,8 @@ import {
 } from "./accounting-questions.js";
 import { previewSingleAccountStatementImport } from "./single-account-import.js";
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
+import { normalBalanceSign } from "./account-balances.js";
+import { decimalToUnits, unitsToDecimal } from "./money.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 import {
@@ -552,6 +554,11 @@ function accountObjectContext(accounts, pathAccounts = accounts) {
     scale: account.scale,
     postable: !account.placeholder && account.archivedAt == null,
     archived: account.archivedAt != null,
+    actions: !account.placeholder && account.archivedAt == null ? [{
+      id: "import_statement",
+      label: "Import statement",
+      tool: "start_single_account_statement_import",
+    }] : [],
   }));
 }
 
@@ -671,6 +678,12 @@ async function accountTreePlanToolResult(work, {
 
 function positiveInteger(label) {
   return z.number().int().positive().describe(label);
+}
+
+function previousCalendarDate(value) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
 }
 
 function transactionDeletionStatusRecovery(result, deletionPlanId) {
@@ -957,6 +970,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       accountType: z.enum(["asset", "liability", "equity", "income", "expense"]),
       currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
       scale: z.number().int().min(0).max(18), postable: z.boolean(), archived: z.boolean(),
+      actions: z.array(z.object({
+        id: z.literal("import_statement"), label: z.literal("Import statement"),
+        tool: z.literal("start_single_account_statement_import"),
+      })),
     })),
     resultMetadata: resultMetadataSchema,
   });
@@ -1066,6 +1083,20 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     analysis: statementObservationAnalysisSchema,
     resultMetadata: resultMetadataSchema,
     schemaProjection: schemaProjectionSchema,
+  });
+  const singleAccountStatementGuideOutput = successOutputSchema({
+    workflow: z.literal("single_account_statement"),
+    account: z.object({
+      objectType: z.literal("accounting.account"), id: z.number().int().positive(),
+      sourceRef: z.string().min(1), displayName: z.string().min(1), currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18),
+    }),
+    orderedQuestions: z.array(z.object({
+      order: z.number().int().min(1).max(4), key: z.string().min(1), prompt: z.string().min(1),
+      answerShape: z.json(),
+    })).length(4),
+    nextTool: z.literal("import_single_account_statement"),
+    rules: z.array(z.string().min(1)),
   });
   const referenceRateListOutput = successOutputSchema({
     referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
@@ -2069,58 +2100,163 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.resolveAccountingQuestion);
   }));
 
+  server.registerTool("start_single_account_statement_import", {
+    title: "Start single-account statement import",
+    description: "Call this first when the user attaches one statement for one account. It returns the only four document-extraction questions, in order. Answer them from the attachment; ask the user only when the document itself does not supply an answer. Do not guess counteraccounts during this workflow.",
+    inputSchema: {
+      account_id: positiveInteger("The accounting.account object linked to the uploaded statement."),
+    },
+    outputSchema: singleAccountStatementGuideOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_account_objects"],
+      attachmentHints: ["Attach exactly one statement and bind it to one confirmed accounting.account object."],
+    }),
+  }, async ({ account_id }) => safeToolResult(async () => {
+    const accounts = await accounting.listAccounts(pool, personId);
+    const account = accounts.find((candidate) => candidate.id === account_id);
+    if (!account) throw Object.assign(new Error("Statement account not found."), {
+      status: 404, code: "ACCOUNT_NOT_FOUND",
+    });
+    const paths = new Map(accountPathContext(accounts, { includeArchived: true })
+      .map((item) => [item.accountId, item.fullName]));
+    return {
+      workflow: "single_account_statement",
+      account: {
+        objectType: "accounting.account", id: account.id, sourceRef: `accounting://accounts/${account.id}`,
+        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode, scale: account.scale,
+      },
+      orderedQuestions: [
+        { order: 1, key: "beginning_balance",
+          prompt: "Does the statement contain a beginning balance and a date? Extract both exactly, then identify whether the printed date is the first included transaction date or an explicit end-of-day balance date. A beginning balance at the start of a period is normally the end-of-day balance immediately before the first included date.",
+          answerShape: { found: "boolean", date: "YYYY-MM-DD or null",
+            date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
+            amount_decimal: "string or null", available_text: "string or null" } },
+        { order: 2, key: "ending_balance",
+          prompt: "Does the statement contain an ending balance with a date? If yes, extract the date and amount exactly as printed.",
+          answerShape: { found: "boolean", date: "YYYY-MM-DD or null", amount_decimal: "string or null", available_text: "string or null" } },
+        { order: 3, key: "line_items",
+          prompt: "What are all line items into or out of this account? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
+          answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
+        { order: 4, key: "available_text",
+          prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text from the document without inventing a category.",
+          answerShape: [{ source_record_id: "same row id as question 3", available_text: "string or null" }] },
+      ],
+      nextTool: "import_single_account_statement",
+      rules: [
+        "Use only evidence visible in this one statement.",
+        "Do not guess the other side of any line item; Accounting places it in the selected same-currency suspense account.",
+        "Preserve every printed amount and all useful transaction text.",
+        "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day. Use explicit_end_of_day_balance_date only when the document clearly gives the balance's end-of-day effective date.",
+        "If either dated balance is absent, report that result and ask the user for the missing dated balance before import.",
+      ],
+    };
+  }));
+
+  const statementBalanceAnswerFields = {
+    found: z.boolean(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
+    available_text: z.string().trim().max(16000).nullable().optional(),
+  };
+  const beginningBalanceAnswerSchema = z.object({
+    ...statementBalanceAnswerFields,
+    date_meaning: z.enum(["first_included_transaction_date", "explicit_end_of_day_balance_date"]).nullable(),
+  }).strict();
+  const endingBalanceAnswerSchema = z.object(statementBalanceAnswerFields).strict();
   const oneSidedStatementLineSchema = z.object({
-    external_id: z.string().trim().min(1).max(128)
-      .describe("Stable source line identifier. Reuse it when the same statement is processed again."),
+    source_record_id: z.string().trim().min(1).max(96)
+      .describe("Stable row identifier within this statement; reuse it when the same attachment is processed again."),
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    description: z.string().trim().max(16000).nullable().optional(),
-    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/),
-    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
-      .describe("Statement-line value in valuation_currency_code; required when the account uses another currency."),
-    memo: z.string().trim().max(16000).nullable().optional(),
-    question_prompt: z.string().trim().min(1).max(16000).nullable().optional(),
+    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
+      .describe("Signed change to the displayed statement balance: positive increases it and negative decreases it."),
+    available_text: z.string().trim().max(16000).nullable()
+      .describe("All useful transaction text copied from the document, or null when the row has none."),
   }).strict();
   server.registerTool("import_single_account_statement", {
-    title: "Preview one-sided account statement",
-    description: `Import up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} authoritative lines from one account without requiring the caller to construct double-entry transactions. Each source amount is preserved on the selected statement account and starts cleared. Accounting creates an exact opposite amount and value in one user-selected active postable suspense account of the same native currency, attaches an open classification question there, and leaves that side unreconciled. Stable source_system plus external_id prevents exact replays. For screenshots, OCR, PDFs, or overlapping files, run analyze_statement_observations first and resolve its duplicate candidates. Supply reconciliation when opening and closing balances are known; the ordinary hard balance gate and confirmation plan still apply.`,
+    title: "Answer and preview single-account statement",
+    description: `Canonical attachment workflow for one statement and one account. Call start_single_account_statement_import first, answer its four ordered questions from the document, and submit those answers here. Accounting saves the two dated balance anchors, screens the extracted rows for duplicates, preserves each statement amount and available text, and creates a preview in which every unknown other side goes to one user-selected same-currency suspense account. It never guesses categories. A balance mismatch or duplicate candidate blocks commit and returns the evidence that needs review.`,
     inputSchema: {
-      source_system: z.string().trim().min(1).max(32),
+      statement_id: z.string().trim().min(1).max(128)
+        .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
       account_id: positiveInteger("The single authoritative statement account."),
       suspense_account_id: positiveInteger("One ordinary active postable bucket account in the same native currency."),
-      valuation_currency_code: z.string().trim().min(1).max(50),
-      question_audience: z.string().trim().min(1).max(50).default("human"),
-      lines: z.array(oneSidedStatementLineSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
-      reconciliation: z.object({
-        opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-        closing_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-      }).optional(),
+      beginning_balance: beginningBalanceAnswerSchema,
+      ending_balance: endingBalanceAnswerSchema,
+      line_items: z.array(oneSidedStatementLineSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
       dry_run: z.literal(true).default(true),
     },
     outputSchema: transactionWorkflowOutput,
     annotations: writesData,
     _meta: toolMetadata("accounting.reconciliation", {
-      dependencies: ["list_accounts", "list_currencies", "analyze_statement_observations"],
-      attachmentHints: ["Submit only one account's authoritative lines and reuse stable source line IDs on every retry."],
+      dependencies: ["start_single_account_statement_import", "list_account_objects"],
+      attachmentHints: ["Submit the complete four-answer extraction for exactly one account and one statement."],
     }),
-  }, async ({ source_system, account_id, suspense_account_id, valuation_currency_code,
-    question_audience, lines, reconciliation }) => safeWorkflowResult(async () => {
-    const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
-      pool, personId, sourceSystem: source_system, accountId: account_id,
-      suspenseAccountId: suspense_account_id, valuationCurrencyCode: valuation_currency_code,
-      questionAudience: question_audience,
-      lines: lines.map((line) => ({
-        externalId: line.external_id, transactionDate: line.transaction_date,
-        description: line.description, amountDecimal: line.amount_decimal,
-        valueDecimal: line.value_decimal, memo: line.memo, questionPrompt: line.question_prompt,
+  }, async ({ statement_id, account_id, suspense_account_id, beginning_balance,
+    ending_balance, line_items }) => safeWorkflowResult(async () => {
+    const missingBalances = [
+      ...(!beginning_balance.found || beginning_balance.date == null
+        || beginning_balance.amount_decimal == null || beginning_balance.date_meaning == null
+        ? ["beginning_balance"] : []),
+      ...(!ending_balance.found || ending_balance.date == null || ending_balance.amount_decimal == null
+        ? ["ending_balance"] : []),
+    ];
+    if (missingBalances.length) throw Object.assign(new Error(
+      "The statement does not provide both dated balance anchors. Ask the user for the missing dated balance before importing."), {
+      status: 400, code: "STATEMENT_BALANCE_ANSWER_REQUIRED", details: { missingAnswers: missingBalances },
+    });
+    const openingBalanceDate = beginning_balance.date_meaning === "first_included_transaction_date"
+      ? previousCalendarDate(beginning_balance.date) : beginning_balance.date;
+    if (ending_balance.date <= openingBalanceDate) throw Object.assign(new Error(
+      "The ending balance date must be after the effective opening balance date."), {
+      status: 400, code: "INVALID_STATEMENT_BALANCE_INTERVAL",
+    });
+    const accounts = await accounting.listAccounts(pool, personId);
+    const account = accounts.find((candidate) => candidate.id === account_id);
+    if (!account) throw Object.assign(new Error("Statement account not found."), {
+      status: 404, code: "ACCOUNT_NOT_FOUND",
+    });
+    await accounting.saveBalanceAssertion({ personId, accountId: account_id, balanceDate: openingBalanceDate,
+      knownBalanceUnits: decimalToUnits(beginning_balance.amount_decimal, account.scale) });
+    await accounting.saveBalanceAssertion({ personId, accountId: account_id, balanceDate: ending_balance.date,
+      knownBalanceUnits: decimalToUnits(ending_balance.amount_decimal, account.scale) });
+    const rows = line_items.map((line) => ({
+      externalId: `sha256:${createHash("sha256").update(`${statement_id}\u0000${line.source_record_id}`, "utf8").digest("hex")}`,
+      transactionDate: line.transaction_date, description: line.available_text,
+      amountDecimal: unitsToDecimal(BigInt(decimalToUnits(line.amount_decimal, account.scale))
+        * normalBalanceSign(account.type), account.scale),
+    }));
+    const analysis = await accounting.analyzeStatementObservations({
+      pool, personId, openingBalanceDate, closingBalanceDate: ending_balance.date,
+      observations: rows.map((line, index) => ({
+        sourceDocumentId: statement_id, sourceRecordId: line_items[index].source_record_id,
+        accountId: account_id, transactionDate: line.transactionDate, amountDecimal: line.amountDecimal,
+        description: line.description, reference: line.externalId,
       })),
-      reconciliation: reconciliation == null ? null : {
-        openingBalanceDate: reconciliation.opening_balance_date,
-        closingBalanceDate: reconciliation.closing_balance_date,
-      },
+    });
+    if (analysis.duplicateAnalysis.unresolvedCandidateCount > 0) throw Object.assign(new Error(
+      "Possible duplicate statement rows require review before import."), {
+      status: 409, code: "STATEMENT_DUPLICATE_REVIEW_REQUIRED",
+      details: { duplicateAnalysis: analysis.duplicateAnalysis },
+    });
+    const proposed = new Set(analysis.proposedNewObservationIds);
+    const acceptedRows = rows.filter((_line, index) => proposed.has(analysis.observations[index].id));
+    if (!acceptedRows.length) throw Object.assign(new Error("Every extracted statement row already exists in the ledger."), {
+      status: 409, code: "STATEMENT_ALREADY_IMPORTED",
+    });
+    const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
+      pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
+      suspenseAccountId: suspense_account_id, valuationCurrencyCode: account.currencyCode,
+      questionAudience: "human", lines: acceptedRows,
+      reconciliation: { openingBalanceDate, closingBalanceDate: ending_balance.date },
     }));
     return withSchemaProjection(schemaSemantics, { ...imported, import: imported },
       operations.singleAccountStatementImport);
-  }, { retryTool: "import_single_account_statement", preserveEntireBatch: true }));
+  }, { retryTool: "import_single_account_statement", preserveEntireBatch: true,
+    failureMapper: (error) => error?.code === "STATEMENT_BALANCE_ANSWER_REQUIRED"
+      ? { requiredAction: "ASK_USER_FOR_MISSING_DATED_BALANCE" }
+      : error?.code === "STATEMENT_DUPLICATE_REVIEW_REQUIRED"
+      ? { requiredAction: "REVIEW_DUPLICATE_CANDIDATES" } : null }));
 
   server.registerTool("reconcile_account_through_date", {
     title: "Reconcile account through known balance",

@@ -17,11 +17,8 @@ import { commitTransactionDeletion, previewTransactionDeletion } from "./transac
 import { commitImportRestart, previewImportRestart } from "./import-restart.js";
 import { commitUserDeletion, getUserDataSummary, previewUserDeletion } from "./user-delete.js";
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
-import { previewSingleAccountStatementImport } from "./single-account-import.js";
-import { commitTransactionImportPlan, getTransactionImportPlan } from "./transaction-import.js";
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
 import { listAccountingQuestionsPage, resolveAccountingQuestion } from "./accounting-questions.js";
-import { analyzeStatementObservations } from "./statement-analysis.js";
 import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, resolveArtifactUploadRoot } from "./artifact-upload.js";
 import {
   commitTransactionImportJob,
@@ -134,36 +131,6 @@ app.post("/api/balance-assertions", requireAuth, async (req, res, next) => {
   try {
     res.status(201).json({ assertion: await saveBalanceAssertion({ personId: req.auth.personId, ...req.body }) });
   } catch (error) { next(error); }
-});
-
-app.post("/api/statements/preview", requireAuth, async (req, res, next) => {
-  try {
-    res.json(await previewSingleAccountStatementImport({
-      pool, personId: req.auth.personId, accountId: req.body?.accountId,
-      suspenseAccountId: req.body?.suspenseAccountId,
-      sourceSystem: req.body?.sourceSystem, valuationCurrencyCode: req.body?.valuationCurrencyCode,
-      questionAudience: req.body?.questionAudience, lines: req.body?.lines,
-      reconciliation: req.body?.reconciliation,
-    }));
-  } catch (error) { next(error); }
-});
-
-app.post("/api/statements/analyze", requireAuth, async (req, res, next) => {
-  try { res.json(await analyzeStatementObservations({ pool, personId: req.auth.personId,
-    observations: req.body?.observations,
-    openingBalanceDate: req.body?.openingBalanceDate,
-    closingBalanceDate: req.body?.closingBalanceDate,
-  })); } catch (error) { next(error); }
-});
-
-app.get("/api/statements/plans/:importPlanId", requireAuth, async (req, res, next) => {
-  try { res.json(await getTransactionImportPlan({ pool, personId: req.auth.personId,
-    importPlanId: req.params.importPlanId })); } catch (error) { next(error); }
-});
-
-app.post("/api/statements/plans/:importPlanId/commit", requireAuth, async (req, res, next) => {
-  try { res.json(await commitTransactionImportPlan({ pool, personId: req.auth.personId,
-    importPlanId: req.params.importPlanId })); } catch (error) { next(error); }
 });
 
 app.post("/api/accounts/:accountId/reconcile", requireAuth, async (req, res, next) => {

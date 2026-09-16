@@ -2137,7 +2137,7 @@ function AgentAccessDialog({ loginToken, onClose }: { loginToken: string; onClos
     <section className="agent-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-access-title">
       <div className="dialog-heading"><div><p className="eyebrow">Integrations</p><h2 id="agent-access-title">Agent access</h2></div>
         <button className="dialog-close" aria-label="Close agent access" onClick={onClose}>×</button></div>
-      <p className="muted">Generate a private bearer token here, then enter this MCP URL and token in your agent's Add MCP dialog.</p>
+      <p className="muted">Generate a private bearer token here, then enter this MCP URL and token in your agent's Add MCP dialog. The agent can list first-class accounting.account objects; each postable account advertises an Import statement action that starts the four-question workflow.</p>
 
       <div className="connection-field"><label>MCP URL</label><div><input readOnly value={endpoint} onFocus={(event) => event.currentTarget.select()} />
         <button className="secondary" onClick={() => void copy(endpoint, "url")}>{copied === "url" ? "Copied" : "Copy"}</button></div></div>

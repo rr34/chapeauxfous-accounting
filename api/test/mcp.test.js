@@ -28,6 +28,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let previewedImportJob;
   let searchedTransactionFilters;
   let oneSidedImport;
+  const savedStatementBalances = [];
   let reconciledAccount;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
@@ -258,6 +259,20 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
           byAudience: { [input.questionAudience]: input.lines.length },
           bySuspenseAccount: { "Assets:Ask Human": input.lines.length } } };
     },
+    async saveBalanceAssertion(input) {
+      savedStatementBalances.push(input);
+      return { id: savedStatementBalances.length, accountId: input.accountId, accountName: "Wallet",
+        date: input.balanceDate, knownBalanceUnits: input.knownBalanceUnits,
+        calculatedBalanceUnits: input.knownBalanceUnits, differenceUnits: "0", matches: true,
+        currencyId: 1, currencyCode: "USD", scale: 2 };
+    },
+    async analyzeStatementObservations(input) {
+      const observations = input.observations.map((item, index) => ({ ...item, id: `observation-${index + 1}` }));
+      return { observations, proposedNewObservationIds: observations.map((item) => item.id),
+        duplicateAnalysis: { unresolvedCandidateCount: 0, ledgerCandidates: [], inputCandidates: [],
+          exactLedgerDuplicateObservationIds: [], ambiguousExactLedgerObservationIds: [],
+          exactInputDuplicateObservationIds: [] }, coverage: [] };
+    },
     async reconcileAccountThroughDate(input) {
       reconciledAccount = input;
       return { accountId: input.accountId, accountName: "Checking", currencyId: 1, currencyCode: "USD",
@@ -362,6 +377,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "analyze_statement_observations"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "list_reference_rates"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_reference_rate"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "start_single_account_statement_import"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "reconcile_account_through_date"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "search_transactions"), true);
@@ -476,7 +492,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     template.uriTemplate === "accounting://transaction-delete-plans/{planId}"), true);
   const manifestResource = await client.readResource({ uri: "accounting://manifest/capabilities/v1" });
   const manifest = JSON.parse(manifestResource.contents[0].text);
-  assert.equal(manifest.contractVersion, 1);
+  assert.equal(manifest.contractVersion, 2);
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(transactionCapability.summary, /permanently delete/);
@@ -589,7 +605,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
     type: "security", scale: 4,
   });
-  assert.equal(createCurrencyResult.structuredContent.contractVersion, 1);
+  assert.equal(createCurrencyResult.structuredContent.contractVersion, 2);
   assert.equal(createCurrencyResult.structuredContent.status, "success");
   assert.equal(createCurrencyResult.structuredContent.effectReceipt.tool, "create_currency");
   assert.match(createCurrencyResult.structuredContent.effectReceipt.argumentsSha256, /^sha256:/);
@@ -656,6 +672,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10",
     displayName: "Wallet", parentAccountId: null, accountType: "asset", currencyId: 1,
     currencyCode: "USD", scale: 2, postable: true, archived: false,
+    actions: [{ id: "import_statement", label: "Import statement",
+      tool: "start_single_account_statement_import" }],
   });
   assert.deepEqual(accountObjects.structuredContent.resultMetadata.sourceRefs, ["accounting://accounts/10"]);
   const accountObjectResource = await client.readResource({ uri: "accounting://context/objects/accounts" });
@@ -700,7 +718,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_plan_id: "22222222-2222-4222-8222-222222222222" },
   });
   assert.equal(missingPlan.isError, true);
-  assert.equal(missingPlan.structuredContent.contractVersion, 1);
+  assert.equal(missingPlan.structuredContent.contractVersion, 2);
   assert.equal(missingPlan.structuredContent.status, "error");
   assert.equal(missingPlan.structuredContent.code, "IMPORT_PLAN_NOT_FOUND");
   assert.equal(missingPlan.structuredContent.recoverable, true);
@@ -774,23 +792,51 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.deepEqual(importedTransactions.reconciliation, { accountIds: [10],
     openingBalanceDate: "2025-12-31", closingBalanceDate: "2026-01-31" });
 
+  const statementGuide = await client.callTool({
+    name: "start_single_account_statement_import", arguments: { account_id: 10 },
+  });
+  assert.deepEqual(statementGuide.structuredContent.orderedQuestions.map((question) => question.key),
+    ["beginning_balance", "ending_balance", "line_items", "available_text"]);
+  assert.match(statementGuide.structuredContent.orderedQuestions[0].prompt,
+    /end-of-day balance immediately before the first included date/);
+  const missingStatementBalance = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "missing-balance", account_id: 10, suspense_account_id: 11,
+      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
+      ending_balance: { found: true, date: "2026-01-31", amount_decimal: "87.50" },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(missingStatementBalance.isError, true);
+  assert.equal(missingStatementBalance.structuredContent.requiredAction, "ASK_USER_FOR_MISSING_DATED_BALANCE");
+  assert.deepEqual(savedStatementBalances, []);
+
   const oneSidedPreview = await client.callTool({
     name: "import_single_account_statement",
     arguments: {
-      source_system: "bank-statement", account_id: 10, suspense_account_id: 11,
-      valuation_currency_code: "USD", question_audience: "human",
-      lines: [{ external_id: "row-1", transaction_date: "2026-01-05",
-        description: "ACME", amount_decimal: "-12.50" }],
-      reconciliation: { opening_balance_date: "2025-12-31", closing_balance_date: "2026-01-31" },
+      statement_id: "bank-statement-2026-01", account_id: 10, suspense_account_id: 11,
+      beginning_balance: { found: true, date: "2026-01-01",
+        date_meaning: "first_included_transaction_date", amount_decimal: "100.00",
+        available_text: "Statement period begins January 1" },
+      ending_balance: { found: true, date: "2026-01-31", amount_decimal: "87.50", available_text: "Ending balance" },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
       dry_run: true,
     },
   });
   assert.equal(oneSidedPreview.structuredContent.import.questionSummary.openQuestionCount, 1);
-  assert.deepEqual(oneSidedImport, {
-    pool: {}, personId: 7, sourceSystem: "bank-statement", accountId: 10, suspenseAccountId: 11,
+  assert.deepEqual(savedStatementBalances.map((item) => ({ date: item.balanceDate, units: item.knownBalanceUnits })), [
+    { date: "2025-12-31", units: "10000" }, { date: "2026-01-31", units: "8750" },
+  ]);
+  assert.deepEqual({ ...oneSidedImport, lines: oneSidedImport.lines.map((line) => ({ ...line,
+    externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })) }, {
+    pool: {}, personId: 7, sourceSystem: "single_account_statement", accountId: 10, suspenseAccountId: 11,
     valuationCurrencyCode: "USD", questionAudience: "human",
-    lines: [{ externalId: "row-1", transactionDate: "2026-01-05", description: "ACME",
-      amountDecimal: "-12.50", valueDecimal: undefined, memo: undefined, questionPrompt: undefined }],
+    lines: [{ externalId: "sha256:<digest>", transactionDate: "2026-01-05", description: "ACME",
+      amountDecimal: "-12.5" }],
     reconciliation: { openingBalanceDate: "2025-12-31", closingBalanceDate: "2026-01-31" },
   });
 
@@ -916,7 +962,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.7.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.8.0");
 
   await handler.close();
 });
