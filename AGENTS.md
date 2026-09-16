@@ -2,6 +2,15 @@
 
 These instructions apply to the entire repository.
 
+## Agent Slayer interoperability
+
+- Follow `../agent-chapeaux-fous/AGENT-TOOL-MANIFESTO.md` when
+  changing this repository's MCP tools, capability catalog, first-class object
+  descriptions, context views, field contracts, results, or receipts.
+- Accounting owns its ledger data, validation, and workflows. Publish the
+  provider-owned Tool and Object Descriptions required by that manifesto in
+  MCP discovery, and keep their contract tests beside this implementation.
+
 ## Source control
 
 - Do not stage, commit, tag, or push changes merely because a requested change

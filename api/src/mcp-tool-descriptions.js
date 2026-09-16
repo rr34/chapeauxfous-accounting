@@ -4,7 +4,7 @@ const remove = (summary) => ({ summary, actionClasses: ["DELETE"], effectClassif
 
 // These are routing summaries. The full provider instructions stay on each MCP tool registration.
 const descriptions = {
-  describe_accounting_schema: read("Retrieve bounded meanings of accounting fields, units, and relationships when the schema is unclear."),
+  describe_accounting_schema: read("Read live MariaDB table and column comments when accounting storage fields are unclear; focused tools define business rules."),
   list_currencies: read("Find accessible currencies, crypto assets, securities, and their native-unit scales before using an accounting unit."),
   create_currency: mutate("Create one private accounting unit when its code, type, name, and scale are known.", ["CREATE"]),
   list_accounts: read("Read the owner's ledger accounts and balances to find a named account, including a Coinbase Bitcoin account. This checks Accounting's chart of accounts."),

@@ -67,7 +67,6 @@ import {
   referenceRateSchema,
   retryDescriptorSchema,
   resultMetadataSchema,
-  schemaProjectionSchema,
   statementObservationAnalysisSchema,
   statementReconciliationContextSchema,
   structuredErrorSchema,
@@ -79,6 +78,7 @@ import {
   transactionSchema,
 } from "./mcp-contracts.js";
 import { accountingToolDescriptions } from "./mcp-tool-descriptions.js";
+import { accountObjectDescription } from "./mcp-object-descriptions.js";
 import {
   accountingQuestionTags,
   getAccountingQuestion,
@@ -90,7 +90,8 @@ import { previewSingleAccountStatementImport } from "./single-account-import.js"
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
 import { normalBalanceSign } from "./account-balances.js";
 import { decimalToUnits, unitsToDecimal } from "./money.js";
-import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
+import { databaseName } from "./db.js";
+import { describeAccountingSchema } from "./schema-description.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 import {
   commitTransactionImportJob,
@@ -119,357 +120,6 @@ const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, ide
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
 const idempotentWrite = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const destructiveWrite = Object.freeze({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
-const planPreviewFields = Object.freeze([
-  "import_plan_id", "owner_person_id", "import_kind", "plan_status", "preview_sha256",
-  "summary_json", "expires_at", "created_at",
-]);
-const planCommitFields = Object.freeze([
-  "import_plan_id", "owner_person_id", "import_kind", "plan_status", "source_system",
-  "payload_sha256", "preview_sha256", "payload_json", "summary_json", "expires_at",
-  "committed_at", "invalidated_at", "invalidation_code", "result_json", "created_at",
-]);
-
-const operations = Object.freeze({
-  listCurrencies: {
-    name: "list_currencies",
-    purpose: "List global and user-owned currencies, securities, commodities, and their native-unit scales.",
-    schemaObjects: ["currencies"],
-    fields: { currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"] },
-  },
-  createCurrency: {
-    name: "create_currency",
-    purpose: "Create one user-owned currency, security, commodity, or other accounting unit.",
-    schemaObjects: ["currencies"],
-    fields: { currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"] },
-  },
-  listAccounts: {
-    name: "list_accounts",
-    purpose: "List this user's accounts and balances derived from posted line items.",
-    schemaObjects: ["accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "TransactionState"],
-      line_items: ["transaction_id", "amount_units", "account_id"],
-    },
-  },
-  createAccount: {
-    name: "create_account",
-    purpose: "Create one user-owned accounting account.",
-    schemaObjects: ["accounts", "currencies"],
-    fields: {
-      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-    },
-  },
-  updateAccount: {
-    name: "update_account",
-    purpose: "Update one owner-scoped accounting account after enforcing account invariants.",
-    schemaObjects: ["accounts", "currencies", "line_items", "account_balance_assertions"],
-    fields: {
-      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      line_items: ["line_item_id", "account_id"],
-      account_balance_assertions: ["account_balance_assertion_id", "account_id"],
-    },
-  },
-  deleteAccount: {
-    name: "delete_account",
-    purpose: "Preview, commit, and verify deletion of one empty owner-scoped leaf account.",
-    schemaObjects: ["accounts", "line_items", "account_balance_assertions", "accounting_import_plans"],
-    fields: {
-      accounts: ["account_id", "AccountName", "parent_account_id", "owner_person_id"],
-      line_items: ["line_item_id", "account_id"],
-      account_balance_assertions: ["account_balance_assertion_id", "account_id"],
-      accounting_import_plans: planCommitFields,
-    },
-  },
-  importAccountTree: {
-    name: "import_account_tree",
-    purpose: "Validate a colon-delimited account hierarchy and save a durable owner-scoped commit plan.",
-    schemaObjects: ["accounts", "currencies", "accounting_import_plans"],
-    fields: {
-      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
-      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
-      accounting_import_plans: planPreviewFields,
-    },
-  },
-  commitAccountTreeImport: {
-    name: "commit_account_tree_import",
-    purpose: "Commit one previously validated account-tree import plan.",
-    schemaObjects: ["accounts", "currencies", "accounting_import_plans"],
-    fields: {
-      accounts: ["account_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "source_system", "source_id"],
-      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "display_name", "currency_type", "scale"],
-      accounting_import_plans: planCommitFields,
-    },
-  },
-  listTransactions: {
-    name: "list_transactions",
-    purpose: "List this user's recent accounting transactions.",
-    schemaObjects: ["transactions", "currencies", "line_items"],
-    fields: {
-      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      line_items: ["line_item_id", "transaction_id"],
-    },
-  },
-  searchTransactions: {
-    name: "search_transactions",
-    purpose: "Search this user's accounting transactions with deterministic text, account, date, amount, identifier, currency, source, issue, sort, and pagination filters.",
-    schemaObjects: ["transactions", "currencies", "line_items", "accounts", "tags", "lineitems_tags_join",
-      "accounting_transaction_import_jobs", "accounting_transaction_import_items"],
-    fields: {
-      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id", "source_system", "source_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "description", "parent_account_id", "account_currency_id"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      accounting_transaction_import_jobs: ["import_job_id", "owner_person_id", "source_system", "source_file_name"],
-      accounting_transaction_import_items: ["import_job_id", "transaction_external_id", "item_status", "ledger_transaction_id", "errors_json"],
-    },
-  },
-  getTransaction: {
-    name: "get_transaction",
-    purpose: "Read one user-owned transaction with its line amounts, valuation values, tags, and legacy transaction rates.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
-    fields: {
-      transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "AccountName", "account_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-    },
-  },
-  createTransaction: {
-    name: "create_transaction",
-    purpose: "Create a balanced double-entry transaction and optionally post it.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
-    fields: {
-      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "xrate_type", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-    },
-  },
-  listAccountingQuestions: {
-    name: "list_accounting_questions",
-    purpose: "List durable open or resolved classification questions attached to posted ledger lines.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
-    fields: {
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-    },
-  },
-  openAccountingQuestion: {
-    name: "open_accounting_question",
-    purpose: "Attach or update a durable unresolved classification question on one posted ledger line.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
-    fields: {
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-    },
-  },
-  resolveAccountingQuestion: {
-    name: "resolve_accounting_question",
-    purpose: "Resolve a durable accounting question by reclassifying its suspense line without changing the proven amount or value.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
-    fields: {
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id", "UpdatedAt"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-    },
-  },
-  singleAccountStatementImport: {
-    name: "import_single_account_statement",
-    purpose: "Preview authoritative one-sided statement lines with balancing question-bearing suspense counterlines.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
-      "account_balance_assertions", "accounting_import_plans"],
-    fields: {
-      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
-      accounting_import_plans: planPreviewFields,
-    },
-  },
-  reconcileAccountThroughDate: {
-    name: "reconcile_account_through_date",
-    purpose: "Mark only one account's posted lines reconciled through an exact matching known-balance date.",
-    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "AccountType", "account_currency_id"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "TransactionState"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "account_id", "reconciliation_state", "reconciled_at"],
-    },
-  },
-  importTransactions: {
-    name: "import_transactions",
-    purpose: "Validate complete source-neutral transactions with nested line items and save a durable import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
-      "account_balance_assertions", "accounting_import_plans"],
-    fields: {
-      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id",
-        "balance_date", "known_balance_units"],
-      accounting_import_plans: planPreviewFields,
-    },
-  },
-  commitTransactionImport: {
-    name: "commit_transaction_import",
-    purpose: "Commit one previously validated transaction import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
-      "account_balance_assertions", "accounting_import_plans"],
-    fields: {
-      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
-      accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id",
-        "balance_date", "known_balance_units"],
-      accounting_import_plans: planCommitFields,
-    },
-  },
-  transactionImportJob: {
-    name: "transaction_import_job",
-    purpose: "Receive, validate, stage, preview, and commit one resumable source-file transaction import job.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates",
-      "accounting_transaction_import_jobs", "accounting_transaction_import_items",
-      "accounting_transaction_import_requests"],
-    fields: {
-      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id", "source_fingerprint"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
-      accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      accounting_transaction_import_jobs: ["import_job_id", "owner_person_id", "client_request_id",
-        "source_system", "source_file_sha256", "source_file_name", "expected_record_count", "job_status",
-        "preview_sha256", "result_json", "committed_at", "created_at", "updated_at"],
-      accounting_transaction_import_items: ["import_job_id", "transaction_external_id", "canonical_sha256",
-        "canonical_json", "resolved_json", "source_record_count", "item_status", "ledger_transaction_id",
-        "errors_json", "created_at", "updated_at"],
-      accounting_transaction_import_requests: ["import_job_id", "request_kind", "request_id",
-        "payload_sha256", "record_count", "created_at"],
-    },
-  },
-  deleteTransactions: {
-    name: "delete_transactions",
-    purpose: "Preview, commit, and verify permanent deletion of an exact owner-scoped transaction set.",
-    schemaObjects: ["transactions", "line_items", "lineitems_tags_join", "xrates", "accounts",
-      "accounting_import_plans", "accounting_transaction_import_jobs", "accounting_transaction_import_items"],
-    fields: {
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "valuation_currency_id", "TransactionState", "reversal_of_transaction_id", "source_system", "source_id", "source_fingerprint"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at", "source_id"],
-      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
-      xrates: ["xrate_id", "owner_person_id", "transaction_id", "xrate_type", "ValidAt", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "description", "is_placeholder", "parent_account_id", "AccountType", "account_currency_id", "archived_at", "source_system", "source_id"],
-      accounting_import_plans: planCommitFields,
-      accounting_transaction_import_jobs: ["import_job_id", "job_status", "preview_sha256", "updated_at"],
-      accounting_transaction_import_items: ["import_job_id", "transaction_external_id", "item_status",
-        "ledger_transaction_id", "errors_json", "updated_at"],
-    },
-  },
-  listBalanceAssertions: {
-    name: "list_balance_assertions",
-    purpose: "List known end-of-day account balances and compare them with the posted ledger.",
-    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "AccountName", "account_currency_id", "is_placeholder"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "TransactionDate", "TransactionState"],
-      line_items: ["transaction_id", "amount_units", "account_id"],
-    },
-  },
-  saveBalanceAssertion: {
-    name: "save_balance_assertion",
-    purpose: "Create or replace a known end-of-day account balance.",
-    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      account_balance_assertions: ["account_balance_assertion_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "AccountName", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "TransactionDate", "TransactionState"],
-      line_items: ["transaction_id", "amount_units", "account_id"],
-    },
-  },
-  statementReconciliation: {
-    name: "get_statement_reconciliation_context",
-    purpose: "Turn exact opening and closing balance assertions into native-unit movement constraints for a multi-statement import.",
-    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "TransactionState"],
-      line_items: ["transaction_id", "amount_units", "account_id"],
-    },
-  },
-  statementAnalysis: {
-    name: "analyze_statement_observations",
-    purpose: "Compile duplicate, overlap, cross-statement transfer, and known-balance coverage candidates from format-neutral extracted statement rows.",
-    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
-    fields: {
-      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
-      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "is_placeholder", "archived_at"],
-      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
-      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
-    },
-  },
-  referenceRates: {
-    name: "reference_rates",
-    purpose: "Read and create owner-scoped timestamped reference prices for valuation and fee or spread analysis.",
-    schemaObjects: ["xrates", "currencies"],
-    fields: {
-      xrates: ["xrate_id", "owner_person_id", "xrate_type", "ValidAt", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "scale"],
-    },
-  },
-  verifyLedger: {
-    name: "verify_ledger",
-    purpose: "Re-run the accounting invariants for every posted transaction owned by this user.",
-    schemaObjects: ["transactions", "line_items", "accounts", "xrates"],
-    fields: {
-      transactions: ["transaction_id", "owner_person_id", "valuation_currency_id", "TransactionState"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "account_id"],
-      accounts: ["account_id", "owner_person_id", "account_currency_id", "is_placeholder"],
-      xrates: ["transaction_id", "xrate_type", "from_units", "from_currency_id", "to_units", "to_currency_id"],
-    },
-  },
-});
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -641,16 +291,9 @@ async function safeWorkflowResult(work, { defaultStatus = "success", retryTool, 
   }
 }
 
-async function accountTreePlanToolResult(work, {
-  schemaSemantics = null,
-  operation = null,
-  includeValidationRecovery = false,
-} = {}) {
+async function accountTreePlanToolResult(work, { includeValidationRecovery = false } = {}) {
   try {
-    const result = await work();
-    return toolResult(schemaSemantics && operation
-      ? withSchemaProjection(schemaSemantics, result, operation)
-      : result);
+    return toolResult(await work());
   } catch (error) {
     const failure = accountTreeImportPlanFailure(error);
     if (failure) return toolFailureResult({
@@ -697,7 +340,7 @@ function transactionDeletionStatusRecovery(result, deletionPlanId) {
   };
 }
 
-export function createAccountingMcpServer({ personId, pool, artifactRoot, schemaSemantics = new AccountingSchemaSemantics(), services = {} }) {
+export function createAccountingMcpServer({ personId, pool, artifactRoot, services = {} }) {
   const injectedPage = (list, key) => async (...args) => {
     const options = args.at(-1) ?? {};
     const limit = Number(options.limit) || 100;
@@ -854,151 +497,166 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     title: "Accounting currency or unit",
     description: "One currently accessible global or owner-scoped accounting unit by stable Accounting ID.",
     mimeType: "application/json",
-  }, async (uri, { currencyId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { currencyId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     currency: await accounting.getCurrency(pool, personId, currencyId),
-  }, operations.listCurrencies)));
+  }));
 
   server.registerResource("accounting-account", resourceTemplate("accounting://accounts/{accountId}"), {
     title: "Accounting account",
     description: "One current owner-scoped account and posted native-unit balance by stable Accounting ID.",
     mimeType: "application/json",
-  }, async (uri, { accountId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { accountId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     account: await accounting.getAccount(pool, personId, accountId),
-  }, operations.listAccounts)));
+  }));
 
   server.registerResource("accounting-transaction", resourceTemplate("accounting://transactions/{transactionId}"), {
     title: "Accounting transaction",
     description: "One current owner-scoped transaction with line amounts, valuation values, tags, and legacy transaction rates by stable Accounting ID.",
     mimeType: "application/json",
-  }, async (uri, { transactionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { transactionId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     transaction: await accounting.getTransaction(pool, personId, transactionId),
-  }, operations.getTransaction)));
+  }));
 
   server.registerResource("accounting-question", resourceTemplate("accounting://questions/{lineItemId}"), {
     title: "Accounting classification question",
     description: "One durable open or resolved question identified by the posted suspense line it reclassifies.",
     mimeType: "application/json",
-  }, async (uri, { lineItemId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { lineItemId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     question: await accounting.getAccountingQuestion(pool, personId, lineItemId),
-  }, operations.listAccountingQuestions)));
+  }));
 
   server.registerResource("accounting-balance-assertion", resourceTemplate("accounting://balance-assertions/{assertionId}"), {
     title: "Accounting balance assertion",
     description: "One current owner-scoped known-balance assertion and calculated ledger difference by stable Accounting ID.",
     mimeType: "application/json",
-  }, async (uri, { assertionId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { assertionId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     assertion: await accounting.getBalanceAssertion(pool, personId, assertionId),
-  }, operations.listBalanceAssertions)));
+  }));
 
   server.registerResource("accounting-reference-rate", resourceTemplate("accounting://reference-rates/{rateId}"), {
     title: "Accounting reference rate",
     description: "One owner-scoped timestamped reference price by stable Accounting ID.",
     mimeType: "application/json",
-  }, async (uri, { rateId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+  }, async (uri, { rateId }) => entityResource(uri, {
     contractVersion: MCP_CONTRACT_VERSION,
     status: "success",
     referenceRate: await accounting.getReferenceRate(pool, personId, rateId),
-  }, operations.referenceRates)));
+  }));
 
   server.registerResource("accounting-account-tree-import-plan",
     resourceTemplate("accounting://account-tree-import-plans/{planId}"), {
       title: "Account-tree import plan",
       description: "Current owner-scoped status for one durable account-tree import plan.",
       mimeType: "application/json",
-    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    }, async (uri, { planId }) => entityResource(uri, {
       contractVersion: MCP_CONTRACT_VERSION,
       ...await accounting.getAccountTreeImportPlan({ pool, personId, importPlanId: planId }),
-    }, operations.importAccountTree)));
+    }));
 
   server.registerResource("accounting-account-delete-plan",
     resourceTemplate("accounting://account-delete-plans/{planId}"), {
       title: "Account-deletion plan",
       description: "Current owner-scoped status for one durable verified account-deletion plan.",
       mimeType: "application/json",
-    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    }, async (uri, { planId }) => entityResource(uri, {
       contractVersion: MCP_CONTRACT_VERSION,
       ...await accounting.getAccountDeletionPlan({ pool, personId, deletionPlanId: planId }),
-    }, operations.deleteAccount)));
+    }));
 
   server.registerResource("accounting-transaction-import-plan",
     resourceTemplate("accounting://transaction-import-plans/{planId}"), {
       title: "Transaction import plan",
       description: "Current owner-scoped status for one durable transaction-import plan.",
       mimeType: "application/json",
-    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    }, async (uri, { planId }) => entityResource(uri, {
       contractVersion: MCP_CONTRACT_VERSION,
       ...await accounting.getTransactionImportPlan({ pool, personId, importPlanId: planId }),
-    }, operations.commitTransactionImport)));
+    }));
 
   server.registerResource("accounting-transaction-import-job",
     resourceTemplate("accounting://transaction-import-jobs/{jobId}"), {
       title: "Resumable transaction import job",
       description: "Current owner-scoped progress and lifecycle state for one logical source-file import.",
       mimeType: "application/json",
-    }, async (uri, { jobId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    }, async (uri, { jobId }) => entityResource(uri, {
       contractVersion: MCP_CONTRACT_VERSION,
       ...await accounting.getTransactionImportJob({ pool, personId, importJobId: jobId }),
-    }, operations.transactionImportJob)));
+    }));
 
   server.registerResource("accounting-transaction-delete-plan",
     resourceTemplate("accounting://transaction-delete-plans/{planId}"), {
       title: "Transaction-deletion plan",
       description: "Current owner-scoped status for one exact permanent transaction-deletion plan.",
       mimeType: "application/json",
-    }, async (uri, { planId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    }, async (uri, { planId }) => entityResource(uri, {
       contractVersion: MCP_CONTRACT_VERSION,
       ...transactionDeletionStatusRecovery(
         await accounting.getTransactionDeletionPlan({ pool, personId, deletionPlanId: planId }), planId),
-    }, operations.deleteTransactions)));
+    }));
 
-  const schemaDescriptionOutput = successOutputSchema({ projection: schemaProjectionSchema });
+  const schemaDescriptionOutput = successOutputSchema({
+    request: z.string().min(1).describe("Exact schema question supplied by the caller."),
+    tables: z.array(z.object({
+      name: z.string().min(1).describe("MariaDB table name."),
+      comment: z.string().describe("Current source-of-truth table COMMENT from MariaDB."),
+      columns: z.array(z.object({
+        name: z.string().min(1).describe("MariaDB column name."),
+        type: z.string().min(1).describe("Current MariaDB COLUMN_TYPE."),
+        nullable: z.boolean().describe("Whether MariaDB permits NULL in this column."),
+        comment: z.string().describe("Current source-of-truth column COMMENT from MariaDB."),
+      })).describe("Columns in stored order for the matched table."),
+    })).describe("Accounting-owned tables matching the request; an empty array means no storage comment matched."),
+  });
   const currencyListOutput = successOutputSchema({
-    currencies: z.array(currencySchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
+    currencies: z.array(currencySchema), resultMetadata: resultMetadataSchema,
   });
   const currencyMutationOutput = successOutputSchema({
-    currency: currencySchema, effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+    currency: currencySchema, effectReceipt: effectReceiptSchema,
   });
   const accountListOutput = successOutputSchema({
-    accounts: z.array(accountSchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
+    accounts: z.array(accountSchema), resultMetadata: resultMetadataSchema,
   });
   const accountObjectOutput = successOutputSchema({
     objects: z.array(z.object({
-      objectType: z.literal("accounting.account"), id: z.number().int().positive(),
-      sourceRef: z.string().min(1), displayName: z.string().min(1),
-      parentAccountId: z.number().int().positive().nullable(),
-      accountType: z.enum(["asset", "liability", "equity", "income", "expense"]),
-      currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
-      scale: z.number().int().min(0).max(18), postable: z.boolean(), archived: z.boolean(),
+      objectType: z.literal("accounting.account").describe("First-class Accounting object type."),
+      id: z.number().int().positive().describe("Stable owner-scoped account ID."),
+      sourceRef: z.string().min(1).describe("Stable accounting://accounts/{id} reference for this account."),
+      displayName: z.string().min(1).describe("Full account path in the user's chart of accounts."),
+      parentAccountId: z.number().int().positive().nullable().describe("Parent account ID, or null for a root account."),
+      accountType: z.enum(["asset", "liability", "equity", "income", "expense"])
+        .describe("User-chosen accounting classification."),
+      currencyId: z.number().int().positive().describe("Native accounting-unit ID of this account."),
+      currencyCode: z.string().min(1).describe("Native accounting-unit code of this account."),
+      scale: z.number().int().min(0).max(18).describe("Decimal places for native-unit amounts."),
+      postable: z.boolean().describe("Whether this account currently accepts postings."),
+      archived: z.boolean().describe("Whether this account is archived."),
       actions: z.array(z.object({
         id: z.literal("import_statement"), label: z.literal("Import statement"),
         tool: z.literal("start_single_account_statement_import"),
-      })),
-    })),
+      })).describe("Provider-declared actions available for this account object."),
+    })).describe("Owner-scoped account objects returned by this page."),
     resultMetadata: resultMetadataSchema,
   });
   const accountCreateOutput = successOutputSchema({
     account: z.object({ id: z.number().int().positive() }),
     effectReceipt: effectReceiptSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const accountUpdateOutput = successOutputSchema({
     account: z.object({ accountId: z.number().int().positive(), updated: z.literal(true) }),
     effectReceipt: effectReceiptSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const transactionListOutput = successOutputSchema({
     transactions: z.array(transactionListItemSchema), resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const transactionSearchFiltersSchema = z.object({
     text: z.string().nullable(),
@@ -1028,9 +686,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transactions: z.array(transactionSearchItemSchema),
     totalMatches: z.number().int().nonnegative(),
     resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
-  const transactionReadOutput = successOutputSchema({ transaction: transactionSchema, schemaProjection: schemaProjectionSchema });
+  const transactionReadOutput = successOutputSchema({ transaction: transactionSchema });
   const transactionMutationOutput = successOutputSchema({
     transaction: z.object({
       transactionId: z.number().int().positive(),
@@ -1043,15 +700,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       }),
     }),
     effectReceipt: effectReceiptSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const accountingQuestionListOutput = successOutputSchema({
     questions: z.array(accountingQuestionSchema), resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const accountingQuestionMutationOutput = successOutputSchema({
     question: accountingQuestionSchema, changed: z.boolean().optional(),
-    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+    effectReceipt: effectReceiptSchema,
   });
   const accountReconciliationOutput = successOutputSchema({
     reconciliation: z.object({
@@ -1063,11 +718,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       totalLineCount: z.number().int().nonnegative(), newlyReconciledLineCount: z.number().int().nonnegative(),
       alreadyReconciledLineCount: z.number().int().nonnegative(),
     }),
-    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+    effectReceipt: effectReceiptSchema,
   });
   const assertionListOutput = successOutputSchema({
     assertions: z.array(balanceAssertionSchema), resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const assertionMutationOutput = successOutputSchema({
     assertion: balanceAssertionSchema,
@@ -1081,17 +735,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       scale: z.number().int().min(0).max(18),
       nextTool: z.literal("get_statement_reconciliation_context"),
     }).nullable(),
-    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+    effectReceipt: effectReceiptSchema,
   });
   const statementReconciliationOutput = successOutputSchema({
     reconciliation: statementReconciliationContextSchema,
     resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const statementObservationAnalysisOutput = successOutputSchema({
     analysis: statementObservationAnalysisSchema,
     resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const singleAccountStatementGuideOutput = successOutputSchema({
     workflow: z.literal("single_account_statement"),
@@ -1109,11 +761,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   const referenceRateListOutput = successOutputSchema({
     referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const referenceRateMutationOutput = successOutputSchema({
     referenceRate: referenceRateSchema, effectReceipt: effectReceiptSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const ledgerVerificationOutput = successOutputSchema({
     valid: z.boolean(), checked: z.number().int().nonnegative(),
@@ -1122,7 +772,6 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       details: z.json().optional(),
     })),
     resultMetadata: resultMetadataSchema,
-    schemaProjection: schemaProjectionSchema,
   });
   const countMapSchema = z.record(z.string(), z.number().int().nonnegative());
   const importIssueSchema = z.object({ code: z.string().min(1), message: z.string().min(1), details: z.json().optional() });
@@ -1192,7 +841,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   const transactionWorkflowOutput = z.union([
     transactionImportSchema.extend({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), import: transactionImportSchema,
-      schemaProjection: schemaProjectionSchema, effectReceipt: effectReceiptSchema.optional(),
+      effectReceipt: effectReceiptSchema.optional(),
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["ready", "expired", "invalidated", "committed"]),
@@ -1200,7 +849,6 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), summary: transactionImportSummarySchema,
       invalidationCode: z.string().min(1).optional(), alreadyCommitted: z.boolean().optional(),
       commitResult: transactionImportSchema.optional(),
-      schemaProjection: schemaProjectionSchema,
     }),
     structuredErrorSchema,
   ]);
@@ -1219,19 +867,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       nextAction: z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
         onApproval: z.object({ tool: z.literal("commit_delete_account"),
           arguments: z.object({ deletion_plan_id: z.string().uuid() }) }) }),
-      schemaProjection: schemaProjectionSchema,
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["ready", "expired", "invalidated"]),
       readyToCommit: z.boolean(), ...deletionIdentityShape, invalidationCode: z.string().min(1).optional(),
-      schemaProjection: schemaProjectionSchema,
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("committed"), readyToCommit: z.literal(false),
       ...deletionIdentityShape,
       deleted: z.object({ deleted: z.literal(true), accountId: z.number().int().positive(), name: z.string().min(1) }),
       verifiedAbsent: z.literal(true), alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(),
-      schemaProjection: schemaProjectionSchema,
     }),
     structuredErrorSchema,
   ]);
@@ -1276,18 +921,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         onApproval: z.object({ tool: z.literal("commit_delete_transactions"),
           arguments: z.object({ deletion_plan_id: z.string().uuid(),
             preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/) }) }) }),
-      schemaProjection: schemaProjectionSchema,
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("ready"),
-      readyToCommit: z.literal(true), ...transactionDeletionIdentityShape, schemaProjection: schemaProjectionSchema,
+      readyToCommit: z.literal(true), ...transactionDeletionIdentityShape,
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.enum(["expired", "invalidated"]),
       readyToCommit: z.literal(false), ...transactionDeletionIdentityShape,
       invalidationCode: z.string().min(1).optional(),
       requiredAction: z.literal("RUN_NEW_DELETE_PREVIEW"), nextAction: transactionDeletionRecoverySchema,
-      schemaProjection: schemaProjectionSchema,
     }),
     z.object({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.literal("committed"), readyToCommit: z.literal(false),
@@ -1298,21 +941,22 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         reopenedImportJobs: z.number().int().nonnegative() }),
       verification: z.object({ targetTransactionsAbsent: z.literal(true), accountTreeUnchanged: z.literal(true),
         accountCount: z.number().int().nonnegative() }),
-      alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(), schemaProjection: schemaProjectionSchema,
+      alreadyCommitted: z.boolean(), effectReceipt: effectReceiptSchema.optional(),
     }),
     structuredErrorSchema,
   ]);
 
   registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
-    description: "Use when accounting entities, fields, units, relationships, or invariants are unclear. A successful result proves only the meanings present in the returned bounded compiler projection.",
+    description: "Read live MariaDB table and column comments for the accounting domain when storage fields are unclear. Comments describe storage; the owning tools enforce access and business rules. This tool returns no ledger rows.",
     inputSchema: {
       request: z.string().trim().min(1).max(2000).describe("Natural-language description of the accounting data or operation to understand."),
     },
     outputSchema: schemaDescriptionOutput,
     annotations: readOnly,
     _meta: toolMetadata("accounting.schema"),
-  }, async ({ request }) => safeToolResult(async () => ({ projection: schemaSemantics.route(request) })));
+  }, async ({ request }) => safeToolResult(async () =>
+    (services.describeAccountingSchema ?? describeAccountingSchema)(pool, databaseName, request)));
 
   registerTool("list_currencies", {
     title: "List currencies",
@@ -1326,10 +970,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.currencies"),
   }, async ({ limit, cursor }) => safeToolResult(async () => {
     const page = await accounting.listCurrenciesPage(pool, personId, { limit, afterCurrencyId: cursor });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       currencies: page.currencies,
       resultMetadata: pageMetadata(page.currencies, page.nextCursor, "currencies"),
-    }, operations.listCurrencies);
+    };
   }));
 
   registerTool("create_currency", {
@@ -1354,10 +998,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       type: currency_type,
       scale,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       currency,
       effectReceipt: effectReceipt("create_currency", args, "created", [{ type: "currency", id: currency.id }]),
-    }, operations.createCurrency);
+    };
   }));
 
   registerTool("list_accounts", {
@@ -1372,10 +1016,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.accounts"),
   }, async ({ limit, cursor }) => safeToolResult(async () => {
     const page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       accounts: page.accounts,
       resultMetadata: pageMetadata(page.accounts, page.nextCursor, "accounts"),
-    }, operations.listAccounts);
+    };
   }));
 
   registerTool("list_account_objects", {
@@ -1387,9 +1031,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     },
     outputSchema: accountObjectOutput,
     annotations: readOnly,
-    _meta: toolMetadata("accounting.accounts", { attachmentHints: [
-      "A statement attachment should carry a confirmed accounting.account sourceRef before import.",
-    ] }),
+    _meta: {
+      ...toolMetadata("accounting.accounts", { attachmentHints: [
+        "A statement attachment should carry a confirmed accounting.account sourceRef before import.",
+      ] }),
+      "agent-slayer/objects": accountObjectDescription,
+    },
   }, async ({ limit, cursor }) => safeToolResult(async () => {
     const page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
     const pathAccounts = await accounting.listAccounts(pool, personId);
@@ -1426,10 +1073,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       type: account_type,
       currencyId: currency_id,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       account: created,
       effectReceipt: effectReceipt("create_account", args, "created", [{ type: "account", id: created.id }]),
-    }, operations.createAccount);
+    };
   }));
 
   registerTool("update_account", {
@@ -1458,10 +1105,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       type: input.account_type,
       currencyId: input.currency_id,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       account: updated,
       effectReceipt: effectReceipt("update_account", input, "updated", [{ type: "account", id: updated.accountId }]),
-    }, operations.updateAccount);
+    };
   }));
 
   const importedAccountSchema = z.object({
@@ -1547,7 +1194,6 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       }),
     }),
     preview: accountTreeDetailedPreviewSchema,
-    schemaProjection: schemaProjectionSchema,
   }), z.object({
     contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(false),
@@ -1576,7 +1222,6 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       tool: z.literal("import_account_tree"),
       instruction: z.string().min(1),
     }),
-    schemaProjection: schemaProjectionSchema,
   }), z.object({
     contractVersion: z.literal(MCP_CONTRACT_VERSION),
     readyToCommit: z.literal(false),
@@ -1602,23 +1247,20 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     summary: accountTreePlanSummarySchema,
     commitResult: accountTreeDetailedPreviewSchema,
     effectReceipt: effectReceiptSchema,
-    schemaProjection: schemaProjectionSchema,
   }), accountTreePlanFailureSchema]);
   const accountTreePlanStatusOutputSchema = z.union([
     z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(true), status: z.literal("ready"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, schemaProjection: schemaProjectionSchema }),
+      summary: accountTreePlanSummarySchema }),
     z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("committed"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, commitResult: accountTreeDetailedPreviewSchema,
-      schemaProjection: schemaProjectionSchema }),
+      summary: accountTreePlanSummarySchema, commitResult: accountTreeDetailedPreviewSchema }),
     z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("expired"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, schemaProjection: schemaProjectionSchema }),
+      summary: accountTreePlanSummarySchema }),
     z.object({ contractVersion: z.literal(MCP_CONTRACT_VERSION), readyToCommit: z.literal(false), status: z.literal("invalidated"), importPlanId: z.string().uuid(),
       expiresAt: z.string().datetime(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      summary: accountTreePlanSummarySchema, invalidationCode: z.string().min(1),
-      schemaProjection: schemaProjectionSchema }),
+      summary: accountTreePlanSummarySchema, invalidationCode: z.string().min(1) }),
     accountTreePlanFailureSchema,
   ]);
   registerTool("import_account_tree", {
@@ -1661,11 +1303,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       })),
     });
     return accountTreeReadyWorkflow(result);
-  }, {
-    schemaSemantics,
-    operation: operations.importAccountTree,
-    includeValidationRecovery: true,
-  }));
+  }, { includeValidationRecovery: true }));
 
   registerTool("get_account_tree_import_plan", {
     title: "Get account tree import plan",
@@ -1678,7 +1316,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.accounts"),
   }, async ({ import_plan_id }) => accountTreePlanToolResult(() => accounting.getAccountTreeImportPlan({
     pool, personId, importPlanId: import_plan_id,
-  }), { schemaSemantics, operation: operations.importAccountTree }));
+  })));
 
   registerTool("commit_account_tree_import", {
     title: "Commit account tree import",
@@ -1699,7 +1337,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         ]),
       };
     },
-    { schemaSemantics, operation: operations.commitAccountTreeImport },
+    {},
   ));
 
   registerTool("preview_delete_account", {
@@ -1711,7 +1349,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.accounts", { dependencies: ["list_accounts"] }),
   }, async ({ account_id }) => safeWorkflowResult(async () => {
     const result = await accounting.previewAccountDeletion({ pool, personId, accountId: account_id });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...result,
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
@@ -1722,7 +1360,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
           arguments: { deletion_plan_id: result.deletionPlanId },
         },
       },
-    }, operations.deleteAccount);
+    };
   }, { defaultStatus: "ready", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
   registerTool("get_account_delete_plan", {
@@ -1733,9 +1371,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     annotations: readOnly,
     _meta: toolMetadata("accounting.accounts"),
   }, async ({ deletion_plan_id }) => safeWorkflowResult(async () =>
-    withSchemaProjection(schemaSemantics,
-      await accounting.getAccountDeletionPlan({ pool, personId, deletionPlanId: deletion_plan_id }),
-      operations.deleteAccount),
+    await accounting.getAccountDeletionPlan({ pool, personId, deletionPlanId: deletion_plan_id }),
   { retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
   registerTool("commit_delete_account", {
@@ -1747,14 +1383,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.accounts", { dependencies: ["preview_delete_account"] }),
   }, async ({ deletion_plan_id }) => safeWorkflowResult(async () => {
     const result = await accounting.commitAccountDeletion({ pool, personId, deletionPlanId: deletion_plan_id });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...result,
       effectReceipt: effectReceipt("commit_delete_account", { deletion_plan_id },
         result.alreadyCommitted ? "unchanged" : "deleted", [
           { type: "account", id: result.deleted.accountId },
           { type: "account_delete_plan", id: deletion_plan_id },
         ]),
-    }, operations.deleteAccount);
+    };
   }, { defaultStatus: "committed", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
   registerTool("preview_delete_transactions", {
@@ -1767,7 +1403,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, async ({ scope, transaction_ids }) => safeWorkflowResult(async () => {
     const result = await accounting.previewTransactionDeletion({ pool, personId, scope,
       transactionIds: transaction_ids ?? [] });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...result,
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
@@ -1776,7 +1412,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         onApproval: { tool: "commit_delete_transactions",
           arguments: { deletion_plan_id: result.deletionPlanId, preview_digest: result.previewDigest } },
       },
-    }, operations.deleteTransactions);
+    };
   }, { defaultStatus: "ready", retryTool: "preview_delete_transactions",
     failureMapper: transactionDeletePlanFailure }));
 
@@ -1790,7 +1426,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, async ({ deletion_plan_id }) => safeWorkflowResult(async () => {
     const result = await accounting.refreshTransactionDeletionPlan({ pool, personId,
       deletionPlanId: deletion_plan_id });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...result,
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
@@ -1799,7 +1435,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         onApproval: { tool: "commit_delete_transactions",
           arguments: { deletion_plan_id: result.deletionPlanId, preview_digest: result.previewDigest } },
       },
-    }, operations.deleteTransactions);
+    };
   }, { defaultStatus: "ready", retryTool: "refresh_transaction_delete_plan",
     failureMapper: transactionDeletePlanFailure }));
 
@@ -1812,8 +1448,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.transactions"),
   }, async ({ deletion_plan_id }) => safeWorkflowResult(async () => {
     const result = await accounting.getTransactionDeletionPlan({ pool, personId, deletionPlanId: deletion_plan_id });
-    return withSchemaProjection(schemaSemantics,
-      transactionDeletionStatusRecovery(result, deletion_plan_id), operations.deleteTransactions);
+    return transactionDeletionStatusRecovery(result, deletion_plan_id);
   },
   { retryTool: "preview_delete_transactions", failureMapper: transactionDeletePlanFailure }));
 
@@ -1830,13 +1465,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, async ({ deletion_plan_id, preview_digest }) => safeWorkflowResult(async () => {
     const result = await accounting.commitTransactionDeletion({ pool, personId,
       deletionPlanId: deletion_plan_id, previewDigest: preview_digest });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...result,
       effectReceipt: effectReceipt("commit_delete_transactions", { deletion_plan_id, preview_digest },
         result.alreadyCommitted ? "unchanged" : "deleted", [
           { type: "transaction_delete_plan", id: deletion_plan_id },
         ]),
-    }, operations.deleteTransactions);
+    };
   }, { defaultStatus: "committed", retryTool: "preview_delete_transactions",
     failureMapper: transactionDeletePlanFailure }));
 
@@ -1903,12 +1538,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       limit: input.limit,
       cursor: input.cursor,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       filters: page.filters,
       transactions: page.transactions,
       totalMatches: page.totalMatches,
       resultMetadata: pageMetadata(page.transactions, page.nextCursor, "transactions"),
-    }, operations.searchTransactions);
+    };
   }));
 
   registerTool("list_transactions", {
@@ -1923,10 +1558,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.transactions"),
   }, async ({ limit, cursor }) => safeToolResult(async () => {
     const page = await accounting.listTransactionsPage(pool, personId, { limit, beforeTransactionId: cursor });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       transactions: page.transactions,
       resultMetadata: pageMetadata(page.transactions, page.nextCursor, "transactions"),
-    }, operations.listTransactions);
+    };
   }));
 
   registerTool("get_transaction", {
@@ -1936,9 +1571,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     outputSchema: transactionReadOutput,
     annotations: readOnly,
     _meta: toolMetadata("accounting.transactions"),
-  }, async ({ transaction_id }) => safeToolResult(async () => withSchemaProjection(schemaSemantics, {
+  }, async ({ transaction_id }) => safeToolResult(async () => ({
     transaction: await accounting.getTransaction(pool, personId, transaction_id),
-  }, operations.getTransaction)));
+  })));
 
   const accountingQuestionInputSchema = z.object({
     audience: z.string().trim().min(1).max(50)
@@ -2013,12 +1648,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       sourceSystem: input.source_system,
       sourceId: input.source_id,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       transaction: created,
       effectReceipt: effectReceipt("create_transaction", input, "created", [
         { type: "transaction", id: created.transactionId },
       ]),
-    }, operations.createTransaction);
+    };
   }));
 
   registerTool("list_accounting_questions", {
@@ -2038,7 +1673,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     const page = await accounting.listAccountingQuestionsPage(pool, personId, {
       status, audience, accountId: account_id, limit, afterLineItemId: cursor,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       questions: page.questions,
       resultMetadata: {
         complete: page.nextCursor == null,
@@ -2046,7 +1681,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         nextCursor: page.nextCursor,
         sourceRefs: page.questions.map((question) => `accounting://questions/${question.lineItemId}`),
       },
-    }, operations.listAccountingQuestions);
+    };
   }));
 
   registerTool("open_accounting_question", {
@@ -2064,13 +1699,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     const question = await accounting.openAccountingQuestion({
       pool, personId, lineItemId: line_item_id, audience, prompt,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       question,
       effectReceipt: effectReceipt("open_accounting_question", { line_item_id, audience, prompt }, "upserted", [
         { type: "accounting_question", id: line_item_id },
         { type: "transaction", id: question.transactionId },
       ]),
-    }, operations.openAccountingQuestion);
+    };
   }));
 
   registerTool("resolve_accounting_question", {
@@ -2088,7 +1723,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     const resolved = await accounting.resolveAccountingQuestion({
       pool, personId, lineItemId: line_item_id, targetAccountId: target_account_id, resolution,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       question: resolved.question,
       changed: resolved.changed,
       effectReceipt: effectReceipt("resolve_accounting_question", { line_item_id, target_account_id, resolution },
@@ -2097,7 +1732,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
           { type: "transaction", id: resolved.question.transactionId },
           { type: "account", id: target_account_id },
         ]),
-    }, operations.resolveAccountingQuestion);
+    };
   }));
 
   registerTool("start_single_account_statement_import", {
@@ -2250,8 +1885,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       questionAudience: "human", lines: acceptedRows,
       reconciliation: { openingBalanceDate, closingBalanceDate: ending_balance.date },
     }));
-    return withSchemaProjection(schemaSemantics, { ...imported, import: imported },
-      operations.singleAccountStatementImport);
+    return { ...imported, import: imported };
   }, { retryTool: "import_single_account_statement", preserveEntireBatch: true,
     failureMapper: (error) => error?.code === "STATEMENT_BALANCE_ANSWER_REQUIRED"
       ? { requiredAction: "ASK_USER_FOR_MISSING_DATED_BALANCE" }
@@ -2272,14 +1906,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     const reconciliation = await accounting.reconcileAccountThroughDate({
       pool, personId, accountId: account_id, balanceDate: balance_date,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       reconciliation,
       effectReceipt: effectReceipt("reconcile_account_through_date", { account_id, balance_date },
         reconciliation.newlyReconciledLineCount ? "updated" : "unchanged", [
           { type: "account", id: account_id },
           { type: "balance_assertion", id: reconciliation.assertionId },
         ]),
-    }, operations.reconcileAccountThroughDate);
+    };
   }));
 
   const canonicalImportRecordSchema = z.object({
@@ -2647,7 +2281,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         closingBalanceDate: reconciliation.closing_balance_date,
       },
     }));
-    return withSchemaProjection(schemaSemantics, { ...imported, import: imported }, operations.importTransactions);
+    return { ...imported, import: imported };
   }, { retryTool: "import_transactions", preserveEntireBatch: true }));
 
   registerTool("get_transaction_import_plan", {
@@ -2658,9 +2292,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     annotations: readOnly,
     _meta: toolMetadata("accounting.transactions"),
   }, async ({ import_plan_id }) => safeWorkflowResult(async () =>
-    withSchemaProjection(schemaSemantics,
-      await accounting.getTransactionImportPlan({ pool, personId, importPlanId: import_plan_id }),
-      operations.commitTransactionImport),
+    await accounting.getTransactionImportPlan({ pool, personId, importPlanId: import_plan_id }),
   { retryTool: "import_transactions", preserveEntireBatch: true }));
 
   registerTool("commit_transaction_import", {
@@ -2674,14 +2306,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.transactions", { dependencies: ["import_transactions"] }),
   }, async ({ import_plan_id }) => safeWorkflowResult(async () => {
     const imported = await accounting.commitTransactionImportPlan({ pool, personId, importPlanId: import_plan_id });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       ...imported,
       import: imported,
       effectReceipt: effectReceipt("commit_transaction_import", { import_plan_id },
         imported.alreadyCommitted ? "unchanged" : "committed", [
           { type: "transaction_import_plan", id: import_plan_id },
         ]),
-    }, operations.commitTransactionImport);
+    };
   }, { defaultStatus: "committed", retryTool: "import_transactions", preserveEntireBatch: true }));
 
   registerTool("list_balance_assertions", {
@@ -2696,10 +2328,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.reconciliation"),
   }, async ({ limit, cursor }) => safeToolResult(async () => {
     const page = await accounting.listBalanceAssertionsPage(pool, personId, { limit, beforeAssertionId: cursor });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       assertions: page.assertions,
       resultMetadata: pageMetadata(page.assertions, page.nextCursor, "balance-assertions"),
-    }, operations.listBalanceAssertions);
+    };
   }));
 
   registerTool("save_balance_assertion", {
@@ -2721,7 +2353,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       balanceDate: balance_date,
       knownBalanceUnits: known_balance_units,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       assertion,
       investigationQuestion: assertion.matches ? null : {
         status: "needs_explanation",
@@ -2736,7 +2368,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       effectReceipt: effectReceipt("save_balance_assertion", args, "upserted", [
         { type: "balance_assertion", id: assertion.id },
       ]),
-    }, operations.saveBalanceAssertion);
+    };
   }));
 
   registerTool("get_statement_reconciliation_context", {
@@ -2760,11 +2392,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         pool, personId, accountIds: account_ids, openingBalanceDate: opening_balance_date,
         closingBalanceDate: closing_balance_date,
       });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       reconciliation,
       resultMetadata: { complete: true, returned: reconciliation.evidenceRefs.length,
         nextCursor: null, sourceRefs: reconciliation.evidenceRefs },
-    }, operations.statementReconciliation);
+    };
   }));
 
   registerTool("analyze_statement_observations", {
@@ -2811,10 +2443,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       ...analysis.duplicateAnalysis.ledgerCandidates.flatMap((item) =>
         item.candidates.map((candidate) => `accounting://transactions/${candidate.transactionId}`)),
     ])];
-    return withSchemaProjection(schemaSemantics, {
+    return {
       analysis,
       resultMetadata: { complete: true, returned: sourceRefs.length, nextCursor: null, sourceRefs },
-    }, operations.statementAnalysis);
+    };
   }));
 
   registerTool("list_reference_rates", {
@@ -2837,10 +2469,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         fromCurrencyId: from_currency_id, toCurrencyId: to_currency_id,
         validAtFrom: valid_at_from, validAtTo: valid_at_to, limit, beforeRateId: cursor,
       });
-      return withSchemaProjection(schemaSemantics, {
+      return {
         referenceRates: page.rates,
         resultMetadata: pageMetadata(page.rates, page.nextCursor, "reference-rates"),
-      }, operations.referenceRates);
+      };
     }));
 
   registerTool("create_reference_rate", {
@@ -2862,12 +2494,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       pool, personId, validAt: valid_at, fromUnits: from_units, fromCurrencyId: from_currency_id,
       toUnits: to_units, toCurrencyId: to_currency_id,
     });
-    return withSchemaProjection(schemaSemantics, {
+    return {
       referenceRate,
       effectReceipt: effectReceipt("create_reference_rate", args, "created", [
         { type: "reference_rate", id: referenceRate.id },
       ]),
-    }, operations.referenceRates);
+    };
   }));
 
   registerTool("verify_ledger", {
@@ -2889,7 +2521,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       sourceRefs: report.checkedTransactionIds.map((id) => `accounting://transactions/${id}`),
     };
     const { nextCursor: _nextCursor, checkedTransactionIds: _checkedTransactionIds, ...result } = report;
-    return withSchemaProjection(schemaSemantics, { ...result, resultMetadata }, operations.verifyLedger);
+    return { ...result, resultMetadata };
   }));
 
   return server;

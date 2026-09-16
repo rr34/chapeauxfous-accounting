@@ -89,8 +89,7 @@ keep both until the migrated application and ledger have been verified.
 
 After the backup has printed `Verified recoverable backup`, continue with
 **Production deployment** below. That is the single authoritative production
-migration procedure. In particular, do not run `schema:semantics:sync` in a
-production checkout.
+migration procedure.
 
 Migration `0002` expects the new accounting tables to contain no real ledger
 data because it establishes required user ownership. If ledger data is added
@@ -153,10 +152,9 @@ Authorization: Bearer cfacct_...
 ```
 
 The MCP exposes schema description, currency, account, transaction, balance
-assertion, and ledger-verification tools. Each accounting result includes a
-small Schema Semantic Compiler projection for the tables and fields used by
-that operation. `describe_accounting_schema` accepts natural language and can
-retrieve a relevant projection before another tool is selected.
+assertion, and ledger-verification tools. Tool descriptions and input/output
+schemas define model-facing field meanings. `describe_accounting_schema` reads
+live MariaDB table and column comments when storage meanings are needed.
 
 The MCP publishes its versioned capability manifest at
 `accounting://manifest/capabilities/v1`. The manifest groups tools into stable
@@ -179,6 +177,12 @@ Accounting tool before receiving the tool's full execution description and
 schemas. Keep the routing summary specific to the domain outcome; an exchange
 name in a ledger account does not require an exchange integration to read that
 account through `list_accounts`.
+
+`list_account_objects` publishes `_meta["agent-slayer/objects"]` using the
+Remote Object Description version-1 contract. The account object has a stable
+`sourceRef`, a full-path `displayName`, selected qualifiers, and the account
+read tool as its authoritative source. Object metadata describes a type; only
+the owner-scoped read result proves that a particular account exists.
 
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated
@@ -275,11 +279,10 @@ must have exclusive read/write access to this directory, and it should be
 included in operational backups while imports are in progress.
 
 Transaction-import job tools return compact control state—job and artifact
-identifiers, progress, exceptions, preview, and commit results—without
-repeating the database schema-semantic projection on every workflow call. The
-agent fetches the authoritative canonical schema once with
+identifiers, progress, exceptions, preview, and commit results. The agent
+fetches the authoritative canonical schema once with
 `get_transaction_import_schema`; the owner-scoped job resource remains
-available when its database projection is specifically needed.
+available for an exact status read.
 
 Accounting waits for the complete verified artifact, groups records across the
 whole file by stable transaction external ID, validates accounts, currencies,
@@ -411,30 +414,19 @@ record disclosed provider fees first; infer spread or margin only from the
 remaining fiat-value residual after the asset value and all explicit fees are
 accounted for. This prevents the same economic cost from being counted twice.
 
-## Schema semantics
+## Storage and tool field meanings
 
-`db/schema-semantics.json` is a tracked, reviewed build artifact. It covers the
-public ledger schema plus the MCP-owned import-plan and resumable-import
-workflow tables needed by exact MCP operation projections. Human-written
-meanings live in that file; compiler-owned mechanics come from MariaDB.
-
-Run `npm run schema:semantics:sync` only in a development checkout, against a
-development database that already has every tracked migration applied. The
-command deliberately rewrites `db/schema-semantics.json`, including its
-`extractedAt` timestamp and JSON formatting. Review the resulting mechanics and
-fill any new semantic blanks, run `npm run schema:verify`, and commit the
-reviewed file with the code and migration that require it.
-
-Production never generates or modifies the tracked semantic form. It consumes
-the committed file and uses `npm run schema:verify` to prove that the migrated
-production database matches it.
+MariaDB table and column comments document storage meaning. Add or correct
+comments through reviewed blocks in `db/migrations.sql`; never rewrite an
+applied migration or regenerate `db/schema.sql`. The Tool Description contract
+and its input/output schemas document model-facing behavior. The MCP reads live
+comments only when `describe_accounting_schema` is explicitly called.
 
 ## Production deployment
 
-The tracked semantic form includes `accounting_import_plans` as authoritative,
-temporary, owner-scoped workflow state. Its raw payload, result, and hash fields
-are private financial data excluded from generic search and ordinary context;
-only exact MCP workflow projections may expose bounded validated results.
+`accounting_import_plans` holds authoritative, temporary, owner-scoped workflow
+state. Its raw payload, result, and hash fields are private financial data;
+only exact owner-scoped workflow reads may expose bounded validated results.
 
 1. Install the pinned dependencies from `package-lock.json`.
 2. Complete **Back up and prove the backup restores** above and retain both backup files.
@@ -445,16 +437,10 @@ only exact MCP workflow projections may expose bounded validated results.
    ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate
    ```
 
-5. Verify the migrated schema, committed semantic form, and posted ledger:
+5. Verify the migrated schema and posted ledger:
 
    ```bash
    npm run schema:verify
    ```
 
 6. Restart the API service only after verification succeeds.
-
-Never run `npm run schema:semantics:sync` during production deployment. If
-`git status --short` reports a modified `db/schema-semantics.json` on a server,
-inspect it, preserve a diagnostic diff outside the checkout if needed, and
-restore the tracked file before pulling. Do not commit a production-generated
-semantic form.

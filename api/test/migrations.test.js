@@ -17,7 +17,7 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
   assert.ok(migrations.every((migration) => splitMariaDbStatements(migration.sql, migration.label).length > 0));
   const currencyMigration = migrations.find((migration) => migration.version === 3);
   assert.match(currencyMigration.sql, /VARCHAR\(50\)/);
@@ -83,4 +83,12 @@ test("the repository migration ledger is valid and contiguous", () => {
   assert.match(dataDeletionPlanMigration.sql, /import_restart/);
   assert.match(dataDeletionPlanMigration.sql, /user_delete/);
   assert.doesNotMatch(dataDeletionPlanMigration.sql, /GENERATED ALWAYS/i);
+  const storageCommentsMigration = migrations.find((migration) => migration.version === 16);
+  const commentStatements = splitMariaDbStatements(storageCommentsMigration.sql, storageCommentsMigration.label);
+  assert.match(commentStatements[0], /SET @accounting_previous_fk_checks = @@SESSION\.foreign_key_checks;$/);
+  assert.match(commentStatements[1], /^SET SESSION foreign_key_checks = 0;/);
+  assert.match(commentStatements.at(-1), /^SET SESSION foreign_key_checks = @accounting_previous_fk_checks;/);
+  assert.equal(commentStatements.filter((statement) => statement.startsWith("ALTER TABLE")).length, 15);
+  assert.ok(commentStatements.filter((statement) => statement.startsWith("ALTER TABLE"))
+    .every((statement) => statement.includes("MODIFY COLUMN") && statement.includes("COMMENT=")));
 });

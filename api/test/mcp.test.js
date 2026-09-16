@@ -17,8 +17,14 @@ const { extractDeferredActionReference } = await import(
 const { catalogToolDescription } = await import(
   "../../../agent-chapeaux-fous/src/tool-description.mjs"
 );
+const { validateObjectDescription } = await import(
+  "../../../agent-chapeaux-fous/src/object-description.mjs"
+);
+const { validateDiscoveredMcpTools } = await import(
+  "../../../agent-chapeaux-fous/src/tools/mcp-tools.mjs"
+);
 
-test("the MCP exposes scoped tools with schema-semantic projections", async () => {
+test("the MCP exposes scoped tool and object contracts", async () => {
   const seen = [];
   let imported;
   let committedAccountPlan;
@@ -71,6 +77,11 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       transactionId: ledgerChanged ? 91 : null, errors: [] }],
   });
   const services = {
+    async describeAccountingSchema(_pool, _databaseName, request) {
+      return { request, tables: [{ name: "accounts", comment: "Owner-scoped ledger accounts", columns: [
+        { name: "AccountName", type: "text", nullable: false, comment: "Name of this ledger account" },
+      ] }] };
+    },
     async createTransactionImportJob(input) {
       createdImportJob = input;
       return {
@@ -360,9 +371,33 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
 
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map(({ name }) => name).sort(), Object.keys(accountingToolDescriptions).sort());
+  assert.deepEqual(validateDiscoveredMcpTools(tools.tools, {
+    serverName: "Accounting",
+    serverInfo: { name: "chapeaux-fous-accounting" },
+  }), { owned: true, objectTypeCount: 1 });
   for (const tool of tools.tools) {
     assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
   }
+  const objectTools = tools.tools.filter((tool) => tool._meta?.["agent-slayer/objects"]);
+  assert.deepEqual(objectTools.map(({ name }) => name), ["list_account_objects"]);
+  const describedTypes = new Map();
+  for (const tool of objectTools) {
+    const description = validateObjectDescription(tool._meta["agent-slayer/objects"], {
+      annotations: tool.annotations,
+      selection: tool._meta["agent-slayer/selection"],
+      label: tool.name,
+    });
+    for (const type of description.types) {
+      assert.equal(describedTypes.has(type.id), false);
+      describedTypes.set(type.id, type);
+    }
+  }
+  assert.deepEqual([...describedTypes.keys()], ["accounting.account"]);
+  const schemaDescription = await client.callTool({
+    name: "describe_accounting_schema", arguments: { request: "accounts" },
+  });
+  assert.equal(schemaDescription.structuredContent.tables[0].columns[0].comment, "Name of this ledger account");
+  assert.equal(Object.hasOwn(schemaDescription.structuredContent, "schemaProjection"), false);
   assert.match(catalogToolDescription({
     ...tools.tools.find(({ name }) => name === "list_accounts"),
     metadata: tools.tools.find(({ name }) => name === "list_accounts")._meta,
@@ -504,7 +539,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     template.uriTemplate === "accounting://transaction-delete-plans/{planId}"), true);
   const manifestResource = await client.readResource({ uri: "accounting://manifest/capabilities/v1" });
   const manifest = JSON.parse(manifestResource.contents[0].text);
-  assert.equal(manifest.contractVersion, 1);
+  assert.equal(manifest.contractVersion, 2);
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
   assert.equal(manifest.capabilities.find((capability) => capability.id === "accounting.accounts")
     .aliases.includes("exchange accounts"), true);
@@ -619,7 +654,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
     type: "security", scale: 4,
   });
-  assert.equal(createCurrencyResult.structuredContent.contractVersion, 1);
+  assert.equal(createCurrencyResult.structuredContent.contractVersion, 2);
   assert.equal(createCurrencyResult.structuredContent.status, "success");
   assert.equal(createCurrencyResult.structuredContent.effectReceipt.tool, "create_currency");
   assert.match(createCurrencyResult.structuredContent.effectReceipt.argumentsSha256, /^sha256:/);
@@ -630,16 +665,9 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
 
   const result = await client.callTool({ name: "list_accounts", arguments: {} });
   assert.deepEqual(seen, ["currencies:7", 7]);
-  assert.equal(result.structuredContent.contractVersion, 1);
+  assert.equal(result.structuredContent.contractVersion, 2);
   assert.equal(result.structuredContent.accounts[0].name, "Wallet");
-  assert.equal(
-    result.structuredContent.schemaProjection.product,
-    "schema-semantic-compiler/schema-semantic-projection",
-  );
-  assert.equal(
-    Object.hasOwn(result.structuredContent.schemaProjection.schemaProjection.schemaObjects, "accounts"),
-    true,
-  );
+  assert.equal(Object.hasOwn(result.structuredContent, "schemaProjection"), false);
 
   const importResult = await client.callTool({
     name: "import_account_tree",
@@ -691,6 +719,15 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       tool: "start_single_account_statement_import" }],
   });
   assert.deepEqual(accountObjects.structuredContent.resultMetadata.sourceRefs, ["accounting://accounts/10"]);
+  for (const object of accountObjects.structuredContent.objects) {
+    const type = describedTypes.get(object.objectType);
+    assert.ok(type);
+    assert.equal(typeof object[type.reference.field], "string");
+    assert.ok(object[type.reference.field]);
+    assert.equal(typeof object[type.display.field], "string");
+    assert.ok(object[type.display.field]);
+    for (const qualifier of type.qualifiers) assert.equal(Object.hasOwn(object, qualifier.field), true);
+  }
   const accountObjectResource = await client.readResource({ uri: "accounting://context/objects/accounts" });
   const objectIndex = JSON.parse(accountObjectResource.contents[0].text);
   assert.equal(objectIndex.contextView, "accounting.objects.accounts");
@@ -733,7 +770,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_plan_id: "22222222-2222-4222-8222-222222222222" },
   });
   assert.equal(missingPlan.isError, true);
-  assert.equal(missingPlan.structuredContent.contractVersion, 1);
+  assert.equal(missingPlan.structuredContent.contractVersion, 2);
   assert.equal(missingPlan.structuredContent.status, "error");
   assert.equal(missingPlan.structuredContent.code, "IMPORT_PLAN_NOT_FOUND");
   assert.equal(missingPlan.structuredContent.recoverable, true);
@@ -885,10 +922,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(deletionPreview.structuredContent.preview.targetDigest, `sha256:${"d".repeat(64)}`);
   assert.equal("transactionIds" in deletionPreview.structuredContent.preview, false);
   assert.equal(deletionPreview.structuredContent.nextAction.onApproval.tool, "commit_delete_transactions");
-  assert.equal(Object.hasOwn(deletionPreview.structuredContent.schemaProjection.schemaProjection.schemaObjects,
-    "accounting_transaction_import_jobs"), true);
-  assert.equal(Object.hasOwn(deletionPreview.structuredContent.schemaProjection.schemaProjection.schemaObjects,
-    "accounting_transaction_import_items"), true);
+  assert.equal(Object.hasOwn(deletionPreview.structuredContent, "schemaProjection"), false);
   assert.deepEqual(previewedTransactionDeletion, { pool: {}, personId: 7, scope: "all", transactionIds: [] });
 
   const previewTool = tools.tools.find((tool) => tool.name === "preview_delete_transactions");
@@ -977,7 +1011,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.8.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.9.0");
 
   await handler.close();
 });

@@ -9,6 +9,11 @@ schema represented by `schema.sql`. Migration `0002` adds the minimal TLOM-style
 person identity, one-ledger-per-person ownership, import identities, and the
 indexes required by the API.
 
+Migration `0016` moves reviewed storage meanings into MariaDB table and column
+comments. It changes metadata on existing ledger tables, so schedule a
+maintenance window and complete the verified-backup procedure before applying
+it to a database with user data.
+
 The complete operator procedure, including the MariaDB dump, isolated test
 restore, checksum, migration, and verification commands, is in
 `DEVELOPMENT.md` under **Back up and prove the backup restores**. Follow that

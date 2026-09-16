@@ -6,23 +6,9 @@ import {
   artifactUploadContract,
 } from "./artifact-upload.js";
 
-// Existing MCP clients cache output schemas; only bump this for an incompatible response shape.
-export const MCP_CONTRACT_VERSION = 1;
-export const MCP_SERVER_VERSION = "0.8.0";
-
-const jsonObjectSchema = z.record(z.string(), z.json());
-
-export const schemaProjectionSchema = z.object({
-  product: z.literal("schema-semantic-compiler/schema-semantic-projection"),
-  productContractVersion: z.literal(2),
-  projectionId: z.string().regex(/^[0-9a-f]{64}$/),
-  compiledAt: z.string().datetime(),
-  compiler: jsonObjectSchema,
-  source: jsonObjectSchema,
-  operation: jsonObjectSchema,
-  schemaProjection: jsonObjectSchema,
-  compilerTrace: jsonObjectSchema,
-}).describe("Schema Semantic Compiler version-2 projection product for the exact database objects and fields used by this result.");
+// Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
+export const MCP_CONTRACT_VERSION = 2;
+export const MCP_SERVER_VERSION = "0.9.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -30,10 +16,10 @@ export const entityReferenceSchema = z.object({
 });
 
 export const resultMetadataSchema = z.object({
-  complete: z.boolean(),
-  returned: z.number().int().nonnegative(),
-  nextCursor: z.string().nullable(),
-  sourceRefs: z.array(z.string().min(1)),
+  complete: z.boolean().describe("Whether this result includes every matching item; false requires following nextCursor."),
+  returned: z.number().int().nonnegative().describe("Number of items returned in this page."),
+  nextCursor: z.string().nullable().describe("Opaque continuation for the next page, or null when complete."),
+  sourceRefs: z.array(z.string().min(1)).describe("Stable provider references for items in this result."),
 });
 
 export const effectReceiptSchema = z.object({
@@ -96,69 +82,73 @@ export function successOutputSchema(shape, statuses = ["success"]) {
 }
 
 export const currencySchema = z.object({
-  id: z.number().int().positive(),
-  code: z.string().min(1),
-  displayName: z.string().min(1),
-  type: z.enum(["iso_4217", "crypto", "security", "commodity", "custom"]),
-  scale: z.number().int().min(0).max(18),
-  ownerPersonId: z.number().int().positive().nullable(),
-  userDefined: z.boolean(),
+  id: z.number().int().positive().describe("Stable accounting-unit ID used by accounts and transactions."),
+  code: z.string().min(1).describe("Short code or abbreviation for this currency, security, commodity, or custom unit."),
+  displayName: z.string().min(1).describe("Human-facing name of the accounting unit."),
+  type: z.enum(["iso_4217", "crypto", "security", "commodity", "custom"])
+    .describe("Kind of accounting unit; this classification does not supply a price or exchange rate."),
+  scale: z.number().int().min(0).max(18).describe("Decimal places used to display integer native-unit amounts."),
+  ownerPersonId: z.number().int().positive().nullable().describe("Owner of a private unit, or null for a global catalog unit."),
+  userDefined: z.boolean().describe("Whether this unit belongs to the authenticated user's private catalog."),
 });
 
 export const accountSchema = z.object({
-  id: z.number().int().positive(),
-  name: z.string().min(1),
-  description: z.string().nullable(),
-  placeholder: z.boolean(),
-  parentAccountId: z.number().int().positive().nullable(),
-  type: z.enum(["asset", "liability", "equity", "income", "expense"]),
-  currencyId: z.number().int().positive(),
-  currencyCode: z.string().min(1),
-  scale: z.number().int().min(0).max(18),
+  id: z.number().int().positive().describe("Stable owner-scoped ledger account ID."),
+  name: z.string().min(1).describe("Local account name within its parent; it may name a provider such as Coinbase."),
+  description: z.string().nullable().describe("Optional user-written explanation of the account."),
+  placeholder: z.boolean().describe("Whether this account organizes children and cannot receive postings."),
+  parentAccountId: z.number().int().positive().nullable().describe("Parent account ID in this user's chart, or null for a root account."),
+  type: z.enum(["asset", "liability", "equity", "income", "expense"])
+    .describe("Accounting classification chosen by the user for this account."),
+  currencyId: z.number().int().positive().describe("ID of the account's native currency or accounting unit."),
+  currencyCode: z.string().min(1).describe("Code of the account's native currency or accounting unit."),
+  scale: z.number().int().min(0).max(18).describe("Decimal places in the account's native-unit display."),
   balanceUnits: z.string().regex(/^-?\d+$/).describe("Normal account balance in native units: debit minus credit for assets and expenses; credit minus debit for liabilities, income, and equity."),
-  archivedAt: z.string().nullable(),
+  archivedAt: z.string().nullable().describe("Archive timestamp, or null while the account is active."),
 });
 
 export const transactionListItemSchema = z.object({
-  id: z.number().int().positive(),
-  date: z.string(),
-  description: z.string().nullable(),
-  state: z.enum(["draft", "posted", "voided"]),
-  valuationCurrencyId: z.number().int().positive(),
-  valuationCurrencyCode: z.string().min(1),
-  scale: z.number().int().min(0).max(18),
-  lineItemCount: z.number().int().nonnegative(),
+  id: z.number().int().positive().describe("Stable owner-scoped transaction ID."),
+  date: z.string().describe("Accounting calendar date, not the time the row was entered."),
+  description: z.string().nullable().describe("Optional user-written explanation of the transaction."),
+  state: z.enum(["draft", "posted", "voided"]).describe("Transaction lifecycle state; posted entries affect balances."),
+  valuationCurrencyId: z.number().int().positive().describe("Currency ID used to value and balance this transaction."),
+  valuationCurrencyCode: z.string().min(1).describe("Code of the transaction valuation currency."),
+  scale: z.number().int().min(0).max(18).describe("Decimal places in the valuation currency."),
+  lineItemCount: z.number().int().nonnegative().describe("Number of postings in the transaction."),
 });
 
 const transactionLineSchema = z.object({
-  id: z.number().int().positive(),
-  amountUnits: z.string().regex(/^-?\d+$/),
-  valueUnits: z.string().regex(/^-?\d+$/).nullable(),
-  reconciliationState: z.enum(["unreconciled", "cleared", "reconciled"]),
-  reconciledAt: z.string().nullable(),
-  memo: z.string().nullable(),
-  accountId: z.number().int().positive(),
-  accountName: z.string().min(1),
-  currencyId: z.number().int().positive(),
-  currencyCode: z.string().min(1),
-  scale: z.number().int().min(0).max(18),
-  tags: z.array(z.object({ key: z.string().min(1), value: z.string().min(1) })),
+  id: z.number().int().positive().describe("Stable ID of this posting within the ledger."),
+  amountUnits: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the referenced account's native unit."),
+  valueUnits: z.string().regex(/^-?\d+$/).nullable()
+    .describe("Signed integer value in the transaction valuation currency; null for legacy lines without a stored value."),
+  reconciliationState: z.enum(["unreconciled", "cleared", "reconciled"]).describe("Reconciliation status of this posting."),
+  reconciledAt: z.string().nullable().describe("Reconciliation calendar date, or null when unreconciled."),
+  memo: z.string().nullable().describe("Optional explanation specific to this posting."),
+  accountId: z.number().int().positive().describe("Owner-scoped account receiving this posting."),
+  accountName: z.string().min(1).describe("Current local name of the posting account."),
+  currencyId: z.number().int().positive().describe("Native currency ID of the posting account."),
+  currencyCode: z.string().min(1).describe("Native currency code of the posting account."),
+  scale: z.number().int().min(0).max(18).describe("Decimal places for amountUnits in the account's native unit."),
+  tags: z.array(z.object({ key: z.string().min(1), value: z.string().min(1) }))
+    .describe("Reusable owner-scoped key-value tags assigned to this posting."),
 });
 
 export const transactionSchema = z.object({
-  id: z.number().int().positive(),
-  date: z.string(),
-  description: z.string().nullable(),
-  state: z.enum(["draft", "posted", "voided"]),
-  valuationCurrencyId: z.number().int().positive(),
-  lineItems: z.array(transactionLineSchema),
+  id: z.number().int().positive().describe("Stable owner-scoped transaction ID."),
+  date: z.string().describe("Accounting calendar date of this transaction."),
+  description: z.string().nullable().describe("Optional user-written explanation of the complete transaction."),
+  state: z.enum(["draft", "posted", "voided"]).describe("Transaction lifecycle state; posted entries affect balances."),
+  valuationCurrencyId: z.number().int().positive().describe("Currency ID in which line values must sum to zero."),
+  lineItems: z.array(transactionLineSchema).describe("Complete signed postings and their current account details."),
   rates: z.array(z.object({
-    id: z.number().int().positive(),
-    fromUnits: z.string().regex(/^\d+$/),
-    fromCurrencyId: z.number().int().positive(),
-    toUnits: z.string().regex(/^\d+$/),
-    toCurrencyId: z.number().int().positive(),
-  })),
+    id: z.number().int().positive().describe("Stable ID of this exact exchange rate."),
+    fromUnits: z.string().regex(/^\d+$/).describe("Positive source-currency units in the exact ratio."),
+    fromCurrencyId: z.number().int().positive().describe("Source currency ID of the ratio."),
+    toUnits: z.string().regex(/^\d+$/).describe("Positive target-currency units in the exact ratio."),
+    toCurrencyId: z.number().int().positive().describe("Target currency ID of the ratio."),
+  })).describe("Transaction exchange rates retained for legacy valuation evidence."),
 });
 
 export const accountingQuestionSchema = z.object({
@@ -394,9 +384,9 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.schema",
       title: "Accounting schema semantics",
-      summary: "Retrieve bounded field meanings and relationships for accounting data.",
+      summary: "Read live MariaDB table and column comments for accounting storage.",
       aliases: ["ledger schema", "accounting semantics"],
-      guidance: "Use when a field, unit, relationship, or invariant is unclear.",
+      guidance: "Use for storage meanings; business rules and authorization belong to the focused tool contracts.",
       tools: ["describe_accounting_schema"],
       dependencies: [],
       attachmentHints: [],
