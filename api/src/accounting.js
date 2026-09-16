@@ -373,7 +373,7 @@ export async function deleteAccount({ personId, accountId }, runInTransaction = 
   });
 }
 
-async function attachTags(connection, personId, lineItemId, tags) {
+export async function attachTags(connection, personId, lineItemId, tags) {
   for (const input of Array.isArray(tags) ? tags : []) {
     const key = String(input?.key ?? "").trim().toLowerCase();
     const value = String(input?.value ?? "").trim();
@@ -583,7 +583,7 @@ export async function updateTransaction({ personId, transactionId, description, 
 
   return runInTransaction(async (connection) => {
     const [transactionRows] = await connection.query(
-      `SELECT transaction_id, TransactionState
+      `SELECT transaction_id, TransactionState, TransactionDate, valuation_currency_id
          FROM transactions
         WHERE transaction_id = ? AND owner_person_id = ?
         FOR UPDATE`,
@@ -593,7 +593,7 @@ export async function updateTransaction({ personId, transactionId, description, 
     await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
 
     const [existingRows] = await connection.query(
-      `SELECT line_item_id, account_id
+      `SELECT line_item_id, account_id, amount_units, value_units, reconciliation_state
          FROM line_items
         WHERE transaction_id = ?
         ORDER BY line_item_id
@@ -614,6 +614,28 @@ export async function updateTransaction({ personId, transactionId, description, 
         throw applicationError("A line item cannot appear twice.", 400, "DUPLICATE_LINE_ITEM");
       }
       retainedIds.add(lineItemId);
+    }
+
+    const reconciledRows = existingRows.filter((row) => row.reconciliation_state === "reconciled");
+    if (reconciledRows.length) {
+      const transaction = transactionRows[0];
+      if (String(transaction.TransactionDate) !== resolvedTransactionDate
+          || Number(transaction.valuation_currency_id) !== Number(valuationCurrencyId)) {
+        throw applicationError("A transaction containing reconciled lines cannot change date or valuation currency.",
+          409, "RECONCILED_LINE_IMMUTABLE");
+      }
+      const submittedById = new Map(lineItems.filter((line) => line.id != null)
+        .map((line) => [Number(line.id), line]));
+      for (const existing of reconciledRows) {
+        const submitted = submittedById.get(Number(existing.line_item_id));
+        if (!submitted || Number(submitted.accountId) !== Number(existing.account_id)
+            || integerString(submitted.amountUnits, "amountUnits") !== String(existing.amount_units)
+            || (submitted.valueUnits != null
+              && integerString(submitted.valueUnits, "valueUnits") !== String(existing.value_units))) {
+          throw applicationError("Reconciled account lines cannot be removed, moved, or have their amount or value changed.",
+            409, "RECONCILED_LINE_IMMUTABLE", { lineItemId: Number(existing.line_item_id) });
+        }
+      }
     }
 
     await connection.query(

@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { currencyKey } from "./currencies.js";
 import { decimalToUnits } from "./money.js";
-import { validateTransaction } from "./accounting.js";
+import { attachTags, validateTransaction } from "./accounting.js";
+import { accountingQuestionTags, normalizeAccountingQuestion } from "./accounting-questions.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
+import { getStatementReconciliationContext } from "./statement-reconciliation.js";
 import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
@@ -71,12 +73,19 @@ function normalizeLine(line, transactionExternalId) {
       transactionExternalId,
     });
   }
+  const reconciliationState = String(line?.reconciliationState ?? "unreconciled").trim().toLocaleLowerCase("en-US");
+  if (!new Set(["unreconciled", "cleared"]).has(reconciliationState)) {
+    throw importError("Imported lines may start as unreconciled or cleared; reconciled requires a matching known balance.",
+      "INVALID_INITIAL_RECONCILIATION_STATE", { transactionExternalId, reconciliationState });
+  }
   return {
     externalId,
     accountFullName: normalizeAccountPath(line?.accountFullName),
     amountDecimal: limitedRequiredText(line?.amountDecimal, "amount", 128),
     valueDecimal: optionalLimitedText(line?.valueDecimal, "value", 128),
     memo: optionalLimitedText(line?.memo, "memo", 16000),
+    question: normalizeAccountingQuestion(line?.question),
+    reconciliationState,
   };
 }
 
@@ -129,6 +138,82 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
     submittedLineItemCount,
     duplicateInputTransactionCount,
     conflictingExternalIds: [...conflictingExternalIds],
+  };
+}
+
+function normalizeReconciliation(reconciliation) {
+  if (reconciliation == null) return null;
+  const ids = Array.isArray(reconciliation.accountIds)
+    ? [...new Set(reconciliation.accountIds.map(Number))] : [];
+  if (ids.length === 0 || ids.length > 25 || ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+    throw importError("Reconciliation requires between 1 and 25 positive account IDs.",
+      "INVALID_RECONCILIATION_ACCOUNTS");
+  }
+  return {
+    accountIds: ids,
+    openingBalanceDate: normalizeDate(reconciliation.openingBalanceDate),
+    closingBalanceDate: normalizeDate(reconciliation.closingBalanceDate),
+  };
+}
+
+async function validateReconciliation(connection, personId, reconciliation, entries) {
+  if (reconciliation == null) return null;
+  const context = await getStatementReconciliationContext({
+    pool: connection, personId, ...reconciliation,
+  });
+  const proposedByAccount = new Map(reconciliation.accountIds.map((id) => [id, 0n]));
+  const issues = [];
+  for (const entry of entries) {
+    if (entry.status !== "planned" || !entry.resolved) continue;
+    if (entry.resolved.transactionDate <= reconciliation.openingBalanceDate
+        || entry.resolved.transactionDate > reconciliation.closingBalanceDate) {
+      issues.push(issue("RECONCILIATION_TRANSACTION_OUTSIDE_INTERVAL",
+        `Transaction "${entry.resolved.externalId}" is outside the balance-assertion interval.`, {
+          externalId: entry.resolved.externalId, transactionDate: entry.resolved.transactionDate,
+          openingBalanceDate: reconciliation.openingBalanceDate,
+          closingBalanceDate: reconciliation.closingBalanceDate,
+        }));
+      continue;
+    }
+    for (const line of entry.resolved.lineItems) {
+      if (!proposedByAccount.has(line.accountId)) continue;
+      proposedByAccount.set(line.accountId, proposedByAccount.get(line.accountId) + BigInt(line.amountUnits));
+    }
+  }
+  const accounts = context.accounts.map((account) => {
+    const required = account.remainingLineItemMovementUnits == null
+      ? null : BigInt(account.remainingLineItemMovementUnits);
+    const proposed = proposedByAccount.get(account.accountId) ?? 0n;
+    return {
+      accountId: account.accountId,
+      accountFullName: account.accountFullName,
+      currencyCode: account.currencyCode,
+      scale: account.scale,
+      requiredRemainingUnits: required?.toString() ?? null,
+      proposedNewLineItemUnits: proposed.toString(),
+      residualUnits: required == null ? null : (required - proposed).toString(),
+      matches: account.postable && required != null && required === proposed,
+    };
+  });
+  for (const account of accounts) {
+    const source = context.accounts.find((item) => item.accountId === account.accountId);
+    if (!source.postable) issues.push(issue("RECONCILIATION_ACCOUNT_NOT_POSTABLE",
+      `Account "${account.accountFullName}" cannot receive imported lines.`, { accountId: account.accountId }));
+    else if (account.requiredRemainingUnits == null) issues.push(issue("RECONCILIATION_ASSERTION_REQUIRED",
+      `Account "${account.accountFullName}" needs exact opening and closing balance assertions.`,
+      { accountId: account.accountId }));
+    else if (!account.matches) issues.push(issue("RECONCILIATION_MOVEMENT_MISMATCH",
+      `Proposed lines do not satisfy the known-balance movement for "${account.accountFullName}".`, {
+        accountId: account.accountId, requiredRemainingUnits: account.requiredRemainingUnits,
+        proposedNewLineItemUnits: account.proposedNewLineItemUnits, residualUnits: account.residualUnits,
+      }));
+  }
+  return {
+    passed: issues.length === 0,
+    openingBalanceDate: reconciliation.openingBalanceDate,
+    closingBalanceDate: reconciliation.closingBalanceDate,
+    accounts,
+    issues,
   };
 }
 
@@ -202,6 +287,8 @@ function fingerprintFor(transaction) {
     valueUnits: line.valueUnits,
     memo: line.memo,
     externalId: line.externalId,
+    ...(line.question == null ? {} : { question: line.question }),
+    ...(line.reconciliationState === "unreconciled" ? {} : { reconciliationState: line.reconciliationState }),
   })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   const rates = transaction.rates.map((rate) => ({
     fromCurrencyId: rate.fromCurrencyId,
@@ -397,6 +484,8 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
   const created = entries.filter((entry) => entry.status === "created");
   const rejected = entries.filter((entry) => entry.status === "rejected");
   const resolved = entries.filter((entry) => entry.resolved);
+  const questionLines = resolved.flatMap((entry) => entry.resolved.lineItems)
+    .filter((line) => line.question != null);
   return {
     dryRun: !ledgerChanged,
     ledgerChanged,
@@ -432,6 +521,11 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
       byAccountCurrency: countBy(resolved.flatMap((entry) => entry.resolved.lineItems), (line) => line.accountCurrencyCode),
       byTopLevelBranch: countBy(resolved.flatMap((entry) => entry.resolved.lineItems),
         (line) => line.accountFullName.split(":")[0]),
+    },
+    questionSummary: {
+      openQuestionCount: questionLines.length,
+      byAudience: countBy(questionLines, (line) => line.question.audience),
+      bySuspenseAccount: countBy(questionLines, (line) => line.accountFullName),
     },
     transactions: entries.map(transactionSummary),
   };
@@ -548,18 +642,25 @@ function transactionPlanIdentity(plan) {
   };
 }
 
-export async function previewTransactionImport({ pool, personId, sourceSystem, transactions }) {
+export async function previewTransactionImport({ pool, personId, sourceSystem, transactions, reconciliation = null }) {
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
+  normalized.reconciliation = normalizeReconciliation(reconciliation);
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
     const entries = await analyzeTransactionImport(connection, personId, normalized, false);
     if (entries.some((entry) => entry.status === "rejected")) return summarize(normalized, entries);
+    const reconciliationValidation = await validateReconciliation(connection, personId,
+      normalized.reconciliation, entries);
+    if (reconciliationValidation && !reconciliationValidation.passed) {
+      return { ...summarize(normalized, entries), readyToCommit: false, reconciliationValidation };
+    }
 
     const importPlanId = randomUUID();
     const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const expiresAt = mariaDbUtcTimestamp(expiresAtDate);
     const payloadJson = JSON.stringify(normalized);
-    const preview = summarize(normalized, entries);
+    const preview = { ...summarize(normalized, entries),
+      ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
     const transactionSummary = {
       transactionsCreated: preview.wouldCreateTransactionCount,
       transactionsReused: preview.wouldReuseTransactionCount,
@@ -578,6 +679,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     );
     return {
       ...summarize(normalized, entries, { importPlanId, expiresAt: expiresAtDate.toISOString() }),
+      ...(reconciliationValidation == null ? {} : { reconciliationValidation }),
       status: "ready",
       expiresAt: expiresAtDate.toISOString(),
       previewDigest: `sha256:${previewHash}`,
@@ -632,11 +734,14 @@ export async function insertImportedTransaction(connection, personId, sourceSyst
   );
   const transactionId = Number(insert.insertId);
   for (const line of resolved.lineItems) {
-    await connection.query(
-      `INSERT INTO line_items (transaction_id, amount_units, value_units, memo, account_id, source_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [transactionId, line.amountUnits, line.valueUnits, line.memo, line.accountId, line.externalId],
+    const [lineResult] = await connection.query(
+      `INSERT INTO line_items
+        (transaction_id, amount_units, value_units, memo, account_id, source_id, reconciliation_state)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [transactionId, line.amountUnits, line.valueUnits, line.memo, line.accountId, line.externalId,
+        line.reconciliationState ?? "unreconciled"],
     );
+    await attachTags(connection, personId, Number(lineResult.insertId), accountingQuestionTags(line.question));
   }
   for (const rate of resolved.rates) {
     await connection.query(
@@ -704,6 +809,19 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
       return { failure: importError("Transaction import plan is no longer valid; review a new dry run.",
         "IMPORT_PLAN_NO_LONGER_VALID", details) };
     }
+    const reconciliationValidation = await validateReconciliation(connection, personId,
+      normalized.reconciliation ?? null, entries);
+    if (reconciliationValidation && !reconciliationValidation.passed) {
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'DATABASE_STATE_CHANGED'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: importError("Known balances or posted account movement changed; review a new dry run.",
+        "IMPORT_PLAN_NO_LONGER_RECONCILES", reconciliationValidation) };
+    }
 
     for (const entry of entries) {
       if (entry.status !== "planned") continue;
@@ -711,6 +829,7 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
       entry.status = "created";
     }
     const result = { ...summarize(normalized, entries, { ledgerChanged: true }),
+      ...(reconciliationValidation == null ? {} : { reconciliationValidation }),
       ...identity, readyToCommit: false, status: "committed", committed: true, alreadyCommitted: false };
     const resultJson = JSON.stringify(result);
     await connection.query(

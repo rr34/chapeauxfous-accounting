@@ -91,8 +91,23 @@ export function transactionPreviewWorkflow(result) {
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Commit this transaction import now? It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused.`,
+        instruction: `Commit this transaction import now? It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.questionSummary?.openQuestionCount
+          ? `; ${result.questionSummary.openQuestionCount} suspense lines will remain as open accounting questions`
+          : ""}.`,
         onApproval: { tool: "commit_transaction_import", arguments: { import_plan_id: result.importPlanId } },
+      },
+    };
+  }
+  if (result.reconciliationValidation && !result.reconciliationValidation.passed) {
+    return {
+      ...result,
+      status: "incomplete",
+      requiredAction: "RESOLVE_RECONCILIATION_AND_RUN_NEW_DRY_RUN",
+      retry: makeRetryDescriptor("transaction_reconciliation_failed", { preserveCompleteOriginalBatch: true }),
+      nextAction: {
+        type: "correct_reconciliation",
+        instruction: "Resolve duplicate candidates and misclassified lines. If exact known balances prove a residual whose category remains unknown, add a balanced entry using a user-selected postable suspense account of the same currency and attach an accounting question to that suspense line. Then preview the complete batch again with the same reconciliation boundary until every residual is zero.",
+        tool: "import_transactions",
       },
     };
   }

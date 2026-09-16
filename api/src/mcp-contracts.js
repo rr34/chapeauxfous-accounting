@@ -7,7 +7,7 @@ import {
 } from "./artifact-upload.js";
 
 export const MCP_CONTRACT_VERSION = 1;
-export const MCP_SERVER_VERSION = "0.4.0";
+export const MCP_SERVER_VERSION = "0.7.0";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 
@@ -133,6 +133,8 @@ const transactionLineSchema = z.object({
   id: z.number().int().positive(),
   amountUnits: z.string().regex(/^-?\d+$/),
   valueUnits: z.string().regex(/^-?\d+$/).nullable(),
+  reconciliationState: z.enum(["unreconciled", "cleared", "reconciled"]),
+  reconciledAt: z.string().nullable(),
   memo: z.string().nullable(),
   accountId: z.number().int().positive(),
   accountName: z.string().min(1),
@@ -156,6 +158,29 @@ export const transactionSchema = z.object({
     toUnits: z.string().regex(/^\d+$/),
     toCurrencyId: z.number().int().positive(),
   })),
+});
+
+export const accountingQuestionSchema = z.object({
+  lineItemId: z.number().int().positive().describe("Stable question identity and the suspense posting line to reclassify."),
+  transactionId: z.number().int().positive(),
+  transactionDate: z.string(),
+  transactionDescription: z.string().nullable(),
+  transactionState: z.enum(["draft", "posted", "voided"]),
+  accountId: z.number().int().positive(),
+  accountName: z.string().min(1),
+  accountFullName: z.string().min(1),
+  currencyId: z.number().int().positive(),
+  currencyCode: z.string().min(1),
+  scale: z.number().int().min(0).max(18),
+  amountUnits: z.string().regex(/^-?\d+$/),
+  valueUnits: z.string().regex(/^-?\d+$/).nullable(),
+  memo: z.string().nullable(),
+  status: z.enum(["open", "resolved"]),
+  audience: z.string().min(1),
+  prompt: z.string().min(1),
+  resolution: z.string().nullable(),
+  resolvedAt: z.string().datetime().nullable(),
+  targetAccountId: z.number().int().positive().nullable(),
 });
 
 const transactionSearchLineSchema = z.object({
@@ -218,6 +243,139 @@ export const balanceAssertionSchema = z.object({
   scale: z.number().int().min(0).max(18),
 });
 
+export const referenceRateSchema = z.object({
+  id: z.number().int().positive(),
+  validAt: z.string().datetime(),
+  fromUnits: z.string().regex(/^\d+$/),
+  fromCurrencyId: z.number().int().positive(),
+  fromCurrencyCode: z.string().min(1),
+  fromScale: z.number().int().min(0).max(18),
+  toUnits: z.string().regex(/^\d+$/),
+  toCurrencyId: z.number().int().positive(),
+  toCurrencyCode: z.string().min(1),
+  toScale: z.number().int().min(0).max(18),
+});
+
+const reconciliationAnchorSchema = z.object({
+  assertionId: z.number().int().positive().nullable(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  knownBalanceUnits: z.string().regex(/^-?\d+$/).nullable(),
+  calculatedBalanceUnits: z.string().regex(/^-?\d+$/),
+});
+
+export const statementReconciliationContextSchema = z.object({
+  interval: z.object({
+    openingBalanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    closingBalanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    includedTransactionDates: z.string().min(1),
+  }),
+  accounts: z.array(z.object({
+    accountId: z.number().int().positive(),
+    accountFullName: z.string().min(1),
+    accountType: z.enum(["asset", "liability", "equity", "income", "expense"]),
+    currencyId: z.number().int().positive(),
+    currencyCode: z.string().min(1),
+    scale: z.number().int().min(0).max(18),
+    opening: reconciliationAnchorSchema,
+    closing: reconciliationAnchorSchema,
+    requiredNormalMovementUnits: z.string().regex(/^-?\d+$/).nullable()
+      .describe("Closing known balance minus opening known balance, expressed in the account's normal-balance sign."),
+    postedLineItemMovementUnits: z.string().regex(/^-?\d+$/)
+      .describe("Sum of already-posted debit-positive line-item units in the interval."),
+    remainingLineItemMovementUnits: z.string().regex(/^-?\d+$/).nullable()
+      .describe("Exact debit-positive native-unit total that not-yet-posted imported lines must contribute for this account."),
+    grounded: z.boolean(),
+    postable: z.boolean(),
+  })),
+  grounded: z.boolean(),
+  evidenceRefs: z.array(z.string().min(1)),
+  missingAssertions: z.array(z.object({
+    accountId: z.number().int().positive(),
+    balanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  })),
+  workflow: z.object({
+    evidenceOrder: z.array(z.string().min(1)),
+    rules: z.array(z.string().min(1)),
+  }),
+});
+
+const statementObservationIdSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+
+export const statementObservationAnalysisSchema = z.object({
+  reconciliation: statementReconciliationContextSchema,
+  observations: z.array(z.object({
+    id: statementObservationIdSchema,
+    sourceDocumentId: z.string().min(1),
+    sourceRecordId: z.string().min(1),
+    accountId: z.number().int().positive(),
+    accountFullName: z.string().min(1),
+    currencyId: z.number().int().positive(),
+    currencyCode: z.string().min(1),
+    scale: z.number().int().min(0).max(18),
+    transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    occurredAt: z.string().datetime().nullable(),
+    amountDecimal: z.string().min(1),
+    amountUnits: z.string().regex(/^-?\d+$/),
+    description: z.string().nullable(),
+    reference: z.string().nullable(),
+  })),
+  duplicateAnalysis: z.object({
+    ledgerCandidates: z.array(z.object({
+      observationId: statementObservationIdSchema,
+      candidates: z.array(z.object({
+        transactionId: z.number().int().positive(),
+        lineItemId: z.number().int().positive(),
+        classification: z.enum(["exact_source_duplicate", "strong_duplicate_candidate",
+          "possible_duplicate", "source_reference_conflict"]),
+        recommendation: z.enum(["exclude_from_new_import", "review_candidate",
+          "do_not_import_until_resolved"]),
+        score: z.number().int().nonnegative(),
+        reasons: z.array(z.string().min(1)),
+        existing: z.object({
+          transactionDate: z.string(), amountUnits: z.string().regex(/^-?\d+$/),
+          description: z.string().nullable(), lineMemo: z.string().nullable(),
+          transactionSourceId: z.string().nullable(), transactionSourceSystem: z.string().nullable(),
+          transactionState: z.enum(["draft", "posted"]), lineSourceId: z.string().nullable(),
+        }),
+      })),
+    })),
+    inputCandidates: z.array(z.object({
+      observationIds: z.array(statementObservationIdSchema).length(2),
+      classification: z.enum(["exact_cross_document_duplicate", "overlapping_source_candidate"]),
+      recommendation: z.enum(["keep_one_observation", "review_candidate"]),
+      reasons: z.array(z.string().min(1)),
+    })),
+    exactLedgerDuplicateObservationIds: z.array(statementObservationIdSchema),
+    ambiguousExactLedgerObservationIds: z.array(statementObservationIdSchema),
+    exactInputDuplicateObservationIds: z.array(statementObservationIdSchema),
+    unresolvedCandidateCount: z.number().int().nonnegative(),
+  }),
+  transferCandidates: z.array(z.object({
+    outgoingObservationId: statementObservationIdSchema,
+    incomingObservationId: statementObservationIdSchema,
+    classification: z.enum(["strong_transfer_candidate", "possible_transfer_candidate"]),
+    score: z.number().int().nonnegative(),
+    reasons: z.array(z.string().min(1)),
+    nativeCurrencyCode: z.string().min(1),
+    outgoingUnits: z.string().regex(/^\d+$/),
+    incomingUnits: z.string().regex(/^\d+$/),
+    possibleFeeUnits: z.string().regex(/^\d+$/).nullable(),
+  })),
+  ambiguousTransferObservationIds: z.array(statementObservationIdSchema),
+  proposedNewObservationIds: z.array(statementObservationIdSchema),
+  coverage: z.array(z.object({
+    accountId: z.number().int().positive(), accountFullName: z.string().min(1),
+    currencyCode: z.string().min(1), scale: z.number().int().min(0).max(18),
+    requiredRemainingUnits: z.string().regex(/^-?\d+$/).nullable(),
+    allExtractedObservationUnits: z.string().regex(/^-?\d+$/),
+    proposedNewObservationUnits: z.string().regex(/^-?\d+$/),
+    residualAfterProposedUnits: z.string().regex(/^-?\d+$/).nullable(),
+    balanced: z.boolean(),
+  })),
+  readyForTransactionAssembly: z.boolean(),
+  rules: z.array(z.string().min(1)),
+});
+
 export const CAPABILITY_MANIFEST_URI = "accounting://manifest/capabilities/v1";
 
 export const transactionImportArtifactUpload = artifactUploadContract;
@@ -228,7 +386,7 @@ export const accountingCapabilityManifest = Object.freeze({
     name: "chapeaux-fous-accounting",
     title: "Chapeaux Fous Accounting",
     version: MCP_SERVER_VERSION,
-    instructions: "Use owner-scoped read tools for evidence. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
+    instructions: "Use owner-scoped read tools for evidence. For every statement source, including screenshots and OCR, extract format-neutral observations and run deterministic statement analysis before importing. Resolve duplicate and transfer candidates, preserve native quantities, value every foreign line in one valuation currency, and bind the import preview to balance assertions as hard movement constraints. For authoritative data from only one account, use import_single_account_statement: keep that side cleared and put exact opposite lines in one user-selected same-currency suspense bucket with accounting questions. Never invent a category or source row. Reconcile only the authoritative account through an exactly matching known balance; reconciled lines are immutable while suspense lines remain assignable. When later receipts arrive, list open questions first, rank candidates by currency, amount, date, and merchant evidence, and do not resolve ambiguous matches without human input. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
     artifactUpload: artifactUploadContract,
   },
   capabilities: [
@@ -260,10 +418,10 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Read, create, update, import, and safely delete owner-scoped accounts.",
       aliases: ["accounts", "account tree", "chart of accounts"],
       guidance: "Deletion requires preview, explicit confirmation, commit, and post-commit verification.",
-      tools: ["list_accounts", "create_account", "update_account", "import_account_tree", "get_account_tree_import_plan", "commit_account_tree_import", "preview_delete_account", "get_account_delete_plan", "commit_delete_account"],
+      tools: ["list_accounts", "list_account_objects", "create_account", "update_account", "import_account_tree", "get_account_tree_import_plan", "commit_account_tree_import", "preview_delete_account", "get_account_delete_plan", "commit_delete_account"],
       dependencies: ["accounting.currencies"],
       attachmentHints: ["Account-tree files must be converted to one complete batch; preserve the complete batch on retry."],
-      contextViews: ["accounting.accounts.active_paths"],
+      contextViews: ["accounting.accounts.active_paths", "accounting.objects.accounts"],
     },
     {
       id: "accounting.transactions",
@@ -276,7 +434,8 @@ export const accountingCapabilityManifest = Object.freeze({
         "exclude_transaction_import_exception", "list_transaction_import_jobs", "get_transaction_import_job",
         "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
-        "commit_transaction_import", "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
+        "commit_transaction_import", "list_accounting_questions", "open_accounting_question", "resolve_accounting_question",
+        "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
         "commit_delete_transactions", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [
@@ -292,12 +451,25 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.reconciliation",
       title: "Balance assertions and reconciliation",
-      summary: "Record known balances and compare them with the posted ledger.",
-      aliases: ["reconciliation", "balance checks"],
-      guidance: "Amounts are signed integer native units in the account currency.",
-      tools: ["list_balance_assertions", "save_balance_assertion"],
-      dependencies: ["accounting.accounts"],
-      attachmentHints: [],
+      summary: "Ground single- or multi-statement imports with known native balances and timestamped valuation evidence.",
+      aliases: ["reconciliation", "balance checks", "statement matching", "crypto transfers"],
+      guidance: "Save statement opening and closing balances, then get reconciliation context before mapping lines. Analyze all statements together, join counterpart rows despite fee differences, preserve actual native quantities, and value foreign lines at transaction time. If a known balance proves movement but its classification is genuinely unknown, post the exact residual against an ordinary postable suspense account of the same currency and attach an accounting question; never invent a category. Resolve it later by reclassifying only that suspense line so the proven statement-account amount does not change.",
+      tools: ["list_balance_assertions", "save_balance_assertion", "get_statement_reconciliation_context",
+        "analyze_statement_observations",
+        "list_reference_rates", "create_reference_rate", "list_accounting_questions",
+        "open_accounting_question", "resolve_accounting_question",
+        "import_single_account_statement", "reconcile_account_through_date"],
+      dependencies: ["accounting.accounts", "accounting.currencies", "accounting.transactions"],
+      attachmentHints: [
+        "Inspect every related statement before importing either side of a transfer.",
+        "Extract CSV, PDF, OCR, and screenshot rows into the same observation fields, then let analyze_statement_observations compile duplicates and transfer candidates outside the model.",
+        "Use statement balances as native-unit anchors; do not alter source quantities to manufacture a match.",
+        "Use transaction-time prices only for valuation and fee or spread analysis, never as a replacement for statement quantities.",
+        "Ask Accountant and Ask Human are user-created ordinary postable suspense accounts, usually one per currency; do not create them silently and do not make them placeholders.",
+        "When a later receipt is uploaded, list open accounting questions before creating another transaction. Compare currency, exact amount, date, merchant text, and source identity; resolve only a unique supported match and ask the user when candidates remain ambiguous.",
+        "For an authoritative statement from only one account, use import_single_account_statement. It preserves each statement line, marks that side cleared, and creates the opposite posting in one selected same-currency suspense bucket.",
+        "Mark an account reconciled through a closing date only with reconcile_account_through_date; it requires the exact known balance to match first and never marks the suspense counterlines reconciled.",
+      ],
       contextViews: [],
     },
   ],
@@ -314,6 +486,14 @@ export const accountingCapabilityManifest = Object.freeze({
       id: "accounting.accounts.active_paths",
       title: "Active account path index",
       uri: "accounting://context/accounts/active-paths",
+      readOnly: true,
+      maximumRecords: 500,
+      source: "accounts domain service",
+    },
+    {
+      id: "accounting.objects.accounts",
+      title: "Accounting account objects",
+      uri: "accounting://context/objects/accounts",
       readOnly: true,
       maximumRecords: 500,
       source: "accounts domain service",

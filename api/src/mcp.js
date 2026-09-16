@@ -54,6 +54,7 @@ import {
   userCurrencyTypes,
 } from "./currencies.js";
 import {
+  accountingQuestionSchema,
   accountingCapabilityManifest,
   accountSchema,
   balanceAssertionSchema,
@@ -63,9 +64,12 @@ import {
   makeRetryDescriptor,
   MCP_CONTRACT_VERSION,
   MCP_SERVER_VERSION,
+  referenceRateSchema,
   retryDescriptorSchema,
   resultMetadataSchema,
   schemaProjectionSchema,
+  statementObservationAnalysisSchema,
+  statementReconciliationContextSchema,
   structuredErrorSchema,
   successOutputSchema,
   toolMetadata,
@@ -74,6 +78,15 @@ import {
   transactionSearchItemSchema,
   transactionSchema,
 } from "./mcp-contracts.js";
+import {
+  accountingQuestionTags,
+  getAccountingQuestion,
+  listAccountingQuestionsPage,
+  openAccountingQuestion,
+  resolveAccountingQuestion,
+} from "./accounting-questions.js";
+import { previewSingleAccountStatementImport } from "./single-account-import.js";
+import { reconcileAccountThroughDate } from "./account-reconciliation.js";
 import { AccountingSchemaSemantics, withSchemaProjection } from "./schema-semantics.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
 import {
@@ -90,6 +103,9 @@ import {
   TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
   transactionImportCanonicalJsonSchema,
 } from "./transaction-import-job.js";
+import { createReferenceRate, getReferenceRate, listReferenceRatesPage } from "./reference-rates.js";
+import { analyzeStatementObservations } from "./statement-analysis.js";
+import { getStatementReconciliationContext } from "./statement-reconciliation.js";
 import {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
@@ -217,7 +233,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
     fields: {
       transactions: ["transaction_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
       accounts: ["account_id", "AccountName", "account_currency_id"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       tags: ["tag_id", "tag_key", "tag_value"],
@@ -231,7 +247,7 @@ const operations = Object.freeze({
     schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
       accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
       tags: ["tag_id", "tag_key", "tag_value"],
@@ -239,29 +255,107 @@ const operations = Object.freeze({
       xrates: ["xrate_id", "xrate_type", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
     },
   },
+  listAccountingQuestions: {
+    name: "list_accounting_questions",
+    purpose: "List durable open or resolved classification questions attached to posted ledger lines.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
+    fields: {
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+    },
+  },
+  openAccountingQuestion: {
+    name: "open_accounting_question",
+    purpose: "Attach or update a durable unresolved classification question on one posted ledger line.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
+    fields: {
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+    },
+  },
+  resolveAccountingQuestion: {
+    name: "resolve_accounting_question",
+    purpose: "Resolve a durable accounting question by reclassifying its suspense line without changing the proven amount or value.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join"],
+    fields: {
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState", "valuation_currency_id", "UpdatedAt"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "reconciliation_state", "reconciled_at"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+    },
+  },
+  singleAccountStatementImport: {
+    name: "import_single_account_statement",
+    purpose: "Preview authoritative one-sided statement lines with balancing question-bearing suspense counterlines.",
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
+      "account_balance_assertions", "accounting_import_plans"],
+    fields: {
+      transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
+      xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
+      accounting_import_plans: planPreviewFields,
+    },
+  },
+  reconcileAccountThroughDate: {
+    name: "reconcile_account_through_date",
+    purpose: "Mark only one account's posted lines reconciled through an exact matching known-balance date.",
+    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "AccountType", "account_currency_id"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "TransactionState"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "account_id", "reconciliation_state", "reconciled_at"],
+    },
+  },
   importTransactions: {
     name: "import_transactions",
     purpose: "Validate complete source-neutral transactions with nested line items and save a durable import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
+      "account_balance_assertions", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
       accounts: ["account_id", "AccountName", "parent_account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id",
+        "balance_date", "known_balance_units"],
       accounting_import_plans: planPreviewFields,
     },
   },
   commitTransactionImport: {
     name: "commit_transaction_import",
     purpose: "Commit one previously validated transaction import plan.",
-    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "xrates", "accounting_import_plans"],
+    schemaObjects: ["transactions", "line_items", "accounts", "currencies", "tags", "lineitems_tags_join", "xrates",
+      "account_balance_assertions", "accounting_import_plans"],
     fields: {
       transactions: ["transaction_id", "description", "valuation_currency_id", "TransactionState", "TransactionDate", "source_system", "source_id"],
-      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "value_units", "memo", "account_id", "source_id", "reconciliation_state", "reconciled_at"],
       accounts: ["account_id", "account_currency_id", "is_placeholder", "archived_at"],
       currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      tags: ["tag_id", "owner_person_id", "tag_key", "tag_value"],
+      lineitems_tags_join: ["tagged_line_item_id", "tag_id"],
       xrates: ["xrate_id", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id",
+        "balance_date", "known_balance_units"],
       accounting_import_plans: planCommitFields,
     },
   },
@@ -328,6 +422,39 @@ const operations = Object.freeze({
       line_items: ["transaction_id", "amount_units", "account_id"],
     },
   },
+  statementReconciliation: {
+    name: "get_statement_reconciliation_context",
+    purpose: "Turn exact opening and closing balance assertions into native-unit movement constraints for a multi-statement import.",
+    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "TransactionState"],
+      line_items: ["transaction_id", "amount_units", "account_id"],
+    },
+  },
+  statementAnalysis: {
+    name: "analyze_statement_observations",
+    purpose: "Compile duplicate, overlap, cross-statement transfer, and known-balance coverage candidates from format-neutral extracted statement rows.",
+    schemaObjects: ["account_balance_assertions", "accounts", "currencies", "transactions", "line_items"],
+    fields: {
+      account_balance_assertions: ["account_balance_assertion_id", "owner_person_id", "account_id", "balance_date", "known_balance_units"],
+      accounts: ["account_id", "owner_person_id", "AccountName", "parent_account_id", "AccountType", "account_currency_id", "is_placeholder", "archived_at"],
+      currencies: ["currency_id", "CurrencyAbbreviation", "scale"],
+      transactions: ["transaction_id", "owner_person_id", "TransactionDate", "description", "TransactionState", "source_id"],
+      line_items: ["line_item_id", "transaction_id", "amount_units", "memo", "account_id", "source_id"],
+    },
+  },
+  referenceRates: {
+    name: "reference_rates",
+    purpose: "Read and create owner-scoped timestamped reference prices for valuation and fee or spread analysis.",
+    schemaObjects: ["xrates", "currencies"],
+    fields: {
+      xrates: ["xrate_id", "owner_person_id", "xrate_type", "ValidAt", "transaction_id", "from_units", "from_currency_id", "to_units", "to_currency_id"],
+      currencies: ["currency_id", "owner_person_id", "CurrencyAbbreviation", "scale"],
+    },
+  },
   verifyLedger: {
     name: "verify_ledger",
     purpose: "Re-run the accounting invariants for every posted transaction owned by this user.",
@@ -374,8 +501,10 @@ const entityCollections = Object.freeze({
   account: "accounts",
   account_delete_plan: "account-delete-plans",
   account_tree_import_plan: "account-tree-import-plans",
+  accounting_question: "questions",
   balance_assertion: "balance-assertions",
   currency: "currencies",
+  reference_rate: "reference-rates",
   transaction: "transactions",
   transaction_delete_plan: "transaction-delete-plans",
   transaction_import_plan: "transaction-import-plans",
@@ -385,7 +514,7 @@ function entityUri({ type, id }) {
   return `accounting://${entityCollections[type] ?? type}/${encodeURIComponent(String(id))}`;
 }
 
-function accountPathContext(accounts) {
+function accountPathContext(accounts, { includeArchived = false } = {}) {
   const byId = new Map(accounts.map((account) => [account.id, account]));
   const paths = new Map();
   function pathFor(account, visiting = new Set()) {
@@ -398,13 +527,31 @@ function accountPathContext(accounts) {
     paths.set(account.id, path);
     return path;
   }
-  return accounts.filter((account) => account.archivedAt == null).map((account) => ({
+  return accounts.filter((account) => includeArchived || account.archivedAt == null).map((account) => ({
     sourceRef: `accounting://accounts/${account.id}`,
     accountId: account.id,
     fullName: pathFor(account),
     accountType: account.type,
     currencyCode: account.currencyCode,
     placeholder: account.placeholder,
+  }));
+}
+
+function accountObjectContext(accounts, pathAccounts = accounts) {
+  const paths = new Map(accountPathContext(pathAccounts, { includeArchived: true })
+    .map((item) => [item.accountId, item.fullName]));
+  return accounts.map((account) => ({
+    objectType: "accounting.account",
+    id: account.id,
+    sourceRef: `accounting://accounts/${account.id}`,
+    displayName: paths.get(account.id) ?? account.name,
+    parentAccountId: account.parentAccountId,
+    accountType: account.type,
+    currencyId: account.currencyId,
+    currencyCode: account.currencyCode,
+    scale: account.scale,
+    postable: !account.placeholder && account.archivedAt == null,
+    archived: account.archivedAt != null,
   }));
 }
 
@@ -560,6 +707,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     searchTransactionsPage: services.searchTransactionsPage ?? searchTransactionsPage,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
+    getAccountingQuestion: services.getAccountingQuestion ?? getAccountingQuestion,
+    listAccountingQuestionsPage: services.listAccountingQuestionsPage ?? listAccountingQuestionsPage,
+    openAccountingQuestion: services.openAccountingQuestion ?? openAccountingQuestion,
+    resolveAccountingQuestion: services.resolveAccountingQuestion ?? resolveAccountingQuestion,
+    previewSingleAccountStatementImport: services.previewSingleAccountStatementImport
+      ?? previewSingleAccountStatementImport,
+    reconcileAccountThroughDate: services.reconcileAccountThroughDate ?? reconcileAccountThroughDate,
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
     getTransactionImportPlan: services.getTransactionImportPlan ?? getTransactionImportPlan,
     commitTransactionImportPlan: services.commitTransactionImportPlan ?? commitTransactionImportPlan,
@@ -581,6 +735,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     listBalanceAssertionsPage: services.listBalanceAssertionsPage ?? (services.listBalanceAssertions ? injectedPage(services.listBalanceAssertions, "assertions") : listBalanceAssertionsPage),
     getBalanceAssertion: services.getBalanceAssertion ?? getBalanceAssertion,
     saveBalanceAssertion: services.saveBalanceAssertion ?? saveBalanceAssertion,
+    getStatementReconciliationContext: services.getStatementReconciliationContext ?? getStatementReconciliationContext,
+    analyzeStatementObservations: services.analyzeStatementObservations ?? analyzeStatementObservations,
+    listReferenceRatesPage: services.listReferenceRatesPage ?? listReferenceRatesPage,
+    getReferenceRate: services.getReferenceRate ?? getReferenceRate,
+    createReferenceRate: services.createReferenceRate ?? createReferenceRate,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
     verifyPostedTransactionsPage: services.verifyPostedTransactionsPage ?? verifyPostedTransactionsPage,
     listCurrenciesPage: services.listCurrenciesPage ?? (services.listCurrencies ? injectedPage(services.listCurrencies, "currencies") : listCurrenciesPage),
@@ -645,6 +804,25 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }] };
   });
 
+  server.registerResource("accounting-account-objects", "accounting://context/objects/accounts", {
+    title: "Accounting account objects",
+    description: "First 500 owner-scoped account objects for agent object pickers; use list_account_objects for complete pagination.",
+    mimeType: "application/json",
+  }, async (uri) => {
+    const page = await accounting.listAccountsPage(pool, personId, { limit: 500 });
+    const pathAccounts = await accounting.listAccounts(pool, personId);
+    const objects = accountObjectContext(page.accounts, pathAccounts);
+    const value = {
+      contractVersion: MCP_CONTRACT_VERSION,
+      status: page.nextCursor == null ? "complete" : "partial",
+      contextView: "accounting.objects.accounts",
+      objects,
+      summary: { ...pageMetadata(objects, page.nextCursor, "accounts"),
+        sourceRefs: objects.map((item) => item.sourceRef) },
+    };
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }] };
+  });
+
   const entityResource = (uri, value) => ({
     contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value) }],
   });
@@ -680,6 +858,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transaction: await accounting.getTransaction(pool, personId, transactionId),
   }, operations.getTransaction)));
 
+  server.registerResource("accounting-question", resourceTemplate("accounting://questions/{lineItemId}"), {
+    title: "Accounting classification question",
+    description: "One durable open or resolved question identified by the posted suspense line it reclassifies.",
+    mimeType: "application/json",
+  }, async (uri, { lineItemId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    question: await accounting.getAccountingQuestion(pool, personId, lineItemId),
+  }, operations.listAccountingQuestions)));
+
   server.registerResource("accounting-balance-assertion", resourceTemplate("accounting://balance-assertions/{assertionId}"), {
     title: "Accounting balance assertion",
     description: "One current owner-scoped known-balance assertion and calculated ledger difference by stable Accounting ID.",
@@ -689,6 +877,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     status: "success",
     assertion: await accounting.getBalanceAssertion(pool, personId, assertionId),
   }, operations.listBalanceAssertions)));
+
+  server.registerResource("accounting-reference-rate", resourceTemplate("accounting://reference-rates/{rateId}"), {
+    title: "Accounting reference rate",
+    description: "One owner-scoped timestamped reference price by stable Accounting ID.",
+    mimeType: "application/json",
+  }, async (uri, { rateId }) => entityResource(uri, withSchemaProjection(schemaSemantics, {
+    contractVersion: MCP_CONTRACT_VERSION,
+    status: "success",
+    referenceRate: await accounting.getReferenceRate(pool, personId, rateId),
+  }, operations.referenceRates)));
 
   server.registerResource("accounting-account-tree-import-plan",
     resourceTemplate("accounting://account-tree-import-plans/{planId}"), {
@@ -751,6 +949,17 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   const accountListOutput = successOutputSchema({
     accounts: z.array(accountSchema), resultMetadata: resultMetadataSchema, schemaProjection: schemaProjectionSchema,
   });
+  const accountObjectOutput = successOutputSchema({
+    objects: z.array(z.object({
+      objectType: z.literal("accounting.account"), id: z.number().int().positive(),
+      sourceRef: z.string().min(1), displayName: z.string().min(1),
+      parentAccountId: z.number().int().positive().nullable(),
+      accountType: z.enum(["asset", "liability", "equity", "income", "expense"]),
+      currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18), postable: z.boolean(), archived: z.boolean(),
+    })),
+    resultMetadata: resultMetadataSchema,
+  });
   const accountCreateOutput = successOutputSchema({
     account: z.object({ id: z.number().int().positive() }),
     effectReceipt: effectReceiptSchema,
@@ -810,12 +1019,61 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     effectReceipt: effectReceiptSchema,
     schemaProjection: schemaProjectionSchema,
   });
+  const accountingQuestionListOutput = successOutputSchema({
+    questions: z.array(accountingQuestionSchema), resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const accountingQuestionMutationOutput = successOutputSchema({
+    question: accountingQuestionSchema, changed: z.boolean().optional(),
+    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const accountReconciliationOutput = successOutputSchema({
+    reconciliation: z.object({
+      accountId: z.number().int().positive(), accountName: z.string().min(1),
+      currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18), balanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      assertionId: z.number().int().positive(), knownBalanceUnits: z.string().regex(/^-?\d+$/),
+      calculatedBalanceUnits: z.string().regex(/^-?\d+$/), matches: z.literal(true),
+      totalLineCount: z.number().int().nonnegative(), newlyReconciledLineCount: z.number().int().nonnegative(),
+      alreadyReconciledLineCount: z.number().int().nonnegative(),
+    }),
+    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+  });
   const assertionListOutput = successOutputSchema({
     assertions: z.array(balanceAssertionSchema), resultMetadata: resultMetadataSchema,
     schemaProjection: schemaProjectionSchema,
   });
   const assertionMutationOutput = successOutputSchema({
-    assertion: balanceAssertionSchema, effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+    assertion: balanceAssertionSchema,
+    investigationQuestion: z.object({
+      status: z.literal("needs_explanation"),
+      prompt: z.string().min(1),
+      accountId: z.number().int().positive(),
+      balanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      unexplainedDifferenceUnits: z.string().regex(/^-?\d+$/),
+      currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18),
+      nextTool: z.literal("get_statement_reconciliation_context"),
+    }).nullable(),
+    effectReceipt: effectReceiptSchema, schemaProjection: schemaProjectionSchema,
+  });
+  const statementReconciliationOutput = successOutputSchema({
+    reconciliation: statementReconciliationContextSchema,
+    resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const statementObservationAnalysisOutput = successOutputSchema({
+    analysis: statementObservationAnalysisSchema,
+    resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const referenceRateListOutput = successOutputSchema({
+    referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
+    schemaProjection: schemaProjectionSchema,
+  });
+  const referenceRateMutationOutput = successOutputSchema({
+    referenceRate: referenceRateSchema, effectReceipt: effectReceiptSchema,
+    schemaProjection: schemaProjectionSchema,
   });
   const ledgerVerificationOutput = successOutputSchema({
     valid: z.boolean(), checked: z.number().int().nonnegative(),
@@ -832,6 +1090,19 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transactionsCreated: z.number().int().nonnegative(), transactionsReused: z.number().int().nonnegative(),
     lineItemsCreated: z.number().int().nonnegative(), lineItemsReused: z.number().int().nonnegative(),
     rejectedTransactions: z.number().int().nonnegative(),
+  });
+  const reconciliationValidationSchema = z.object({
+    passed: z.boolean(),
+    openingBalanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    closingBalanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    accounts: z.array(z.object({
+      accountId: z.number().int().positive(), accountFullName: z.string().min(1),
+      currencyCode: z.string().min(1), scale: z.number().int().min(0).max(18),
+      requiredRemainingUnits: z.string().regex(/^-?\d+$/).nullable(),
+      proposedNewLineItemUnits: z.string().regex(/^-?\d+$/),
+      residualUnits: z.string().regex(/^-?\d+$/).nullable(), matches: z.boolean(),
+    })),
+    issues: z.array(importIssueSchema),
   });
   const transactionImportSchema = z.object({
     status: z.enum(["ready", "incomplete", "committed"]),
@@ -852,6 +1123,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       byValuationCurrency: countMapSchema, byYear: countMapSchema,
     }),
     lineItemSummary: z.object({ byAccountCurrency: countMapSchema, byTopLevelBranch: countMapSchema }),
+    questionSummary: z.object({
+      openQuestionCount: z.number().int().nonnegative(),
+      byAudience: countMapSchema,
+      bySuspenseAccount: countMapSchema,
+    }),
     transactions: z.array(z.object({
       externalId: z.string().min(1), transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       description: z.string().nullable(), valuationCurrencyCode: z.string().min(1),
@@ -860,11 +1136,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     })),
     expiresAt: z.string().datetime().optional(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
     summary: transactionImportSummarySchema.optional(), committed: z.boolean().optional(), alreadyCommitted: z.boolean().optional(),
-    requiredAction: z.enum(["REQUEST_USER_CONFIRMATION", "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN"]).optional(),
+    reconciliationValidation: reconciliationValidationSchema.optional(),
+    requiredAction: z.enum(["REQUEST_USER_CONFIRMATION", "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN",
+      "RESOLVE_RECONCILIATION_AND_RUN_NEW_DRY_RUN"]).optional(),
     nextAction: z.union([
       z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
         onApproval: z.object({ tool: z.literal("commit_transaction_import"), arguments: z.object({ import_plan_id: z.string().uuid() }) }) }),
       z.object({ type: z.literal("correct_rejected_transactions"), instruction: z.string().min(1),
+        tool: z.literal("import_transactions") }),
+      z.object({ type: z.literal("correct_reconciliation"), instruction: z.string().min(1),
         tool: z.literal("import_transactions") }),
     ]).optional(),
     retry: retryDescriptorSchema.optional(),
@@ -1056,6 +1336,29 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       accounts: page.accounts,
       resultMetadata: pageMetadata(page.accounts, page.nextCursor, "accounts"),
     }, operations.listAccounts);
+  }));
+
+  server.registerTool("list_account_objects", {
+    title: "List account objects",
+    description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. Use IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import. Follow nextCursor until complete.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: accountObjectOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.accounts", { attachmentHints: [
+      "A statement attachment should carry a confirmed accounting.account sourceRef before import.",
+    ] }),
+  }, async ({ limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
+    const pathAccounts = await accounting.listAccounts(pool, personId);
+    const objects = accountObjectContext(page.accounts, pathAccounts);
+    return {
+      objects,
+      resultMetadata: { ...pageMetadata(objects, page.nextCursor, "accounts"),
+        sourceRefs: objects.map((item) => item.sourceRef) },
+    };
   }));
 
   server.registerTool("create_account", {
@@ -1606,6 +1909,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     transaction: await accounting.getTransaction(pool, personId, transaction_id),
   }, operations.getTransaction)));
 
+  const accountingQuestionInputSchema = z.object({
+    audience: z.string().trim().min(1).max(50)
+      .describe("Who should answer, such as accountant, human, user, or tax-advisor."),
+    prompt: z.string().trim().min(1).max(16000)
+      .describe("Concrete unresolved classification or evidence question."),
+  }).strict();
   const lineItemSchema = z.object({
     account_id: positiveInteger("Account id owned by the token owner."),
     amount_units: z.string().regex(/^-?\d+$/).describe("Signed integer amount in the account currency's native units."),
@@ -1614,9 +1923,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     memo: z.string().trim().max(16000).nullable().optional(),
     source_id: z.string().trim().max(128).nullable().optional(),
     tags: z.array(z.object({
-      key: z.string().trim().min(1).max(50),
+      key: z.string().trim().min(1).max(50)
+        .refine((key) => !key.toLocaleLowerCase("en-US").startsWith("accounting.question."),
+          "accounting.question.* tags are reserved; use the question field."),
       value: z.string().trim().min(1),
     })).optional(),
+    question: accountingQuestionInputSchema.optional()
+      .describe("Marks this posting line as unresolved while keeping the transaction balanced and posted."),
   });
   const rateSchema = z.object({
     from_units: z.string().regex(/^\d+$/).describe("Positive integer units in the source currency."),
@@ -1626,7 +1939,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("create_transaction", {
     title: "Create transaction",
-    description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each nonzero value can carry its own implied exchange rate; a nonzero amount with zero value is a quantity-only adjustment. rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
+    description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each nonzero value can carry its own implied exchange rate; a nonzero amount with zero value is a quantity-only adjustment. When an exact known-balance residual has unknown classification, post its counterline to a user-selected ordinary suspense account of the same currency and add question metadata to that suspense line. rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
     inputSchema: {
       description: z.string().trim().max(16000).nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
@@ -1641,6 +1954,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     annotations: writesData,
     _meta: toolMetadata("accounting.transactions", { dependencies: ["list_accounts", "list_currencies"] }),
   }, async (input) => safeToolResult(async () => {
+    if (!input.post && input.line_items.some((line) => line.question != null)) {
+      throw Object.assign(new Error("Accounting questions require a posted transaction."), {
+        status: 400, code: "QUESTION_LINE_NOT_POSTED",
+      });
+    }
     const created = await accounting.createTransaction({
       personId,
       description: input.description,
@@ -1652,7 +1970,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         valueUnits: line.value_units,
         memo: line.memo,
         sourceId: line.source_id,
-        tags: line.tags,
+        tags: [...(line.tags ?? []), ...accountingQuestionTags(line.question)],
       })),
       rates: input.rates?.map((rate) => ({
         fromUnits: rate.from_units,
@@ -1672,6 +1990,162 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.createTransaction);
   }));
 
+  server.registerTool("list_accounting_questions", {
+    title: "List accounting questions",
+    description: "Find suspense lines that are still waiting for a receipt, human decision, accountant review, or other classification. These are posted ledger lines, not failed imports: their statement-side amounts already contribute to the known balance. Use the returned lineItemId as the stable question ID.",
+    inputSchema: {
+      status: z.enum(["open", "resolved"]).default("open"),
+      audience: z.string().trim().min(1).max(50).nullable().optional(),
+      account_id: positiveInteger("Optional suspense account id.").nullable().optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: accountingQuestionListOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation"),
+  }, async ({ status, audience, account_id, limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listAccountingQuestionsPage(pool, personId, {
+      status, audience, accountId: account_id, limit, afterLineItemId: cursor,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      questions: page.questions,
+      resultMetadata: {
+        complete: page.nextCursor == null,
+        returned: page.questions.length,
+        nextCursor: page.nextCursor,
+        sourceRefs: page.questions.map((question) => `accounting://questions/${question.lineItemId}`),
+      },
+    }, operations.listAccountingQuestions);
+  }));
+
+  server.registerTool("open_accounting_question", {
+    title: "Open accounting question",
+    description: "Mark one existing posted suspense line as needing later classification. Use this to recover an older limbo line that was created without question metadata. The line and its transaction amounts are not changed.",
+    inputSchema: {
+      line_item_id: positiveInteger("Posted suspense line to track."),
+      audience: z.string().trim().min(1).max(50),
+      prompt: z.string().trim().min(1).max(16000),
+    },
+    outputSchema: accountingQuestionMutationOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["get_transaction"] }),
+  }, async ({ line_item_id, audience, prompt }) => safeToolResult(async () => {
+    const question = await accounting.openAccountingQuestion({
+      pool, personId, lineItemId: line_item_id, audience, prompt,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      question,
+      effectReceipt: effectReceipt("open_accounting_question", { line_item_id, audience, prompt }, "upserted", [
+        { type: "accounting_question", id: line_item_id },
+        { type: "transaction", id: question.transactionId },
+      ]),
+    }, operations.openAccountingQuestion);
+  }));
+
+  server.registerTool("resolve_accounting_question", {
+    title: "Assign accounting question",
+    description: "Resolve one open question by moving only its suspense line to an active postable account of the same currency. The native amount and valuation value remain byte-for-byte unchanged, the original transaction stays balanced, and the known statement-account balance is not disturbed. If the evidence requires another currency or a changed amount/value, create a separately reviewed correcting transaction instead.",
+    inputSchema: {
+      line_item_id: positiveInteger("Stable question ID and suspense line item ID."),
+      target_account_id: positiveInteger("Final active postable classification account with the same currency."),
+      resolution: z.string().trim().max(16000).nullable().optional(),
+    },
+    outputSchema: accountingQuestionMutationOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_accounting_questions", "list_accounts"] }),
+  }, async ({ line_item_id, target_account_id, resolution }) => safeToolResult(async () => {
+    const resolved = await accounting.resolveAccountingQuestion({
+      pool, personId, lineItemId: line_item_id, targetAccountId: target_account_id, resolution,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      question: resolved.question,
+      changed: resolved.changed,
+      effectReceipt: effectReceipt("resolve_accounting_question", { line_item_id, target_account_id, resolution },
+        resolved.changed ? "updated" : "unchanged", [
+          { type: "accounting_question", id: line_item_id },
+          { type: "transaction", id: resolved.question.transactionId },
+          { type: "account", id: target_account_id },
+        ]),
+    }, operations.resolveAccountingQuestion);
+  }));
+
+  const oneSidedStatementLineSchema = z.object({
+    external_id: z.string().trim().min(1).max(128)
+      .describe("Stable source line identifier. Reuse it when the same statement is processed again."),
+    transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    description: z.string().trim().max(16000).nullable().optional(),
+    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/),
+    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
+      .describe("Statement-line value in valuation_currency_code; required when the account uses another currency."),
+    memo: z.string().trim().max(16000).nullable().optional(),
+    question_prompt: z.string().trim().min(1).max(16000).nullable().optional(),
+  }).strict();
+  server.registerTool("import_single_account_statement", {
+    title: "Preview one-sided account statement",
+    description: `Import up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} authoritative lines from one account without requiring the caller to construct double-entry transactions. Each source amount is preserved on the selected statement account and starts cleared. Accounting creates an exact opposite amount and value in one user-selected active postable suspense account of the same native currency, attaches an open classification question there, and leaves that side unreconciled. Stable source_system plus external_id prevents exact replays. For screenshots, OCR, PDFs, or overlapping files, run analyze_statement_observations first and resolve its duplicate candidates. Supply reconciliation when opening and closing balances are known; the ordinary hard balance gate and confirmation plan still apply.`,
+    inputSchema: {
+      source_system: z.string().trim().min(1).max(32),
+      account_id: positiveInteger("The single authoritative statement account."),
+      suspense_account_id: positiveInteger("One ordinary active postable bucket account in the same native currency."),
+      valuation_currency_code: z.string().trim().min(1).max(50),
+      question_audience: z.string().trim().min(1).max(50).default("human"),
+      lines: z.array(oneSidedStatementLineSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
+      reconciliation: z.object({
+        opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        closing_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      }).optional(),
+      dry_run: z.literal(true).default(true),
+    },
+    outputSchema: transactionWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_accounts", "list_currencies", "analyze_statement_observations"],
+      attachmentHints: ["Submit only one account's authoritative lines and reuse stable source line IDs on every retry."],
+    }),
+  }, async ({ source_system, account_id, suspense_account_id, valuation_currency_code,
+    question_audience, lines, reconciliation }) => safeWorkflowResult(async () => {
+    const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
+      pool, personId, sourceSystem: source_system, accountId: account_id,
+      suspenseAccountId: suspense_account_id, valuationCurrencyCode: valuation_currency_code,
+      questionAudience: question_audience,
+      lines: lines.map((line) => ({
+        externalId: line.external_id, transactionDate: line.transaction_date,
+        description: line.description, amountDecimal: line.amount_decimal,
+        valueDecimal: line.value_decimal, memo: line.memo, questionPrompt: line.question_prompt,
+      })),
+      reconciliation: reconciliation == null ? null : {
+        openingBalanceDate: reconciliation.opening_balance_date,
+        closingBalanceDate: reconciliation.closing_balance_date,
+      },
+    }));
+    return withSchemaProjection(schemaSemantics, { ...imported, import: imported },
+      operations.singleAccountStatementImport);
+  }, { retryTool: "import_single_account_statement", preserveEntireBatch: true }));
+
+  server.registerTool("reconcile_account_through_date", {
+    title: "Reconcile account through known balance",
+    description: "Mark only the selected account's posted lines reconciled through a statement closing date. The exact known-balance assertion for that account and date must already match the calculated posted balance. Suspense counterlines are in another account and remain open and unreconciled for later assignment.",
+    inputSchema: {
+      account_id: positiveInteger("Authoritative account to reconcile."),
+      balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    },
+    outputSchema: accountReconciliationOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["save_balance_assertion"] }),
+  }, async ({ account_id, balance_date }) => safeToolResult(async () => {
+    const reconciliation = await accounting.reconcileAccountThroughDate({
+      pool, personId, accountId: account_id, balanceDate: balance_date,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      reconciliation,
+      effectReceipt: effectReceipt("reconcile_account_through_date", { account_id, balance_date },
+        reconciliation.newlyReconciledLineCount ? "updated" : "unchanged", [
+          { type: "account", id: account_id },
+          { type: "balance_assertion", id: reconciliation.assertionId },
+        ]),
+    }, operations.reconcileAccountThroughDate);
+  }));
+
   const canonicalImportRecordSchema = z.object({
     transaction_external_id: z.string().trim().min(1).max(128),
     line_external_id: z.string().trim().min(1).max(128).nullable().optional(),
@@ -1682,6 +2156,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
     value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
     memo: z.string().max(16000).nullable().optional(),
+    question_audience: z.string().trim().min(1).max(50).nullable().optional(),
+    question_prompt: z.string().trim().min(1).max(16000).nullable().optional(),
+    reconciliation_state: z.enum(["unreconciled", "cleared"]).optional(),
   }).describe(`One record conforming exactly to ${TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI}.`);
   // Keep the repeated workflow control plane compact. The canonical schema is
   // fetched once above, and the job resource retains the database projection.
@@ -1973,6 +2450,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
       .describe("Signed value in the transaction valuation currency. Optional only when the account uses the valuation currency; required for foreign-currency lines."),
     memo: z.string().trim().max(16000).nullable().optional(),
+    question: accountingQuestionInputSchema.optional()
+      .describe("Attach a durable unresolved question to this suspense line when exact statement movement is known but classification is not."),
+    reconciliation_state: z.enum(["unreconciled", "cleared"]).default("unreconciled")
+      .describe("Use cleared only when this exact line appears on the authoritative account statement."),
   });
   const importedTransactionSchema = z.object({
     external_id: z.string().trim().min(1).max(128)
@@ -1984,11 +2465,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   });
   server.registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate, except that a nonzero amount with zero value is an intentional zero-value quantity adjustment with no exchange rate. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. When multiple statements contain counterpart rows for the same transfer, call analyze_statement_observations and analyze all statements before submitting either side. Join the evidence into one complete transaction, use a stable composite external_id, and preserve each source row identifier on its corresponding line. Do not require sent and received native amounts to match: represent the difference as an explicit fee when the evidence supports it. For statement imports, supply reconciliation so the server refuses to create a commit plan unless proposed new line amounts exactly satisfy every selected account's remaining known-balance movement; the same constraints are revalidated at commit. When exact opening and closing balances prove residual movement but its category remains unknown, use that exact balance-derived residual in a balanced transaction against a user-selected ordinary postable suspense account of the same currency, and add question metadata to the suspense line. This records uncertainty without pretending it came from a source row. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate, except that a nonzero amount with zero value is an intentional zero-value quantity adjustment with no exchange rate. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free and reconciliation-complete result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
       transactions: z.array(importedTransactionSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
+      reconciliation: z.object({
+        account_ids: z.array(positiveInteger("Statement-backed account constrained by known balances.")).min(1).max(25),
+        opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        closing_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      }).optional().describe("Hard native-unit balance constraints for statement imports."),
       dry_run: z.literal(true).default(true)
         .describe("Validate the complete batch and save a durable confirmation plan without changing ledger data."),
     },
@@ -1996,9 +2482,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     annotations: writesData,
     _meta: toolMetadata("accounting.transactions", {
       dependencies: ["list_accounts", "list_currencies"],
-      attachmentHints: ["Submit the complete transaction batch on every preview retry."],
+      attachmentHints: ["Submit the complete transaction batch on every preview retry.",
+        "For counterpart statements, finish cross-statement matching before importing either statement."],
     }),
-  }, async ({ source_system, transactions }) => safeWorkflowResult(async () => {
+  }, async ({ source_system, transactions, reconciliation }) => safeWorkflowResult(async () => {
     const imported = transactionPreviewWorkflow(await accounting.previewTransactionImport({
       pool,
       personId,
@@ -2014,8 +2501,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
           amountDecimal: line.amount_decimal,
           valueDecimal: line.value_decimal,
           memo: line.memo,
+          ...(line.question == null ? {} : { question: line.question }),
+          reconciliationState: line.reconciliation_state,
         })),
       })),
+      reconciliation: reconciliation == null ? null : {
+        accountIds: reconciliation.account_ids,
+        openingBalanceDate: reconciliation.opening_balance_date,
+        closingBalanceDate: reconciliation.closing_balance_date,
+      },
     }));
     return withSchemaProjection(schemaSemantics, { ...imported, import: imported }, operations.importTransactions);
   }, { retryTool: "import_transactions", preserveEntireBatch: true }));
@@ -2074,7 +2568,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   server.registerTool("save_balance_assertion", {
     title: "Save balance assertion",
-    description: "Use to create or replace one known owner-scoped end-of-day native-unit balance. A successful result and receipt prove the assertion stored for the exact account and date and show its current ledger difference.",
+    description: "Use to create or replace one known owner-scoped end-of-day native-unit balance. A successful result and receipt prove the assertion stored for the exact account and date and show its current ledger difference. A mismatch returns a structured 'How did we get here?' investigation question; it does not silently create an adjustment. Pair opening and closing assertions in get_statement_reconciliation_context before choosing evidence-backed lines or an explicit question-bearing suspense adjustment.",
     inputSchema: {
       account_id: positiveInteger("Account id owned by the token owner."),
       balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -2093,10 +2587,151 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     });
     return withSchemaProjection(schemaSemantics, {
       assertion,
+      investigationQuestion: assertion.matches ? null : {
+        status: "needs_explanation",
+        prompt: `How did ${assertion.accountName} reach its known ${assertion.currencyCode} balance on ${assertion.date}? Explain the ${assertion.differenceUnits}-unit difference using source evidence or an explicitly labeled suspense adjustment.`,
+        accountId: assertion.accountId,
+        balanceDate: assertion.date,
+        unexplainedDifferenceUnits: assertion.differenceUnits,
+        currencyCode: assertion.currencyCode,
+        scale: assertion.scale,
+        nextTool: "get_statement_reconciliation_context",
+      },
       effectReceipt: effectReceipt("save_balance_assertion", args, "upserted", [
         { type: "balance_assertion", id: assertion.id },
       ]),
     }, operations.saveBalanceAssertion);
+  }));
+
+  server.registerTool("get_statement_reconciliation_context", {
+    title: "Ground a multi-statement reconciliation",
+    description: "Use after saving exact opening and closing balance assertions for every statement account, and before importing any joined entries. Returns each account's required native-unit movement, already-posted movement, and remaining line-item movement for the interval after the opening date through the closing date. Analyze every related statement together; match counterpart rows by provider ID, transaction hash, timestamp, direction, and quantity even when network fees make sent and received quantities differ. Preserve actual statement quantities, use one valuation currency, value foreign lines at transaction time, and separate explicit fees from inferred spread or margin. A nonzero residual must first trigger a search for missing or misclassified evidence; if its amount is proven only by the balance boundary and its category remains unknown, identify it explicitly as a balance-derived adjustment against a user-selected suspense account and attach an accounting question rather than inventing a category or source row.",
+    inputSchema: {
+      account_ids: z.array(positiveInteger("Owner-scoped postable account to ground.")).min(1).max(25),
+      opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Known end-of-day balance immediately before the imported interval."),
+      closing_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Known end-of-day balance at the end of the imported interval."),
+    },
+    outputSchema: statementReconciliationOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_accounts", "list_balance_assertions"],
+      attachmentHints: ["Inspect all statements in the reconciliation set before mapping either side of a transfer."],
+    }),
+  }, async ({ account_ids, opening_balance_date, closing_balance_date }) => safeToolResult(async () => {
+    const reconciliation = await accounting.getStatementReconciliationContext({
+        pool, personId, accountIds: account_ids, openingBalanceDate: opening_balance_date,
+        closingBalanceDate: closing_balance_date,
+      });
+    return withSchemaProjection(schemaSemantics, {
+      reconciliation,
+      resultMetadata: { complete: true, returned: reconciliation.evidenceRefs.length,
+        nextCursor: null, sourceRefs: reconciliation.evidenceRefs },
+    }, operations.statementReconciliation);
+  }));
+
+  server.registerTool("analyze_statement_observations", {
+    title: "Analyze extracted statement observations",
+    description: "Use for every statement import, regardless of whether the source was CSV, PDF, OCR, or a screenshot. First extract only visible source facts into format-neutral observations; do not infer balancing lines yet. This deterministic analyzer resolves native units from account scales, compares rows with existing ledger postings, identifies overlapping input documents, ranks cross-account transfer counterparts, and proves whether the proposed new observations exactly cover each account's known-balance residual. Only stable source-reference matches are automatically excluded as duplicates. Same date and amount without stable identity remains a review candidate. Do not assemble or preview transactions until readyForTransactionAssembly is true, or every reported ambiguity has been explicitly resolved and the resulting coverage remains zero.",
+    inputSchema: {
+      opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Known end-of-day balance immediately before the imported interval."),
+      closing_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Known end-of-day balance at the end of the imported interval."),
+      observations: z.array(z.object({
+        source_document_id: z.string().trim().min(1).max(128)
+          .describe("Stable file hash, attachment ID, or screenshot ID. Reuse it when reprocessing the same source."),
+        source_record_id: z.string().trim().min(1).max(128)
+          .describe("Stable row, transaction, or image-region ID within the source document."),
+        account_id: positiveInteger("Statement-backed owner-scoped account."),
+        transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        occurred_at: z.string().datetime({ offset: false }).nullable().optional()
+          .describe("Exact UTC timestamp when visible; null when the source shows only a date."),
+        amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).max(128)
+          .describe("Actual signed native-currency amount visible in the source: into an asset is positive and out is negative."),
+        description: z.string().max(16000).nullable().optional(),
+        reference: z.string().trim().min(1).max(128).nullable().optional()
+          .describe("Provider transaction ID, blockchain hash, or other stable source reference when visible. Do not invent one."),
+      })).min(1).max(500),
+    },
+    outputSchema: statementObservationAnalysisOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["get_statement_reconciliation_context"],
+      attachmentHints: ["Extract visible facts from any format into observations; keep document and record identities stable across retries."],
+    }),
+  }, async ({ opening_balance_date, closing_balance_date, observations }) => safeToolResult(async () => {
+    const analysis = await accounting.analyzeStatementObservations({
+      pool, personId, openingBalanceDate: opening_balance_date, closingBalanceDate: closing_balance_date,
+      observations: observations.map((item) => ({
+        sourceDocumentId: item.source_document_id, sourceRecordId: item.source_record_id,
+        accountId: item.account_id, transactionDate: item.transaction_date, occurredAt: item.occurred_at,
+        amountDecimal: item.amount_decimal, description: item.description, reference: item.reference,
+      })),
+    });
+    const sourceRefs = [...new Set([
+      ...analysis.reconciliation.evidenceRefs,
+      ...analysis.duplicateAnalysis.ledgerCandidates.flatMap((item) =>
+        item.candidates.map((candidate) => `accounting://transactions/${candidate.transactionId}`)),
+    ])];
+    return withSchemaProjection(schemaSemantics, {
+      analysis,
+      resultMetadata: { complete: true, returned: sourceRefs.length, nextCursor: null, sourceRefs },
+    }, operations.statementAnalysis);
+  }));
+
+  server.registerTool("list_reference_rates", {
+    title: "List timestamped reference rates",
+    description: "Read owner-scoped timestamped reference prices as exact positive native-unit ratios. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
+    inputSchema: {
+      from_currency_id: positiveInteger("Optional source currency or asset.").optional(),
+      to_currency_id: positiveInteger("Optional valuation currency.").optional(),
+      valid_at_from: z.string().datetime({ offset: false }).optional(),
+      valid_at_to: z.string().datetime({ offset: false }).optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: referenceRateListOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_currencies"] }),
+  }, async ({ from_currency_id, to_currency_id, valid_at_from, valid_at_to, limit, cursor }) =>
+    safeToolResult(async () => {
+      const page = await accounting.listReferenceRatesPage(pool, personId, {
+        fromCurrencyId: from_currency_id, toCurrencyId: to_currency_id,
+        validAtFrom: valid_at_from, validAtTo: valid_at_to, limit, beforeRateId: cursor,
+      });
+      return withSchemaProjection(schemaSemantics, {
+        referenceRates: page.rates,
+        resultMetadata: pageMetadata(page.rates, page.nextCursor, "reference-rates"),
+      }, operations.referenceRates);
+    }));
+
+  server.registerTool("create_reference_rate", {
+    title: "Create timestamped reference rate",
+    description: "Store one owner-scoped, reference-only price from statement or externally verified evidence as an exact positive native-unit ratio. Use the evidence timestamp in UTC and preserve the source quantity separately in transaction lines. This does not post accounting and does not automatically value a transaction.",
+    inputSchema: {
+      valid_at: z.string().datetime({ offset: false }).describe("UTC evidence timestamp ending in Z."),
+      from_units: z.string().regex(/^\d+$/).describe("Positive source-currency native units."),
+      from_currency_id: positiveInteger("Source currency or asset."),
+      to_units: z.string().regex(/^\d+$/).describe("Positive target-currency native units."),
+      to_currency_id: positiveInteger("Target valuation currency."),
+    },
+    outputSchema: referenceRateMutationOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_currencies"] }),
+  }, async ({ valid_at, from_units, from_currency_id, to_units, to_currency_id }) => safeToolResult(async () => {
+    const args = { valid_at, from_units, from_currency_id, to_units, to_currency_id };
+    const referenceRate = await accounting.createReferenceRate({
+      pool, personId, validAt: valid_at, fromUnits: from_units, fromCurrencyId: from_currency_id,
+      toUnits: to_units, toCurrencyId: to_currency_id,
+    });
+    return withSchemaProjection(schemaSemantics, {
+      referenceRate,
+      effectReceipt: effectReceipt("create_reference_rate", args, "created", [
+        { type: "reference_rate", id: referenceRate.id },
+      ]),
+    }, operations.referenceRates);
   }));
 
   server.registerTool("verify_ledger", {

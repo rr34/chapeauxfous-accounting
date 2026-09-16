@@ -83,6 +83,27 @@ test("canonical line records are grouped by stable transaction identity with com
   assert.equal(Object.hasOwn(groups[0].canonicalRecords[0], "_sourceOrdinal"), false);
 });
 
+test("canonical records carry paired accounting-question fields into the suspense line", () => {
+  const [group] = groupCanonicalTransactionRecords([{
+    transaction_external_id: "balance-derived-1", line_external_id: "question-line",
+    transaction_date: "2026-08-31", description: "Balance-derived adjustment",
+    valuation_currency_code: "USD", account_full_name: "Assets:Ask Accountant",
+    amount_decimal: "-12.50", value_decimal: "-12.50",
+    question_audience: "accountant", question_prompt: "What caused this deposit?",
+  }]);
+  assert.deepEqual(group.errors, []);
+  assert.deepEqual(group.transaction.lineItems[0].question, {
+    audience: "accountant", prompt: "What caused this deposit?",
+  });
+
+  const [invalid] = groupCanonicalTransactionRecords([{
+    transaction_external_id: "balance-derived-2", transaction_date: "2026-08-31",
+    valuation_currency_code: "USD", account_full_name: "Assets:Ask Accountant",
+    amount_decimal: "-1.00", value_decimal: "-1.00", question_audience: "human",
+  }]);
+  assert.equal(invalid.errors.some((error) => error.code === "INCOMPLETE_ACCOUNTING_QUESTION"), true);
+});
+
 test("inconsistent transaction-level fields become a group exception instead of aborting other groups", () => {
   const groups = groupCanonicalTransactionRecords([
     { transaction_external_id: "bad", transaction_date: "2026-01-01", valuation_currency_code: "USD",

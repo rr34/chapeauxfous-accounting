@@ -27,6 +27,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   let createdImportJob;
   let previewedImportJob;
   let searchedTransactionFilters;
+  let oneSidedImport;
+  let reconciledAccount;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
     dryRun: !ledgerChanged,
@@ -58,6 +60,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
       byYear: { 2026: transactionCount },
     },
     lineItemSummary: { byAccountCurrency: { USD: transactionCount * 2 }, byTopLevelBranch: { Assets: transactionCount } },
+    questionSummary: { openQuestionCount: 0, byAudience: {}, bySuspenseAccount: {} },
     transactions: [{ externalId: "tx-1", transactionDate: "2026-01-01", description: "Test",
       valuationCurrencyCode: "USD", lineItemCount: 2, status: ledgerChanged ? "created" : "planned",
       transactionId: ledgerChanged ? 91 : null, errors: [] }],
@@ -237,8 +240,30 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     },
     async previewTransactionImport(input) {
       importedTransactions = input;
-      return transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
+      const result = transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
         importPlanId: "11111111-1111-4111-8111-111111111111", transactionCount: input.transactions.length });
+      return input.reconciliation == null ? result : { ...result, reconciliationValidation: {
+        passed: true, openingBalanceDate: input.reconciliation.openingBalanceDate,
+        closingBalanceDate: input.reconciliation.closingBalanceDate,
+        accounts: [{ accountId: 10, accountFullName: "Assets:Checking", currencyCode: "USD", scale: 2,
+          requiredRemainingUnits: "-1234", proposedNewLineItemUnits: "-1234", residualUnits: "0", matches: true }],
+        issues: [],
+      } };
+    },
+    async previewSingleAccountStatementImport(input) {
+      oneSidedImport = input;
+      return { ...transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
+        importPlanId: "55555555-5555-4555-8555-555555555555", transactionCount: input.lines.length }),
+        questionSummary: { openQuestionCount: input.lines.length,
+          byAudience: { [input.questionAudience]: input.lines.length },
+          bySuspenseAccount: { "Assets:Ask Human": input.lines.length } } };
+    },
+    async reconcileAccountThroughDate(input) {
+      reconciledAccount = input;
+      return { accountId: input.accountId, accountName: "Checking", currencyId: 1, currencyCode: "USD",
+        scale: 2, balanceDate: input.balanceDate, assertionId: 77, knownBalanceUnits: "10000",
+        calculatedBalanceUnits: "10000", matches: true, totalLineCount: 4,
+        newlyReconciledLineCount: 3, alreadyReconciledLineCount: 1 };
     },
     async commitTransactionImportPlan(input) {
       committedTransactionPlan = input;
@@ -333,6 +358,12 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.some((tool) => tool.name === "list_transaction_import_exceptions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_transaction_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_transaction_import_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_statement_reconciliation_context"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "analyze_statement_observations"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "list_reference_rates"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "create_reference_rate"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "reconcile_account_through_date"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "search_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "refresh_transaction_delete_plan"), true);
@@ -346,10 +377,21 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.equal(tools.tools.every((tool) => ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
     .every((annotation) => typeof tool.annotations?.[annotation] === "boolean")), true);
   assert.equal(tools.tools.find((tool) => tool.name === "list_accounts").annotations.readOnlyHint, true);
+  assert.equal(tools.tools.find((tool) => tool.name === "list_account_objects").annotations.readOnlyHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "create_account").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "create_currency").annotations.readOnlyHint, false);
   assert.equal(tools.tools.find((tool) => tool.name === "import_account_tree").annotations.idempotentHint, false);
   assert.match(tools.tools.find((tool) => tool.name === "create_currency").description, /Never guess or choose a default scale/);
+  assert.match(tools.tools.find((tool) => tool.name === "get_statement_reconciliation_context").description,
+    /network fees make sent and received quantities differ/);
+  assert.match(tools.tools.find((tool) => tool.name === "get_statement_reconciliation_context").description,
+    /separate explicit fees from inferred spread or margin/);
+  assert.match(tools.tools.find((tool) => tool.name === "analyze_statement_observations").description,
+    /CSV, PDF, OCR, or a screenshot/);
+  assert.match(tools.tools.find((tool) => tool.name === "analyze_statement_observations").description,
+    /Same date and amount without stable identity remains a review candidate/);
+  assert.match(tools.tools.find((tool) => tool.name === "list_reference_rates").description,
+    /never let a price replace an account's actual statement quantity/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /even when new currency details or scales are unknown/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended batch/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /status=needs_input/);
@@ -424,6 +466,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const resources = await client.listResources();
   assert.equal(resources.resources.some((resource) => resource.uri === "accounting://manifest/capabilities/v1"), true);
   assert.equal(resources.resources.some((resource) => resource.uri === "accounting://context/currencies/active"), true);
+  assert.equal(resources.resources.some((resource) => resource.uri === "accounting://context/objects/accounts"), true);
   assert.equal(resources.resources.some((resource) =>
     resource.uri === "accounting://schemas/transaction-import-record/v1"), true);
   const resourceTemplates = await client.listResourceTemplates();
@@ -608,6 +651,17 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_plan_id: "11111111-1111-4111-8111-111111111111" },
   });
   assert.deepEqual(seen, ["currencies:7", 7, "currencies:7"]);
+  const accountObjects = await client.callTool({ name: "list_account_objects", arguments: {} });
+  assert.deepEqual(accountObjects.structuredContent.objects[0], {
+    objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10",
+    displayName: "Wallet", parentAccountId: null, accountType: "asset", currencyId: 1,
+    currencyCode: "USD", scale: 2, postable: true, archived: false,
+  });
+  assert.deepEqual(accountObjects.structuredContent.resultMetadata.sourceRefs, ["accounting://accounts/10"]);
+  const accountObjectResource = await client.readResource({ uri: "accounting://context/objects/accounts" });
+  const objectIndex = JSON.parse(accountObjectResource.contents[0].text);
+  assert.equal(objectIndex.contextView, "accounting.objects.accounts");
+  assert.equal(objectIndex.objects[0].sourceRef, "accounting://accounts/10");
 
   const missingScales = await client.callTool({
     name: "import_account_tree",
@@ -696,8 +750,56 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   assert.match(transactionPreview.structuredContent.import.nextAction.instruction, /^Commit .+\?/);
   assert.deepEqual(importedTransactions.transactions[0].lineItems[0], {
     externalId: "1", accountFullName: "Assets:Cash", amountDecimal: "-1.00",
-    valueDecimal: undefined, memo: undefined,
+    valueDecimal: undefined, memo: undefined, reconciliationState: "unreconciled",
   });
+
+  const reconciledPreview = await client.callTool({
+    name: "import_transactions",
+    arguments: {
+      source_system: "source_app",
+      transactions: [{
+        external_id: "tx-1", transaction_date: "2026-01-01", description: "Test",
+        valuation_currency_code: "USD",
+        line_items: [
+          { external_id: "1", account_full_name: "Assets:Cash", amount_decimal: "-1.00" },
+          { external_id: "2", account_full_name: "Expenses:Food", amount_decimal: "1.00" },
+        ],
+      }],
+      reconciliation: { account_ids: [10], opening_balance_date: "2025-12-31",
+        closing_balance_date: "2026-01-31" },
+      dry_run: true,
+    },
+  });
+  assert.equal(reconciledPreview.structuredContent.import.reconciliationValidation.passed, true);
+  assert.deepEqual(importedTransactions.reconciliation, { accountIds: [10],
+    openingBalanceDate: "2025-12-31", closingBalanceDate: "2026-01-31" });
+
+  const oneSidedPreview = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      source_system: "bank-statement", account_id: 10, suspense_account_id: 11,
+      valuation_currency_code: "USD", question_audience: "human",
+      lines: [{ external_id: "row-1", transaction_date: "2026-01-05",
+        description: "ACME", amount_decimal: "-12.50" }],
+      reconciliation: { opening_balance_date: "2025-12-31", closing_balance_date: "2026-01-31" },
+      dry_run: true,
+    },
+  });
+  assert.equal(oneSidedPreview.structuredContent.import.questionSummary.openQuestionCount, 1);
+  assert.deepEqual(oneSidedImport, {
+    pool: {}, personId: 7, sourceSystem: "bank-statement", accountId: 10, suspenseAccountId: 11,
+    valuationCurrencyCode: "USD", questionAudience: "human",
+    lines: [{ externalId: "row-1", transactionDate: "2026-01-05", description: "ACME",
+      amountDecimal: "-12.50", valueDecimal: undefined, memo: undefined, questionPrompt: undefined }],
+    reconciliation: { openingBalanceDate: "2025-12-31", closingBalanceDate: "2026-01-31" },
+  });
+
+  const marked = await client.callTool({ name: "reconcile_account_through_date", arguments: {
+    account_id: 10, balance_date: "2026-01-31",
+  } });
+  assert.equal(marked.structuredContent.reconciliation.newlyReconciledLineCount, 3);
+  assert.deepEqual(reconciledAccount, { pool: {}, personId: 7, accountId: 10,
+    balanceDate: "2026-01-31" });
 
   await client.callTool({
     name: "commit_transaction_import",
@@ -814,7 +916,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.4.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.7.0");
 
   await handler.close();
 });

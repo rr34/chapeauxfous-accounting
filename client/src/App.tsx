@@ -1,6 +1,7 @@
 import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
+import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CanonicalImportRecord, CurrencyType, TransactionDetail, TransactionImportException,
@@ -620,9 +621,11 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
   </div>;
 }
 
-function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null, token, onSaved }: {
+function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null,
+  layout = "standard", token, onSaved, onCancel }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
-  initialTransaction?: TransactionDetail | null; token: string; onSaved: () => Promise<void>;
+  initialTransaction?: TransactionDetail | null; layout?: "standard" | "register"; token: string;
+  onSaved: () => Promise<void>; onCancel?: () => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
@@ -635,7 +638,10 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
   const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(
     initialTransaction?.valuationCurrencyId ?? initialAccount?.currencyId ?? "");
   const [lines, setLines] = useState<EditableLine[]>(() => {
-    if (!initialTransaction) return [blankLine(initialAccountId == null ? "" : String(initialAccountId))];
+    if (!initialTransaction) {
+      const firstLine = blankLine(initialAccountId == null ? "" : String(initialAccountId));
+      return layout === "register" ? [firstLine, { ...blankLine(), autoBalance: true }] : [firstLine];
+    }
     const valuationScale = currencyMap.get(initialTransaction.valuationCurrencyId)?.scale ?? 2;
     return initialTransaction.lineItems.map((line) => {
       const amount = unitsToDecimal(line.amountUnits, line.scale);
@@ -781,8 +787,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     : !balanced ? `Out of balance by ${valueTotal ?? "an invalid value"} ${valuationCurrency.code}.`
     : `Balanced in ${valuationCurrency.code} and ready to ${initialTransaction ? "save" : "post"}.`;
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
     if (!canSubmit || !valuationCurrency) { setError(liveStatus); return; }
     setBusy(true); setError("");
     try {
@@ -804,6 +810,92 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusy(false); }
   }
+
+  if (layout === "register") return <>
+    <tr className="register-new-transaction-row">
+      <td><input type="date" aria-label="New transaction date" value={date}
+        onChange={(event) => setDate(event.target.value)} /></td>
+      <td className="register-description"><input autoFocus aria-label="New transaction description" value={description}
+        onChange={(event) => setDescription(event.target.value)} placeholder="Description" /></td>
+      <td><span className="register-new-label">New transaction</span></td><td /><td /><td /><td />
+    </tr>
+    {lines.map((line, index) => {
+      const lineAccount = accountMap.get(Number(line.accountId));
+      const isNative = Boolean(lineAccount && lineAccount.currencyId === resolvedValuationCurrencyId);
+      const amount = decimalParts(line.amount);
+      const value = decimalParts(line.value);
+      const isZeroValueAdjustment = Boolean(!isNative && lineAccount && amount && value
+        && amount.units !== 0n && value.units === 0n);
+      const canChooseRateDirection = Boolean(lineAccount && !isNative && !isZeroValueAdjustment);
+      const amountCurrencyCode = lineAccount?.currencyCode ?? "account currency";
+      const valueCurrencyCode = valuationCurrency?.code ?? "value currency";
+      const rateUnits = exchangeRateUnits(line.rateDirection, valueCurrencyCode, amountCurrencyCode);
+      const inverseRateUnits = exchangeRateUnits(oppositeRateDirection(line.rateDirection),
+        valueCurrencyCode, amountCurrencyCode);
+      return <Fragment key={index}>
+        <tr className={`register-inline-line ${line.autoBalance ? "auto-balanced" : ""}`}>
+          <td><span className="register-line-marker" aria-hidden="true">↳</span></td>
+          <td><input aria-label={`Memo for line ${index + 1}`} value={line.memo}
+            onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" /></td>
+          <td>{index === 0 && initialAccount
+            ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
+            : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
+                choices={accountChoices} onChange={(accountId) => updateLine(index, { accountId })} />}</td>
+          <td><input className="amount-input" inputMode="decimal" aria-label={`Debit for line ${index + 1}`}
+            value={amountForSide(line.amount, "debit")}
+            onChange={(event) => updateLineAmount(index, "debit", event.target.value)} /></td>
+          <td><input className="amount-input" inputMode="decimal" aria-label={`Credit for line ${index + 1}`}
+            value={amountForSide(line.amount, "credit")}
+            onChange={(event) => updateLineAmount(index, "credit", event.target.value)} /></td>
+          <td />
+          <td><button type="button" className="quiet" aria-label={`Remove line ${index + 1}`}
+            disabled={index === 0 || lines.length <= 1}
+            onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button></td>
+        </tr>
+        {showValuationDetails && <tr className="register-inline-value-row"><td /><td colSpan={6}>
+          <div className="register-inline-value-controls">
+            <label>Value in {valueCurrencyCode}<input inputMode="decimal" disabled={isNative} value={line.value}
+              onChange={(event) => updateLine(index, { value: event.target.value })} /></label>
+            <label>Exchange rate<span className="rate-input-group"><input inputMode="decimal"
+              placeholder={isZeroValueAdjustment ? "Not applicable" : undefined}
+              value={isNative ? "1" : isZeroValueAdjustment ? "" : line.rateDecimal}
+              disabled={isNative || isZeroValueAdjustment}
+              onChange={(event) => updateLineRate(index, event.target.value)} />
+              <button type="button" className="rate-invert" disabled={!canChooseRateDirection}
+                aria-label={canChooseRateDirection
+                  ? `Exchange rate shown as ${rateUnits}; click to show ${inverseRateUnits} for line ${index + 1}`
+                  : `Exchange rate units for line ${index + 1}: ${rateUnits}`}
+                onClick={() => invertLineRate(index)}><ExchangeRateFraction direction={line.rateDirection}
+                  valueCurrencyCode={valueCurrencyCode} amountCurrencyCode={amountCurrencyCode} /></button></span></label>
+            {!isNative && !isZeroValueAdjustment && <label>Changing rate updates<select value={line.rateChanges}
+              onChange={(event) => setLines((current) => current.map((candidate, candidateIndex) => candidateIndex === index
+                ? { ...candidate, rateChanges: event.target.value as "amount" | "value" } : candidate))}>
+              <option value="value">Value</option><option value="amount">Amount</option></select></label>}
+          </div>
+        </td></tr>}
+      </Fragment>;
+    })}
+    <tr className="register-inline-actions-row"><td /><td colSpan={6}>
+      <div className="register-inline-actions">
+        <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add line</button>
+        <label className="register-inline-currency">Value currency<select required value={valuationCurrencyId}
+          onChange={(event) => {
+            const nextId = event.target.value ? Number(event.target.value) : "";
+            setValuationCurrencyId(nextId);
+            setLines((current) => rebalanceLines(current.map((candidate) => synchronizeLine(candidate, Number(nextId))), Number(nextId)));
+          }}><option value="">Choose currency…</option>
+          <CurrencyOptions currencies={currencies} accounts={accounts} /></select></label>
+        <button type="button" className="link-button" aria-expanded={showValuationDetails}
+          onClick={() => setShowValuationDetails((current) => !current)}>
+          {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button>
+        <span className={`register-inline-status ${canSubmit ? "balanced" : "needs-attention"}`}>{liveStatus}</span>
+        {error && <span className="register-inline-error">{error}</span>}
+        <button type="button" className="link-button" onClick={onCancel}>Cancel</button>
+        <button type="button" className="primary" disabled={busy || !canSubmit} onClick={() => void submit()}>
+          {busy ? "Validating…" : "Post transaction"}</button>
+      </div>
+    </td></tr>
+  </>;
 
   return <section className="composer">
     <form onSubmit={submit}>
@@ -881,16 +973,6 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
         : initialTransaction ? "Save transaction" : "Validate and post"}</button>
     </form>
   </section>;
-}
-
-function TransactionComposerDialog({ accounts, currencies, initialAccountId, token, onCreated, onClose }: {
-  accounts: Account[]; currencies: Currency[]; initialAccountId: number | null; token: string;
-  onCreated: () => Promise<void>; onClose: () => void;
-}) {
-  return <TransactionEditorModal eyebrow="New entry" title="Balanced transaction" onClose={onClose}>
-    <TransactionComposer accounts={accounts} currencies={currencies} initialAccountId={initialAccountId}
-      token={token} onSaved={onCreated} />
-  </TransactionEditorModal>;
 }
 
 function TransactionEditDialog({ transaction, accounts, currencies, token, onSaved, onClose }: {
@@ -1506,14 +1588,16 @@ function formatRegisterDate(value: string) {
   return month ? `${match[3]} ${month} ${match[1]}` : value;
 }
 
-function AccountRegister({ account, entries, assertions, loading, error, token, onShowAll, onNewTransaction,
-  onEditTransaction, onChanged }: {
-  account: Account; entries: AccountLedgerEntry[]; assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
-  onShowAll: () => void; onNewTransaction: () => void; onEditTransaction: (transactionId: number) => void;
-  onChanged: () => Promise<void>;
+function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token, onShowAll,
+  onImportStatement, onEditTransaction, onTransactionCreated, onChanged }: {
+  account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
+  assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
+  onShowAll: () => void; onImportStatement: () => void; onEditTransaction: (transactionId: number) => void;
+  onTransactionCreated: () => Promise<void>; onChanged: () => Promise<void>;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
   const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
+  const [showNewTransaction, setShowNewTransaction] = useState(false);
   const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
   const [showKnownBalanceForm, setShowKnownBalanceForm] = useState(false);
   const [knownBalanceDate, setKnownBalanceDate] = useState(today());
@@ -1535,8 +1619,14 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
 
   useEffect(() => {
     setActiveTransactionId(null); setShowKnownBalanceForm(false); setKnownBalanceDate(today());
-    setKnownBalance(""); setKnownBalanceError("");
+    setKnownBalance(""); setKnownBalanceError(""); setShowNewTransaction(false);
   }, [account.id]);
+
+  const newTransactionRows = showNewTransaction && <TransactionComposer key={`new-${account.id}`}
+    accounts={accounts} currencies={currencies} initialAccountId={account.id} layout="register" token={token}
+    onCancel={() => setShowNewTransaction(false)} onSaved={async () => {
+      await onTransactionCreated(); setShowNewTransaction(false);
+    }} />;
 
   function activateTransaction(transactionId: number) {
     if (view === "auto-split") {
@@ -1573,6 +1663,7 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
           <span>Current balance</span>
           <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong>
         </div>
+        <button className="secondary" onClick={onImportStatement}>Import statement</button>
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {showKnownBalanceForm && <form id="known-balance-form" className="known-balance-form" onSubmit={saveKnownBalance}>
@@ -1597,7 +1688,8 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
     </div>
     {error && <p className="error">{error}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
-      : !error && registerRows.length === 0 ? <p className="register-message">No posted transactions or known balances in this account.</p>
+      : !error && registerRows.length === 0 && !showNewTransaction
+      ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>Split account</th>
           <th>Debit <span>({debitEffect} {account.type})</span></th>
@@ -1606,7 +1698,7 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
             className="known-balance-add" aria-label="Enter a known balance" aria-expanded={showKnownBalanceForm}
             aria-controls="known-balance-form" title="Enter a known balance"
             onClick={() => setShowKnownBalanceForm((current) => !current)}>+</button>}</th></tr></thead>
-        <tbody>{registerRows.map((row) => {
+        <tbody>{sortOrder === "recent" && newTransactionRows}{registerRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
             return <tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`} key={`assertion-${assertion.id}`}>
@@ -1661,9 +1753,11 @@ function AccountRegister({ account, entries, assertions, loading, error, token, 
               </div>
             </td></tr>}
           </Fragment>;
-        })}</tbody>
+        })}{sortOrder === "oldest" && newTransactionRows}</tbody>
       </table></div>}
-    <div className="register-actions"><button className="primary" onClick={onNewTransaction}>＋ New transaction</button></div>
+    {!showNewTransaction && !loading && !error && !account.placeholder && !account.archivedAt
+      && <div className="register-actions"><button className="primary"
+      onClick={() => setShowNewTransaction(true)}>＋ New transaction</button></div>}
   </section>;
 }
 
@@ -2091,7 +2185,6 @@ export default function App() {
   const [accountLedgerLoading, setAccountLedgerLoading] = useState(false);
   const [accountLedgerError, setAccountLedgerError] = useState("");
   const [accountLedgerRefresh, setAccountLedgerRefresh] = useState(0);
-  const [showTransactionComposer, setShowTransactionComposer] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<TransactionDetail | null>(null);
   const [verification, setVerification] = useState("");
   const [showAgentAccess, setShowAgentAccess] = useState(false);
@@ -2102,7 +2195,7 @@ export default function App() {
     scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
     deleteImportHistory: boolean;
   } | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<"chart" | "account" | "activity" | "misfits">(
+  const [workspaceView, setWorkspaceView] = useState<"chart" | "account" | "activity" | "misfits" | "statements">(
     () => window.location.hash === "#import-misfits" ? "misfits" : "chart",
   );
   const [loading, setLoading] = useState(true);
@@ -2126,8 +2219,8 @@ export default function App() {
     revealMainContent();
   }
 
-  function selectWorkspaceView(view: "chart" | "activity" | "misfits") {
-    setSelectedAccountId(null);
+  function selectWorkspaceView(view: "chart" | "activity" | "misfits" | "statements") {
+    if (view !== "statements") setSelectedAccountId(null);
     setWorkspaceView(view);
     if (view === "misfits" && window.location.hash !== "#import-misfits") {
       window.history.pushState(null, "", "#import-misfits");
@@ -2210,7 +2303,6 @@ export default function App() {
   async function refreshAfterTransaction() {
     await refresh();
     setAccountLedgerRefresh((current) => current + 1);
-    setShowTransactionComposer(false);
   }
   async function refreshAfterTransactionEdit(transactionId: number) {
     await refresh();
@@ -2263,6 +2355,8 @@ export default function App() {
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
           onClick={() => selectWorkspaceView("misfits")}>Import misfits
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
+        <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
+          onClick={() => selectWorkspaceView("statements")}>Statements &amp; questions</button>
       </nav>
       <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>
         {workspaceView === "chart"
@@ -2270,10 +2364,16 @@ export default function App() {
               token={token} onSelectAccount={selectAccount} onChanged={refresh} />
           : workspaceView === "misfits"
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
+          : workspaceView === "statements"
+          ? <StatementWorkspace accounts={accounts} assertions={assertions} token={token}
+              initialAccountId={selectedAccountId} onChanged={refresh} />
           : workspaceView === "account" && selectedAccount
-          ? <AccountRegister account={selectedAccount} entries={accountLedgerEntries} assertions={assertions}
+          ? <AccountRegister account={selectedAccount} accounts={accounts} currencies={currencies}
+              entries={accountLedgerEntries} assertions={assertions}
               loading={accountLedgerLoading} error={accountLedgerError} token={token}
-              onShowAll={() => selectWorkspaceView("activity")} onNewTransaction={() => setShowTransactionComposer(true)}
+              onShowAll={() => selectWorkspaceView("activity")}
+              onImportStatement={() => selectWorkspaceView("statements")}
+              onTransactionCreated={refreshAfterTransaction}
               onEditTransaction={(id) => void editTransaction(id)}
               onChanged={refresh} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
@@ -2295,9 +2395,6 @@ export default function App() {
       onDeleted={async () => {
         setSelected(null); await refresh(); setAccountLedgerRefresh((current) => current + 1);
       }} />}
-    {showTransactionComposer && <TransactionComposerDialog accounts={accounts} currencies={currencies}
-      initialAccountId={selectedAccount && !selectedAccount.placeholder && !selectedAccount.archivedAt ? selectedAccount.id : null}
-      token={token} onCreated={refreshAfterTransaction} onClose={() => setShowTransactionComposer(false)} />}
     {editingTransaction && <TransactionEditDialog key={editingTransaction.id} transaction={editingTransaction}
       accounts={accounts} currencies={currencies} token={token}
       onSaved={() => refreshAfterTransactionEdit(editingTransaction.id)} onClose={() => setEditingTransaction(null)} />}

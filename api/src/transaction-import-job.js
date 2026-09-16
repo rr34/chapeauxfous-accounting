@@ -44,6 +44,18 @@ export const transactionImportCanonicalJsonSchema = Object.freeze({
       maxLength: 128,
     },
     memo: { type: ["string", "null"], maxLength: 16000 },
+    question_audience: {
+      description: "Optional unresolved-classification audience, such as accountant or human. Supply question_prompt with it.",
+      type: ["string", "null"], minLength: 1, maxLength: 50,
+    },
+    question_prompt: {
+      description: "Optional unresolved classification or evidence question attached to this suspense line. Supply question_audience with it.",
+      type: ["string", "null"], minLength: 1, maxLength: 16000,
+    },
+    reconciliation_state: {
+      description: "Optional initial line state. Use cleared only for an exact authoritative statement line.",
+      type: "string", enum: ["unreconciled", "cleared"],
+    },
   },
 });
 
@@ -142,6 +154,22 @@ function canonicalRecordSchemaErrors(record, sourceOrdinal) {
   stringField("amount_decimal", { required: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
   stringField("value_decimal", { required: true, nullable: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
   stringField("memo", { nullable: true, maximum: 16000 });
+  stringField("question_audience", { nullable: true, minimum: 1, maximum: 50 });
+  stringField("question_prompt", { nullable: true, minimum: 1, maximum: 16000 });
+  stringField("reconciliation_state", { maximum: 12 });
+  if (record.reconciliation_state != null
+      && !new Set(["unreconciled", "cleared"]).has(record.reconciliation_state)) errors.push({
+    code: "INVALID_INITIAL_RECONCILIATION_STATE",
+    message: "reconciliation_state must be unreconciled or cleared.",
+    details: { ...details, field: "reconciliation_state" },
+  });
+  const hasQuestionAudience = typeof record.question_audience === "string" && record.question_audience.length > 0;
+  const hasQuestionPrompt = typeof record.question_prompt === "string" && record.question_prompt.length > 0;
+  if (hasQuestionAudience !== hasQuestionPrompt) errors.push({
+    code: "INCOMPLETE_ACCOUNTING_QUESTION",
+    message: "question_audience and question_prompt must be supplied together.",
+    details: { ...details, fields: ["question_audience", "question_prompt"] },
+  });
   return errors;
 }
 
@@ -188,6 +216,11 @@ export function groupCanonicalTransactionRecords(records) {
           amountDecimal: record.amount_decimal,
           valueDecimal: record.value_decimal,
           memo: record.memo ?? null,
+          question: record.question_audience && record.question_prompt ? {
+            audience: record.question_audience,
+            prompt: record.question_prompt,
+          } : null,
+          reconciliationState: record.reconciliation_state ?? "unreconciled",
         })),
       },
     };

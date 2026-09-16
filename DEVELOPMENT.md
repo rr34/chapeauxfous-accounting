@@ -306,6 +306,103 @@ Timestamped security, mutual-fund, commodity, and FX price history belongs in
 owned `xrates` rows with `xrate_type = 'reference'`. Posted accounting continues
 to use only the exact `transaction` rate copied into each transaction.
 
+### Multi-statement and crypto reconciliation
+
+Use `save_balance_assertion` to record the exact opening and closing native-unit
+balances shown by every statement in a reconciliation set. The opening assertion
+is the end-of-day balance immediately before the import interval; the closing
+assertion is the final end-of-day balance. Then call
+`get_statement_reconciliation_context` with all statement-backed account IDs and those
+two dates. For each account it returns the statement-required normal movement,
+the debit-positive movement already posted, and the exact remaining native-unit
+movement that imported lines must supply. A missing assertion leaves that
+account ungrounded rather than manufacturing a target.
+
+Analyze related statements together before importing either one. Match transfer
+counterparts using provider IDs, transaction hashes, timestamps, directions,
+and quantities. Sent and received quantities need not match: preserve the exact
+amount from each account's own statement and represent an evidenced difference
+as a fee. Give the joined transaction a stable composite external ID and retain
+each provider row ID as its line external ID. Use `import_transactions` for the
+joined, complete transaction so the ordinary preview and explicit-confirmation
+boundary still applies.
+
+The extraction source may be CSV, PDF, OCR, or a screenshot. Normalize only the
+visible facts into `analyze_statement_observations`: stable document and record
+IDs, statement account, date or timestamp, signed native amount, description,
+and a provider or blockchain reference when one is actually present. The server
+converts decimals with the account's established scale, compiles existing-ledger
+and overlapping-input duplicate candidates, ranks cross-statement transfer
+counterparts, and compares proposed new observation totals with the balance
+residual for every statement-backed account.
+
+Only an exact stable source-reference, account, amount, and nearby-date match is
+automatically excluded as an existing ledger duplicate. Equal account, amount,
+and date without stable identity is deliberately a review candidate because
+legitimate repeated payments exist. Source-reference conflicts block automatic
+assembly. Reuse the same source document and record IDs whenever a file or image
+is reprocessed.
+
+For the final `import_transactions` preview, supply its `reconciliation` object
+with the same statement-backed accounts and opening/closing dates. This is a
+hard server-side gate: planned new line amounts must exactly equal each
+account's remaining known-balance movement before a commit plan is created.
+The commit re-reads those assertions and posted movements and invalidates the
+plan if they changed. Duplicate and missing rows therefore cannot ordinarily be
+hidden by making the journal entry balance only in its valuation currency.
+
+If those checks still leave movement that is proven by the opening and closing
+balances but whose category is unknown, it may be posted explicitly as a
+balance-derived adjustment. The statement-account line uses the exact residual;
+the counterline goes to a user-selected ordinary postable suspense account of
+the same currency, such as `Ask Accountant` or `Ask Human`, and carries
+`question` metadata. These accounts are not created automatically and must not
+be placeholders. This closes the known balance while keeping the classification
+uncertainty visible instead of inventing a source row or category.
+
+`list_accounting_questions` returns those posted suspense lines. A receipt or
+later human decision resolves one with `resolve_accounting_question`, which
+reassigns only the suspense line to an active postable account of the same
+currency. Its native amount and valuation value remain unchanged, so the
+original transaction stays balanced and the already-proven statement-account
+movement is not disturbed. Resolved question metadata remains attached for
+audit and exact retries are idempotent. Older suspense lines can be enrolled
+with `open_accounting_question`.
+
+For a statement that authoritatively describes only one account, use
+`import_single_account_statement` instead of asking the caller to construct the
+unknown half of every journal entry. Select the statement account and one
+ordinary, active, same-currency suspense account. Each source line becomes its
+own balanced transaction: the source amount and value are copied unchanged to
+the statement account and marked `cleared`; the exact opposite amount and value
+go to the selected suspense account, remain `unreconciled`, and carry an open
+accounting question. All unknown counterlines therefore collect in one bucket
+without contaminating the authoritative account. Stable source IDs retain the
+ordinary import idempotency guarantees, and screenshot or overlapping-file
+imports still run through statement-observation duplicate analysis first.
+
+After saving the closing balance assertion and committing the statement import,
+`reconcile_account_through_date` compares that assertion with the posted normal
+balance under row locks. It changes the selected account's lines through that
+date to `reconciled` only on an exact native-unit match. The suspense lines live
+in another account, so they remain open and may later be reclassified without
+changing the reconciled side.
+
+Every joined transaction has one valuation currency. A foreign line keeps its
+actual native amount and separately carries its value in that valuation
+currency. Prefer an explicit statement value. `create_reference_rate` and
+`list_reference_rates` store and retrieve timestamped reference-only prices as
+exact positive native-unit ratios when a transaction-time value must be derived.
+Round a derived value once to the valuation currency's smallest unit. Reference
+prices never post accounting automatically and never replace statement
+quantities.
+
+For crypto transfers, an asset-denominated network-fee account can retain both
+the fee's native crypto quantity and its transaction-time fiat value. On a trade,
+record disclosed provider fees first; infer spread or margin only from the
+remaining fiat-value residual after the asset value and all explicit fees are
+accounted for. This prevents the same economic cost from being counted twice.
+
 ## Schema semantics
 
 `db/schema-semantics.json` is a tracked, reviewed build artifact. It covers the

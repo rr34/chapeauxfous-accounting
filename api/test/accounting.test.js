@@ -200,6 +200,34 @@ test("an existing transaction is updated atomically without replacing retained l
   assert.equal(statements.some(({ sql }) => sql.startsWith("INSERT INTO line_items")), false);
 });
 
+test("a reconciled account line cannot be moved or have its amount changed", async () => {
+  const runInTransaction = async (work) => work({
+    async query(sql) {
+      if (sql.includes("SELECT transaction_id, TransactionState")) return [[{
+        transaction_id: 44, TransactionState: "posted", TransactionDate: "2026-08-12",
+        valuation_currency_id: 3,
+      }]];
+      if (sql.includes("FROM currencies")) return [[{ currency_id: 3, owner_person_id: null,
+        CurrencyAbbreviation: "USD", display_name: "US Dollar", currency_type: "iso_4217", scale: 2 }]];
+      if (sql.includes("SELECT line_item_id") && !sql.includes("JOIN accounts")) return [[
+        { line_item_id: 10, account_id: 20, amount_units: "1250", value_units: "1250",
+          reconciliation_state: "reconciled" },
+        { line_item_id: 11, account_id: 21, amount_units: "-1250", value_units: "-1250",
+          reconciliation_state: "unreconciled" },
+      ]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  await assert.rejects(updateTransaction({
+    personId: 7, transactionId: 44, description: "Changed", transactionDate: "2026-08-12",
+    valuationCurrencyId: 3, rates: [], lineItems: [
+      { id: 10, accountId: 99, amountUnits: "1250", valueUnits: "1250" },
+      { id: 11, accountId: 21, amountUnits: "-1250", valueUnits: "-1250" },
+    ],
+  }, runInTransaction), (error) => error.code === "RECONCILED_LINE_IMMUTABLE"
+    && error.details.lineItemId === 10);
+});
+
 function fakeConnection({ lines, rates }) {
   return {
     async query(sql) {
