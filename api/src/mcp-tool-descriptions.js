@@ -54,7 +54,9 @@ const descriptions = {
   get_statement_reconciliation_context: read("Read bounded multi-statement balance and movement context before mapping joined statement entries."),
   analyze_statement_observations: read("Analyze extracted statement facts for duplicates, transfers, and balance consistency before import planning."),
   list_reference_rates: read("Read timestamped owner-scoped reference prices for valuation evidence in a bounded time range."),
-  create_reference_rate: mutate("Store one timestamped reference-only price from a verified source as an exact native-unit ratio.", ["CREATE"]),
+  get_reference_rate_import_schema: read("Read the canonical rate-record schema and artifact contract before mapping an uploaded price file."),
+  create_reference_rates: mutate("Create a bounded batch of prices supplied directly in the interaction; use artifact import for uploaded files.", ["CREATE"]),
+  import_reference_rates_artifact: mutate("Import a complete uploaded price series from a verified canonical artifact; reuse exact existing rates.", ["CREATE"]),
   verify_ledger: read("Audit posted transactions against double-entry and exchange-rate rules in bounded pages."),
 };
 

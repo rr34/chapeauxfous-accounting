@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.10.0";
+export const MCP_SERVER_VERSION = "0.11.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -237,11 +237,17 @@ export const balanceAssertionSchema = z.object({
 export const referenceRateSchema = z.object({
   id: z.number().int().positive(),
   validAt: z.string().datetime(),
-  fromUnits: z.string().regex(/^\d+$/),
+  fromUnits: z.string().regex(/^\d+$/).nullable()
+    .describe("Legacy positive source native units, or null when this reference price stores exact decimal quotes."),
+  fromDecimal: z.string().regex(/^\d+(?:\.\d+)?$/)
+    .describe("Exact positive source quantity in displayed currency units."),
   fromCurrencyId: z.number().int().positive(),
   fromCurrencyCode: z.string().min(1),
   fromScale: z.number().int().min(0).max(18),
-  toUnits: z.string().regex(/^\d+$/),
+  toUnits: z.string().regex(/^\d+$/).nullable()
+    .describe("Legacy positive target native units, or null when this reference price stores exact decimal quotes."),
+  toDecimal: z.string().regex(/^\d+(?:\.\d+)?$/)
+    .describe("Exact positive target quantity in displayed currency units."),
   toCurrencyId: z.number().int().positive(),
   toCurrencyCode: z.string().min(1),
   toScale: z.number().int().min(0).max(18),
@@ -370,6 +376,10 @@ export const statementObservationAnalysisSchema = z.object({
 export const CAPABILITY_MANIFEST_URI = "accounting://manifest/capabilities/v1";
 
 export const transactionImportArtifactUpload = artifactUploadContract;
+export const referenceRateArtifactUpload = Object.freeze({
+  ...artifactUploadContract,
+  transportId: "reference_rate_import",
+});
 
 export const accountingCapabilityManifest = Object.freeze({
   contractVersion: MCP_CONTRACT_VERSION,
@@ -442,18 +452,21 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.reconciliation",
       title: "Balance assertions and reconciliation",
-      summary: "Import one statement into one confirmed account using four ordered extraction answers and known balances.",
-      aliases: ["reconciliation", "balance checks", "statement import", "account statement"],
-      guidance: "The canonical attachment path is start_single_account_statement_import followed by import_single_account_statement. Extract only beginning balance/date and its date meaning, ending balance/date, signed line items, and available line text. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. The server stores the balance anchors, screens duplicates, builds balanced suspense counterlines, and refuses a commit plan when the statement does not ground the selected account.",
+      summary: "Reconcile account statements and import timestamped exchange-rate or market-price series, including BTC/USD CSV files.",
+      aliases: ["reconciliation", "balance checks", "statement import", "account statement",
+        "exchange rates", "reference prices", "bitcoin prices", "BTC/USD"],
+      guidance: "For an account statement attachment, start_single_account_statement_import followed by import_single_account_statement is the canonical path. Extract only beginning balance/date and its date meaning, ending balance/date, signed line items, and available line text. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. The server stores the balance anchors, screens duplicates, builds balanced suspense counterlines, and refuses a commit plan when the statement does not ground the selected account. For a market-price file, use the separate reference-rate schema and artifact import tools.",
       tools: ["list_balance_assertions", "list_balance_assertion_objects", "save_balance_assertion", "get_statement_reconciliation_context",
         "analyze_statement_observations",
-        "list_reference_rates", "create_reference_rate", "list_accounting_questions", "list_accounting_question_objects",
+        "list_reference_rates", "get_reference_rate_import_schema", "create_reference_rates",
+        "import_reference_rates_artifact", "list_accounting_questions", "list_accounting_question_objects",
         "open_accounting_question", "resolve_accounting_question",
         "start_single_account_statement_import", "import_single_account_statement", "reconcile_account_through_date"],
       dependencies: ["accounting.accounts", "accounting.currencies", "accounting.transactions"],
       attachmentHints: [
-        "Bind one CSV, PDF, image, OCR result, or screenshot to one confirmed accounting.account object.",
-        "Call start_single_account_statement_import before extracting or importing the attachment.",
+        "For an uploaded price CSV, get the reference-rate import schema, transform the full file to canonical JSON Lines, upload the successful-record artifact, and import it in one call; report any transform exceptions.",
+        "For a statement, bind one CSV, PDF, image, OCR result, or screenshot to one confirmed accounting.account object.",
+        "For a statement, call start_single_account_statement_import before extracting or importing the attachment.",
         "Answer its four questions in order and preserve printed balances, dates, signed amounts, and text exactly.",
         "Do not infer transfers, prices, fees, or final categories during initial statement intake.",
         "Use statement balances as native-unit anchors; never alter a source quantity to manufacture a match.",

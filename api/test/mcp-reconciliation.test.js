@@ -10,8 +10,9 @@ process.env.MYSQL_DATABASE = "accounting_test";
 
 const { createAccountingMcpServer } = await import("../src/mcp.js");
 
-const referenceRate = { id: 41, validAt: "2026-08-18T14:32:00.000Z", fromUnits: "100000000",
-  fromCurrencyId: 2, fromCurrencyCode: "BTC", fromScale: 8, toUnits: "6123456",
+const referenceRate = { id: 41, validAt: "2026-08-18T14:32:00.000Z", fromUnits: null,
+  fromDecimal: "1", fromCurrencyId: 2, fromCurrencyCode: "BTC", fromScale: 8,
+  toUnits: null, toDecimal: "61234.56",
   toCurrencyId: 1, toCurrencyCode: "USD", toScale: 2 };
 const openQuestion = {
   lineItemId: 901, transactionId: 81, transactionDate: "2026-08-31",
@@ -75,9 +76,19 @@ test("the MCP exposes grounded multi-statement context and reference prices", as
       seen.listRates = { personId, input };
       return { rates: [referenceRate], nextCursor: null };
     },
-    async createReferenceRate(input) {
-      seen.createRate = input;
-      return referenceRate;
+    async createReferenceRates(input) {
+      seen.createRates = input;
+      return { submittedCount: 1, createdCount: 1, reusedCount: 0,
+        outcomeRuns: [{ startIndex: 0, endIndex: 0, status: "created" }] };
+    },
+    async importReferenceRatesArtifact(input) {
+      seen.importRates = input;
+      return { submittedCount: 4889, createdCount: 4881, reusedCount: 8,
+        artifactSha256: `sha256:${"a".repeat(64)}`,
+        outcomeRuns: [
+          { startIndex: 0, endIndex: 7, status: "reused" },
+          { startIndex: 8, endIndex: 4888, status: "created" },
+        ] };
     },
     async getReferenceRate(_pool, personId, rateId) {
       seen.getRate = { personId, rateId };
@@ -140,13 +151,22 @@ test("the MCP exposes grounded multi-statement context and reference prices", as
   assert.equal(listed.structuredContent.referenceRates[0].fromCurrencyCode, "BTC");
   assert.equal(listed.structuredContent.resultMetadata.complete, true);
 
-  const created = await client.callTool({ name: "create_reference_rate", arguments: {
-    valid_at: "2026-08-18T14:32:00.000Z", from_units: "100000000", from_currency_id: 2,
-    to_units: "6123456", to_currency_id: 1,
+  const created = await client.callTool({ name: "create_reference_rates", arguments: { rates: [{
+    valid_at: "2026-08-18T14:32:00.000Z", from_decimal: "1", from_currency_id: 2,
+    to_decimal: "61234.56", to_currency_id: 1,
+  }] } });
+  assert.equal(created.structuredContent.effectReceipt.tool, "create_reference_rates");
+  assert.equal(created.structuredContent.createdCount, 1);
+  const schema = await client.callTool({ name: "get_reference_rate_import_schema", arguments: {} });
+  assert.equal(schema.structuredContent.canonical_schema.required.includes("to_decimal"), true);
+  assert.equal(schema.structuredContent.artifact_upload.transportId, "reference_rate_import");
+  const importedRates = await client.callTool({ name: "import_reference_rates_artifact", arguments: {
+    artifact_id: "11111111-1111-4111-8111-111111111111",
   } });
-  assert.equal(created.structuredContent.effectReceipt.tool, "create_reference_rate");
-  assert.equal(created.content.some((item) => item.type === "resource_link"
-    && item.uri === "accounting://reference-rates/41"), true);
+  assert.equal(importedRates.structuredContent.createdCount, 4881);
+  assert.equal(importedRates.structuredContent.effectReceipt.tool, "import_reference_rates_artifact");
+  assert.deepEqual(seen.importRates, { pool: {}, artifactRoot: undefined, personId: 7,
+    artifactId: "11111111-1111-4111-8111-111111111111" });
   const resource = await client.readResource({ uri: "accounting://reference-rates/41" });
   assert.equal(JSON.parse(resource.contents[0].text).referenceRate.id, 41);
   assert.deepEqual(seen.getRate, { personId: 7, rateId: "41" });

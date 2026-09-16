@@ -64,6 +64,7 @@ import {
   makeRetryDescriptor,
   MCP_CONTRACT_VERSION,
   MCP_SERVER_VERSION,
+  referenceRateArtifactUpload,
   referenceRateSchema,
   retryDescriptorSchema,
   resultMetadataSchema,
@@ -120,7 +121,11 @@ import {
   TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI,
   transactionImportCanonicalJsonSchema,
 } from "./transaction-import-job.js";
-import { createReferenceRate, getReferenceRate, listReferenceRatesPage } from "./reference-rates.js";
+import {
+  createReferenceRates, getReferenceRate, importReferenceRatesArtifact,
+  listReferenceRatesPage, referenceRateCanonicalJsonSchema,
+  REFERENCE_RATE_BATCH_MAX, REFERENCE_RATE_INLINE_MAX,
+} from "./reference-rates.js";
 import { analyzeStatementObservations } from "./statement-analysis.js";
 import { getStatementReconciliationContext } from "./statement-reconciliation.js";
 import {
@@ -412,7 +417,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     analyzeStatementObservations: services.analyzeStatementObservations ?? analyzeStatementObservations,
     listReferenceRatesPage: services.listReferenceRatesPage ?? listReferenceRatesPage,
     getReferenceRate: services.getReferenceRate ?? getReferenceRate,
-    createReferenceRate: services.createReferenceRate ?? createReferenceRate,
+    createReferenceRates: services.createReferenceRates ?? createReferenceRates,
+    importReferenceRatesArtifact: services.importReferenceRatesArtifact ?? importReferenceRatesArtifact,
     verifyAllPostedTransactions: services.verifyAllPostedTransactions ?? verifyAllPostedTransactions,
     verifyPostedTransactionsPage: services.verifyPostedTransactionsPage ?? verifyPostedTransactionsPage,
     listCurrenciesPage: services.listCurrenciesPage ?? (services.listCurrencies ? injectedPage(services.listCurrencies, "currencies") : listCurrenciesPage),
@@ -841,7 +847,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
   });
   const referenceRateMutationOutput = successOutputSchema({
-    referenceRate: referenceRateSchema, effectReceipt: effectReceiptSchema,
+    submittedCount: z.number().int().positive(), createdCount: z.number().int().nonnegative(),
+    reusedCount: z.number().int().nonnegative(),
+    outcomeRuns: z.array(z.object({
+      startIndex: z.number().int().nonnegative(), endIndex: z.number().int().nonnegative(),
+      status: z.enum(["created", "reused"]),
+    })),
+    artifactSha256: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+    effectReceipt: effectReceiptSchema,
   });
   const ledgerVerificationOutput = successOutputSchema({
     valid: z.boolean(), checked: z.number().int().nonnegative(),
@@ -2636,7 +2649,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("list_reference_rates", {
     title: "List timestamped reference rates",
-    description: "Read owner-scoped timestamped reference prices as exact positive native-unit ratios. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
+    description: "Read owner-scoped timestamped reference prices as exact positive decimal quotes, with native-unit ratios retained for legacy rates. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
     inputSchema: {
       from_currency_id: positiveInteger("Optional source currency or asset.").optional(),
       to_currency_id: positiveInteger("Optional valuation currency.").optional(),
@@ -2660,32 +2673,62 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       };
     }));
 
-  registerTool("create_reference_rate", {
-    title: "Create timestamped reference rate",
-    description: "Store one owner-scoped, reference-only price from statement or externally verified evidence as an exact positive native-unit ratio. Use the evidence timestamp in UTC and preserve the source quantity separately in transaction lines. This does not post accounting and does not automatically value a transaction.",
-    inputSchema: {
-      valid_at: z.string().datetime({ offset: false }).describe("UTC evidence timestamp ending in Z."),
-      from_units: z.string().regex(/^\d+$/).describe("Positive source-currency native units."),
-      from_currency_id: positiveInteger("Source currency or asset."),
-      to_units: z.string().regex(/^\d+$/).describe("Positive target-currency native units."),
-      to_currency_id: positiveInteger("Target valuation currency."),
-    },
+  registerTool("get_reference_rate_import_schema", {
+    title: "Get reference rate import schema",
+    description: "Read the authoritative JSON Schema for one canonical reference-rate record. For a dated CSV price series, use file_table_transform to create application/x-ndjson without putting every row in model context; map source_record_number for error correlation. A date-only valid_at means 00:00:00 UTC on that date. from_decimal and to_decimal are positive quantities in the currencies' displayed units; for a USD price of one BTC, use from_decimal=1 and to_decimal equal to the USD close price. Accounting stores both decimal strings exactly as supplied, with no rounding or precision adjustment. The transform's exceptions file retains invalid or blank source rows for reporting.",
+    inputSchema: {},
+    outputSchema: successOutputSchema({
+      canonical_schema: z.json(), artifact_upload: z.json(), maximum_records: z.number().int().positive(),
+    }),
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation"),
+  }, async () => safeToolResult(async () => ({
+    canonical_schema: referenceRateCanonicalJsonSchema,
+    artifact_upload: referenceRateArtifactUpload,
+    maximum_records: REFERENCE_RATE_BATCH_MAX,
+  })));
+
+  const referenceRateItemInput = z.object({
+    valid_at: z.string().describe("UTC ISO timestamp ending in Z, or YYYY-MM-DD for midnight UTC."),
+    from_currency_id: positiveInteger("Source currency or asset."),
+    to_currency_id: positiveInteger("Target valuation currency."),
+    from_decimal: z.string().max(256).regex(/^\d+(?:\.\d+)?$/)
+      .describe("Positive source quantity in displayed currency units; usually 1 for a daily price."),
+    to_decimal: z.string().max(256).regex(/^\d+(?:\.\d+)?$/)
+      .describe("Positive target quantity in displayed currency units; for BTC/USD, the USD price of the source quantity."),
+    source_record_number: z.number().int().positive().optional()
+      .describe("Original one-based source data row number, when this rate came from a file."),
+  });
+  registerTool("create_reference_rates", {
+    title: "Create timestamped reference rates",
+    description: `Atomically store 1 through ${REFERENCE_RATE_INLINE_MAX} owner-scoped reference prices created directly in this interaction. One item uses the same collection. Duplicate pair-and-time targets in the request are rejected; exact existing ratios are reused; a different existing value causes the entire batch to fail without inserts. Both decimal strings are stored exactly as supplied, with no rounding. Outcomes are run-length encoded by zero-based input index, with one effect receipt for the whole call. File-originated data must use get_reference_rate_import_schema, file_table_transform, artifact upload, and import_reference_rates_artifact. Rates are evidence only and do not post ledger entries.`,
+    inputSchema: { rates: z.array(referenceRateItemInput).min(1).max(REFERENCE_RATE_INLINE_MAX) },
     outputSchema: referenceRateMutationOutput,
-    annotations: writesData,
+    annotations: idempotentWrite,
     _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_currencies"] }),
-  }, async ({ valid_at, from_units, from_currency_id, to_units, to_currency_id }) => safeToolResult(async () => {
-    const args = { valid_at, from_units, from_currency_id, to_units, to_currency_id };
-    const referenceRate = await accounting.createReferenceRate({
-      pool, personId, validAt: valid_at, fromUnits: from_units, fromCurrencyId: from_currency_id,
-      toUnits: to_units, toCurrencyId: to_currency_id,
-    });
-    return {
-      referenceRate,
-      effectReceipt: effectReceipt("create_reference_rate", args, "created", [
-        { type: "reference_rate", id: referenceRate.id },
-      ]),
-    };
-  }));
+  }, async ({ rates }) => safeWorkflowResult(async () => {
+    const result = await accounting.createReferenceRates({ pool, personId, rates });
+    return { ...result, effectReceipt: effectReceipt("create_reference_rates", { rates },
+      result.createdCount ? "created" : "unchanged", []) };
+  }, { retryTool: "create_reference_rates", preserveEntireBatch: true }));
+
+  registerTool("import_reference_rates_artifact", {
+    title: "Import complete reference rate artifact",
+    description: `Atomically consume one completed, SHA-256-verified canonical application/x-ndjson artifact of 1 through ${REFERENCE_RATE_BATCH_MAX} reference-rate records. Use get_reference_rate_import_schema and file_table_transform on an uploaded price CSV, upload the generated successful-record JSON Lines file through the advertised resumable artifact tool, then call this tool with only artifact_id. Accounting validates every record before writing, reuses exact pair-and-time matches including partial earlier imports, rejects conflicts, and returns counts and compact per-item outcome ranges. Transform exceptions remain a separate generated file and must be reported. An exact replay is safe.`,
+    inputSchema: { artifact_id: z.string().trim().uuid() },
+    outputSchema: referenceRateMutationOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["get_reference_rate_import_schema", "list_currencies"],
+      artifactUpload: referenceRateArtifactUpload,
+    }),
+  }, async ({ artifact_id }) => safeWorkflowResult(async () => {
+    const result = await accounting.importReferenceRatesArtifact({ pool, artifactRoot, personId,
+      artifactId: artifact_id });
+    return { ...result, effectReceipt: effectReceipt("import_reference_rates_artifact",
+      { artifact_id, artifact_sha256: result.artifactSha256 },
+      result.createdCount ? "created" : "unchanged", []) };
+  }, { retryTool: "import_reference_rates_artifact", preserveEntireBatch: true }));
 
   registerTool("verify_ledger", {
     title: "Verify ledger",

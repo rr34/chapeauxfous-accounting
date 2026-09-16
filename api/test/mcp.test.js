@@ -429,7 +429,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(tools.tools.some((tool) => tool.name === "get_statement_reconciliation_context"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "analyze_statement_observations"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "list_reference_rates"), true);
-  assert.equal(tools.tools.some((tool) => tool.name === "create_reference_rate"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "create_reference_rates"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_reference_rate_import_schema"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "import_reference_rates_artifact"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "create_reference_rate"), false);
+  assert.equal(tools.tools.find((tool) => tool.name === "import_reference_rates_artifact")
+    ._meta["agent-slayer/artifactUpload"].transportId, "reference_rate_import");
   assert.equal(tools.tools.some((tool) => tool.name === "start_single_account_statement_import"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "reconcile_account_through_date"), true);
@@ -1017,7 +1022,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.10.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.11.0");
 
   await handler.close();
 });
