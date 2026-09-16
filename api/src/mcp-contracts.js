@@ -6,7 +6,8 @@ import {
   artifactUploadContract,
 } from "./artifact-upload.js";
 
-export const MCP_CONTRACT_VERSION = 2;
+// Existing MCP clients cache output schemas; only bump this for an incompatible response shape.
+export const MCP_CONTRACT_VERSION = 1;
 export const MCP_SERVER_VERSION = "0.8.0";
 
 const jsonObjectSchema = z.record(z.string(), z.json());

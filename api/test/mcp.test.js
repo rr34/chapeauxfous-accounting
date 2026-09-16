@@ -492,7 +492,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     template.uriTemplate === "accounting://transaction-delete-plans/{planId}"), true);
   const manifestResource = await client.readResource({ uri: "accounting://manifest/capabilities/v1" });
   const manifest = JSON.parse(manifestResource.contents[0].text);
-  assert.equal(manifest.contractVersion, 2);
+  assert.equal(manifest.contractVersion, 1);
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(transactionCapability.summary, /permanently delete/);
@@ -605,7 +605,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     displayName: "Vanguard Total Stock Market Index Fund Admiral Shares",
     type: "security", scale: 4,
   });
-  assert.equal(createCurrencyResult.structuredContent.contractVersion, 2);
+  assert.equal(createCurrencyResult.structuredContent.contractVersion, 1);
   assert.equal(createCurrencyResult.structuredContent.status, "success");
   assert.equal(createCurrencyResult.structuredContent.effectReceipt.tool, "create_currency");
   assert.match(createCurrencyResult.structuredContent.effectReceipt.argumentsSha256, /^sha256:/);
@@ -616,6 +616,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
 
   const result = await client.callTool({ name: "list_accounts", arguments: {} });
   assert.deepEqual(seen, ["currencies:7", 7]);
+  assert.equal(result.structuredContent.contractVersion, 1);
   assert.equal(result.structuredContent.accounts[0].name, "Wallet");
   assert.equal(
     result.structuredContent.schemaProjection.product,
@@ -718,7 +719,7 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
     arguments: { import_plan_id: "22222222-2222-4222-8222-222222222222" },
   });
   assert.equal(missingPlan.isError, true);
-  assert.equal(missingPlan.structuredContent.contractVersion, 2);
+  assert.equal(missingPlan.structuredContent.contractVersion, 1);
   assert.equal(missingPlan.structuredContent.status, "error");
   assert.equal(missingPlan.structuredContent.code, "IMPORT_PLAN_NOT_FOUND");
   assert.equal(missingPlan.structuredContent.recoverable, true);
