@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.9.0";
+export const MCP_SERVER_VERSION = "0.10.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -420,12 +420,12 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Read, create, import, permanently delete, and verify owner-scoped double-entry transactions.",
       aliases: ["transactions", "journal entries", "ledger entries"],
       guidance: "Every posted transaction must balance in its valuation currency. Permanent deletion requires an MCP preview, one explicit confirmation, and the exact matching commit operation.",
-      tools: ["search_transactions", "list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
+      tools: ["search_transactions", "list_transaction_objects", "list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
         "create_transaction_import_job", "stage_transaction_import_artifact", "stage_transaction_import_chunk", "retry_transaction_import_exception",
-        "exclude_transaction_import_exception", "list_transaction_import_jobs", "get_transaction_import_job",
+        "exclude_transaction_import_exception", "list_transaction_import_jobs", "list_transaction_import_job_objects", "get_transaction_import_job",
         "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
-        "commit_transaction_import", "list_accounting_questions", "open_accounting_question", "resolve_accounting_question",
+        "commit_transaction_import", "list_accounting_questions", "list_accounting_question_objects", "open_accounting_question", "resolve_accounting_question",
         "preview_delete_transactions", "refresh_transaction_delete_plan", "get_transaction_delete_plan",
         "commit_delete_transactions", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
@@ -445,9 +445,9 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Import one statement into one confirmed account using four ordered extraction answers and known balances.",
       aliases: ["reconciliation", "balance checks", "statement import", "account statement"],
       guidance: "The canonical attachment path is start_single_account_statement_import followed by import_single_account_statement. Extract only beginning balance/date and its date meaning, ending balance/date, signed line items, and available line text. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. The server stores the balance anchors, screens duplicates, builds balanced suspense counterlines, and refuses a commit plan when the statement does not ground the selected account.",
-      tools: ["list_balance_assertions", "save_balance_assertion", "get_statement_reconciliation_context",
+      tools: ["list_balance_assertions", "list_balance_assertion_objects", "save_balance_assertion", "get_statement_reconciliation_context",
         "analyze_statement_observations",
-        "list_reference_rates", "create_reference_rate", "list_accounting_questions",
+        "list_reference_rates", "create_reference_rate", "list_accounting_questions", "list_accounting_question_objects",
         "open_accounting_question", "resolve_accounting_question",
         "start_single_account_statement_import", "import_single_account_statement", "reconcile_account_through_date"],
       dependencies: ["accounting.accounts", "accounting.currencies", "accounting.transactions"],

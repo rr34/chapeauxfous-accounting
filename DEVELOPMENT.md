@@ -178,11 +178,17 @@ schemas. Keep the routing summary specific to the domain outcome; an exchange
 name in a ledger account does not require an exchange integration to read that
 account through `list_accounts`.
 
-`list_account_objects` publishes `_meta["agent-slayer/objects"]` using the
-Remote Object Description version-1 contract. The account object has a stable
-`sourceRef`, a full-path `displayName`, selected qualifiers, and the account
-read tool as its authoritative source. Object metadata describes a type; only
-the owner-scoped read result proves that a particular account exists.
+Five owner-scoped read tools publish `_meta["agent-slayer/objects"]` using the
+Remote Object Description version-1 contract: `list_account_objects`,
+`list_transaction_objects`, `list_accounting_question_objects`,
+`list_transaction_import_job_objects`, and `list_balance_assertion_objects`.
+Each item has a stable `sourceRef`, compact `displayName`, and selected
+qualifiers. The account, transaction, question, import-job, and balance-assertion
+types are separate user-referable objects; line items, tags, rates, and commit
+plans remain parts or references of those objects. Each described read tool
+enforces owner scope and returns bounded pages or one exact known ID. Object
+metadata describes a type; only an owner-scoped read result proves that a
+particular record exists.
 
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated

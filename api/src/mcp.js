@@ -78,7 +78,20 @@ import {
   transactionSchema,
 } from "./mcp-contracts.js";
 import { accountingToolDescriptions } from "./mcp-tool-descriptions.js";
-import { accountObjectDescription } from "./mcp-object-descriptions.js";
+import {
+  accountObjectDescription,
+  accountingQuestionObjectDescription,
+  balanceAssertionObjectDescription,
+  transactionImportJobObjectDescription,
+  transactionObjectDescription,
+} from "./mcp-object-descriptions.js";
+import {
+  accountingQuestionObject,
+  balanceAssertionObject,
+  loadAccountObjectPaths,
+  listTransactionObjectsPage,
+  listTransactionImportJobObjectsPage,
+} from "./accounting-objects.js";
 import {
   accountingQuestionTags,
   getAccountingQuestion,
@@ -353,6 +366,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     createCurrency: services.createCurrency ?? createCurrency,
     listAccounts: services.listAccounts ?? listAccounts,
     listAccountsPage: services.listAccountsPage ?? (services.listAccounts ? injectedPage(services.listAccounts, "accounts") : listAccountsPage),
+    loadAccountObjectPaths: services.loadAccountObjectPaths ?? loadAccountObjectPaths,
     getAccount: services.getAccount ?? getAccount,
     createAccount: services.createAccount ?? createAccount,
     updateAccount: services.updateAccount ?? updateAccount,
@@ -362,6 +376,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     listTransactions: services.listTransactions ?? listTransactions,
     listTransactionsPage: services.listTransactionsPage ?? (services.listTransactions ? injectedPage(services.listTransactions, "transactions") : listTransactionsPage),
     searchTransactionsPage: services.searchTransactionsPage ?? searchTransactionsPage,
+    listTransactionObjectsPage: services.listTransactionObjectsPage ?? listTransactionObjectsPage,
     getTransaction: services.getTransaction ?? getTransaction,
     createTransaction: services.createTransaction ?? createTransaction,
     getAccountingQuestion: services.getAccountingQuestion ?? getAccountingQuestion,
@@ -381,6 +396,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     excludeTransactionImportException: services.excludeTransactionImportException ?? excludeTransactionImportException,
     getTransactionImportJob: services.getTransactionImportJob ?? getTransactionImportJob,
     listTransactionImportJobs: services.listTransactionImportJobs ?? listTransactionImportJobs,
+    listTransactionImportJobObjectsPage: services.listTransactionImportJobObjectsPage ?? listTransactionImportJobObjectsPage,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
@@ -475,7 +491,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     mimeType: "application/json",
   }, async (uri) => {
     const page = await accounting.listAccountsPage(pool, personId, { limit: 500 });
-    const pathAccounts = await accounting.listAccounts(pool, personId);
+    const pathAccounts = await accounting.loadAccountObjectPaths(pool, personId, page.accounts);
     const objects = accountObjectContext(page.accounts, pathAccounts);
     const value = {
       contractVersion: MCP_CONTRACT_VERSION,
@@ -645,6 +661,68 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         tool: z.literal("start_single_account_statement_import"),
       })).describe("Provider-declared actions available for this account object."),
     })).describe("Owner-scoped account objects returned by this page."),
+    resultMetadata: resultMetadataSchema,
+  });
+  const transactionObjectOutput = successOutputSchema({
+    objects: z.array(z.object({
+      objectType: z.literal("accounting.transaction").describe("First-class transaction object type."),
+      id: z.number().int().positive().describe("Stable owner-scoped transaction ID."),
+      sourceRef: z.string().min(1).describe("Stable accounting://transactions/{id} reference."),
+      displayName: z.string().min(1).describe("Compact date and transaction description."),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Accounting calendar date."),
+      state: z.enum(["draft", "posted", "voided"]).describe("Transaction lifecycle state."),
+      valuationCurrencyCode: z.string().min(1).describe("Currency in which transaction values balance."),
+      accountIds: z.array(z.number().int().positive()).describe("Accounts receiving this transaction's postings."),
+      matchedFields: z.array(z.string().min(1)).describe("Fields matched by the selected search filters."),
+    })).describe("Owner-scoped transactions in this page."),
+    resultMetadata: resultMetadataSchema,
+  });
+  const accountingQuestionObjectOutput = successOutputSchema({
+    objects: z.array(z.object({
+      objectType: z.literal("accounting.question").describe("First-class accounting question object type."),
+      id: z.number().int().positive().describe("Stable ID of the suspense posting that carries this question."),
+      sourceRef: z.string().min(1).describe("Stable accounting://questions/{id} reference."),
+      displayName: z.string().min(1).describe("Compact transaction date and question prompt."),
+      transactionId: z.number().int().positive().describe("Transaction containing the question's posting."),
+      accountId: z.number().int().positive().describe("Account currently receiving the question's posting."),
+      accountFullName: z.string().min(1).describe("Full current path of that account."),
+      transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Accounting date of the transaction."),
+      amountUnits: z.string().regex(/^-?\d+$/).describe("Signed amount in the posting account's native units."),
+      currencyCode: z.string().min(1).describe("Native currency of the posting account."),
+      status: z.enum(["open", "resolved"]).describe("Current question resolution state."),
+      audience: z.string().min(1).describe("Person or role expected to answer the question."),
+      prompt: z.string().min(1).describe("Complete stored question text."),
+    })).describe("Owner-scoped accounting questions in this page."),
+    resultMetadata: resultMetadataSchema,
+  });
+  const transactionImportJobObjectOutput = successOutputSchema({
+    objects: z.array(z.object({
+      objectType: z.literal("accounting.transaction_import_job").describe("First-class import-job object type."),
+      id: z.string().uuid().describe("Stable provider-owned import-job ID."),
+      sourceRef: z.string().min(1).describe("Stable accounting://transaction-import-jobs/{id} reference."),
+      displayName: z.string().min(1).describe("Compact source name, creation date, and job state."),
+      sourceSystem: z.string().min(1).describe("External-system namespace of the source records."),
+      fileName: z.string().nullable().describe("Optional informational source filename."),
+      jobStatus: z.enum(["receiving", "review_ready", "committed"]).describe("Current durable job state."),
+      expectedRecordCount: z.number().int().nonnegative().describe("Total original source records expected."),
+      createdAt: z.string().min(1).describe("UTC time the job was created."),
+      updatedAt: z.string().min(1).describe("UTC time the job last changed."),
+    })).describe("Owner-scoped import jobs in this page."),
+    resultMetadata: resultMetadataSchema,
+  });
+  const balanceAssertionObjectOutput = successOutputSchema({
+    objects: z.array(z.object({
+      objectType: z.literal("accounting.balance_assertion").describe("First-class balance assertion object type."),
+      id: z.number().int().positive().describe("Stable owner-scoped balance assertion ID."),
+      sourceRef: z.string().min(1).describe("Stable accounting://balance-assertions/{id} reference."),
+      displayName: z.string().min(1).describe("Compact date, account name, and known native-currency balance."),
+      accountId: z.number().int().positive().describe("Account whose end-of-day balance was asserted."),
+      accountName: z.string().min(1).describe("Current local name of that account."),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("End-of-day accounting calendar date."),
+      knownBalanceUnits: z.string().regex(/^-?\d+$/).describe("Signed known balance in the account's native units."),
+      currencyCode: z.string().min(1).describe("Native accounting-unit code of the balance."),
+      matches: z.boolean().describe("Whether the known and calculated ledger balances match at read time."),
+    })).describe("Owner-scoped balance assertions in this page."),
     resultMetadata: resultMetadataSchema,
   });
   const accountCreateOutput = successOutputSchema({
@@ -1024,8 +1102,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("list_account_objects", {
     title: "List account objects",
-    description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. Use IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import. Follow nextCursor until complete.",
+    description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. account_id reads one exact object; otherwise follow nextCursor until complete. Use IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import.",
     inputSchema: {
+      account_id: positiveInteger("Read one exact owner-scoped account object when known.").optional(),
       limit: z.number().int().min(1).max(500).default(100),
       cursor: z.string().regex(/^\d+$/).nullable().optional(),
     },
@@ -1037,9 +1116,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       ] }),
       "agent-slayer/objects": accountObjectDescription,
     },
-  }, async ({ limit, cursor }) => safeToolResult(async () => {
-    const page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
-    const pathAccounts = await accounting.listAccounts(pool, personId);
+  }, async ({ account_id, limit, cursor }) => safeToolResult(async () => {
+    const page = account_id == null
+      ? await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor })
+      : { accounts: [await accounting.getAccount(pool, personId, account_id)], nextCursor: null };
+    const pathAccounts = await accounting.loadAccountObjectPaths(pool, personId, page.accounts);
     const objects = accountObjectContext(page.accounts, pathAccounts);
     return {
       objects,
@@ -1546,6 +1627,34 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     };
   }));
 
+  registerTool("list_transaction_objects", {
+    title: "List transaction objects",
+    description: "Find owner-scoped accounting.transaction objects by description, posting memo, account name, account ID, date range, or exact transaction ID. The compact result identifies real transactions and participating account IDs; call get_transaction for complete postings. An exact transaction_id cannot be combined with other filters. Follow nextCursor until complete.",
+    inputSchema: {
+      text: z.string().trim().min(1).max(255).optional()
+        .describe("Case-insensitive text in transaction description, posting memo, or account name."),
+      account_id: positiveInteger("Include transactions posting directly to this owner-scoped account.").optional(),
+      date_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      date_to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      transaction_id: positiveInteger("Read one exact owner-scoped transaction object when known.").optional(),
+      limit: z.number().int().min(1).max(100).default(25),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: transactionObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.transactions"),
+      "agent-slayer/objects": transactionObjectDescription,
+    },
+  }, async (input) => safeToolResult(async () => {
+    const page = await accounting.listTransactionObjectsPage(pool, personId, {
+      transactionId: input.transaction_id,
+      text: input.text, accountId: input.account_id, dateFrom: input.date_from, dateTo: input.date_to,
+      limit: input.limit, cursor: input.cursor,
+    });
+    return { objects: page.objects, resultMetadata: pageMetadata(page.objects, page.nextCursor, "transactions") };
+  }));
+
   registerTool("list_transactions", {
     title: "List transactions",
     description: "Use to read recent owner-scoped transactions newest first. A successful page proves the returned transaction summaries were visible at read time; follow nextCursor until complete.",
@@ -1682,6 +1791,36 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         sourceRefs: page.questions.map((question) => `accounting://questions/${question.lineItemId}`),
       },
     };
+  }));
+
+  registerTool("list_accounting_question_objects", {
+    title: "List accounting question objects",
+    description: "Read owner-scoped accounting.question objects for posted suspense lines. line_item_id reads one exact question; otherwise query open or resolved questions separately and follow nextCursor until complete. Use the question reference to verify the exact posting before resolving it.",
+    inputSchema: {
+      line_item_id: positiveInteger("Read one exact owner-scoped question object when known.").optional(),
+      status: z.enum(["open", "resolved"]).default("open"),
+      audience: z.string().trim().min(1).max(50).nullable().optional(),
+      account_id: positiveInteger("Optional suspense account ID.").nullable().optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: accountingQuestionObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.reconciliation"),
+      "agent-slayer/objects": accountingQuestionObjectDescription,
+    },
+  }, async ({ line_item_id, status, audience, account_id, limit, cursor }) => safeToolResult(async () => {
+    const page = line_item_id == null
+      ? await accounting.listAccountingQuestionsPage(pool, personId, {
+        status, audience, accountId: account_id, limit, afterLineItemId: cursor,
+      })
+      : { questions: [await accounting.getAccountingQuestion(pool, personId, line_item_id)], nextCursor: null };
+    const objects = page.questions.map(accountingQuestionObject);
+    return { objects, resultMetadata: {
+      ...pageMetadata(objects, page.nextCursor, "questions"),
+      sourceRefs: objects.map((object) => object.sourceRef),
+    } };
   }));
 
   registerTool("open_accounting_question", {
@@ -2157,6 +2296,30 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     jobs: await accounting.listTransactionImportJobs({ pool, personId, limit }),
   })));
 
+  registerTool("list_transaction_import_job_objects", {
+    title: "List transaction import job objects",
+    description: "Read durable owner-scoped accounting.transaction_import_job objects directly from stored job identity and lifecycle fields. Filter by source system or filename, read one exact ID, or follow nextCursor until complete. Use get_transaction_import_job for full progress and exception details.",
+    inputSchema: {
+      import_job_id: z.string().uuid().optional().describe("Read one exact owner-scoped import job object when known."),
+      text: z.string().trim().min(1).max(255).optional()
+        .describe("Case-insensitive substring in source system or source filename."),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().uuid().nullable().optional(),
+    },
+    outputSchema: transactionImportJobObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.transactions"),
+      "agent-slayer/objects": transactionImportJobObjectDescription,
+    },
+  }, async ({ import_job_id, text, limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listTransactionImportJobObjectsPage(pool, personId, {
+      importJobId: import_job_id, text, limit, cursor,
+    });
+    return { objects: page.objects,
+      resultMetadata: pageMetadata(page.objects, page.nextCursor, "transaction-import-jobs") };
+  }));
+
   registerTool("get_transaction_import_job", {
     title: "Get transaction import job",
     description: "Read the durable owner-scoped state and reconcilable progress of one logical import job across connections, chunks, and retries.",
@@ -2332,6 +2495,28 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       assertions: page.assertions,
       resultMetadata: pageMetadata(page.assertions, page.nextCursor, "balance-assertions"),
     };
+  }));
+
+  registerTool("list_balance_assertion_objects", {
+    title: "List balance assertion objects",
+    description: "Read owner-scoped accounting.balance_assertion objects for dated known account balances. assertion_id reads one exact assertion; otherwise follow nextCursor until complete. The matches qualifier reflects the ledger at read time and can change after postings change.",
+    inputSchema: {
+      assertion_id: positiveInteger("Read one exact owner-scoped balance assertion object when known.").optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: balanceAssertionObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.reconciliation"),
+      "agent-slayer/objects": balanceAssertionObjectDescription,
+    },
+  }, async ({ assertion_id, limit, cursor }) => safeToolResult(async () => {
+    const page = assertion_id == null
+      ? await accounting.listBalanceAssertionsPage(pool, personId, { limit, beforeAssertionId: cursor })
+      : { assertions: [await accounting.getBalanceAssertion(pool, personId, assertion_id)], nextCursor: null };
+    const objects = page.assertions.map(balanceAssertionObject);
+    return { objects, resultMetadata: pageMetadata(objects, page.nextCursor, "balance-assertions") };
   }));
 
   registerTool("save_balance_assertion", {

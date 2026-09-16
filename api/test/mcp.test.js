@@ -374,12 +374,15 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(validateDiscoveredMcpTools(tools.tools, {
     serverName: "Accounting",
     serverInfo: { name: "chapeaux-fous-accounting" },
-  }), { owned: true, objectTypeCount: 1 });
+  }), { owned: true, objectTypeCount: 5 });
   for (const tool of tools.tools) {
     assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
   }
   const objectTools = tools.tools.filter((tool) => tool._meta?.["agent-slayer/objects"]);
-  assert.deepEqual(objectTools.map(({ name }) => name), ["list_account_objects"]);
+  assert.deepEqual(objectTools.map(({ name }) => name), [
+    "list_account_objects", "list_transaction_objects", "list_accounting_question_objects",
+    "list_transaction_import_job_objects", "list_balance_assertion_objects",
+  ]);
   const describedTypes = new Map();
   for (const tool of objectTools) {
     const description = validateObjectDescription(tool._meta["agent-slayer/objects"], {
@@ -392,7 +395,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       describedTypes.set(type.id, type);
     }
   }
-  assert.deepEqual([...describedTypes.keys()], ["accounting.account"]);
+  assert.deepEqual([...describedTypes.keys()], [
+    "accounting.account", "accounting.transaction", "accounting.question",
+    "accounting.transaction_import_job", "accounting.balance_assertion",
+  ]);
   const schemaDescription = await client.callTool({
     name: "describe_accounting_schema", arguments: { request: "accounts" },
   });
@@ -1011,7 +1017,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.9.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.10.0");
 
   await handler.close();
 });
