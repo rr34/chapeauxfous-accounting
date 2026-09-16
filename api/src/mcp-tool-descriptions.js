@@ -1,0 +1,63 @@
+const read = (summary) => ({ summary, actionClasses: ["READ"], effectClassifications: ["READ-ONLY"] });
+const mutate = (summary, actionClasses) => ({ summary, actionClasses, effectClassifications: ["MUTATING"] });
+const remove = (summary) => ({ summary, actionClasses: ["DELETE"], effectClassifications: ["MUTATING", "DESTRUCTIVE"] });
+
+// These are routing summaries. The full provider instructions stay on each MCP tool registration.
+const descriptions = {
+  describe_accounting_schema: read("Retrieve bounded meanings of accounting fields, units, and relationships when the schema is unclear."),
+  list_currencies: read("Find accessible currencies, crypto assets, securities, and their native-unit scales before using an accounting unit."),
+  create_currency: mutate("Create one private accounting unit when its code, type, name, and scale are known.", ["CREATE"]),
+  list_accounts: read("Read the owner's ledger accounts and balances to find a named account, including a Coinbase Bitcoin account. This checks Accounting's chart of accounts."),
+  list_account_objects: read("List stable accounting.account objects to identify and confirm the ledger account for an attached statement."),
+  create_account: mutate("Create an owner-scoped ledger account after its parent, type, and currency have been chosen.", ["CREATE"]),
+  update_account: mutate("Change an existing ledger account's name, parent, type, currency, placeholder status, or archive state.", ["UPDATE"]),
+  import_account_tree: mutate("Preview one complete account-tree import, including new currency requirements, before any ledger accounts are created.", ["CREATE"]),
+  get_account_tree_import_plan: read("Read the saved status and exact preview binding of an account-tree import plan."),
+  commit_account_tree_import: mutate("Commit the exact confirmed account-tree import plan after server revalidation.", ["EXECUTE"]),
+  preview_delete_account: mutate("Check whether one account can be deleted and save an exact deletion preview for confirmation.", ["CREATE"]),
+  get_account_delete_plan: read("Read the current status and result of a saved account-deletion plan."),
+  commit_delete_account: remove("Permanently delete one account using its confirmed, unexpired deletion plan."),
+  preview_delete_transactions: mutate("Freeze an exact owner-scoped transaction selection and save a permanent-deletion preview for confirmation.", ["CREATE"]),
+  refresh_transaction_delete_plan: mutate("Create a fresh transaction-deletion preview from an expired or invalidated plan's original selection.", ["CREATE"]),
+  get_transaction_delete_plan: read("Read the current status, digest, and result of a saved transaction-deletion plan."),
+  commit_delete_transactions: remove("Permanently delete the exact transactions in a confirmed, revalidated deletion plan."),
+  search_transactions: read("Search complete owner-scoped ledger transactions by text, accounts, dates, decimal amount or range, identifiers, currency, source, or retained issue evidence. Select this instead of list_transactions whenever any filter is needed."),
+  list_transactions: read("Read recent owner-scoped ledger transactions in newest-first pages when no search filter is needed."),
+  get_transaction: read("Read the current details of one known owner-scoped transaction, including lines, valuation, and tags."),
+  create_transaction: mutate("Create one complete balanced double-entry transaction from known accounts, amounts, and valuation values.", ["CREATE"]),
+  list_accounting_questions: read("Find suspense postings awaiting classification or review; these are existing ledger lines, not import failures."),
+  open_accounting_question: mutate("Mark one existing suspense posting as an open accounting question without changing its amount.", ["CREATE"]),
+  resolve_accounting_question: mutate("Assign an open suspense posting to a supported same-currency account while preserving its amount and balanced transaction.", ["UPDATE"]),
+  start_single_account_statement_import: read("For one attached statement and confirmed account, return the four ordered extraction questions before previewing an import."),
+  import_single_account_statement: mutate("Use complete statement balances and rows to preview an import into one confirmed account with suspense counterlines.", ["CREATE"]),
+  reconcile_account_through_date: mutate("Mark one account's posted lines reconciled through a date after its known closing balance matches the ledger.", ["UPDATE"]),
+  get_transaction_import_schema: read("Fetch the authoritative canonical line-record schema and artifact-upload contract before mapping a source file."),
+  create_transaction_import_job: mutate("Create a durable import job for one original source file and its expected canonical record count.", ["CREATE"]),
+  stage_transaction_import_artifact: mutate("Stage a verified complete canonical source artifact into an existing import job without copying its bytes into model context.", ["UPDATE"]),
+  stage_transaction_import_chunk: mutate("Stage a bounded batch of canonical source records in an existing import job when artifact upload is unsuitable.", ["UPDATE"]),
+  retry_transaction_import_exception: mutate("Replace and revalidate one corrected import exception while retaining its original source identity.", ["UPDATE"]),
+  exclude_transaction_import_exception: mutate("Record an explicit decision to keep one import exception outside the ledger, with a durable reason.", ["UPDATE"]),
+  list_transaction_import_jobs: read("List recent durable import jobs and their source identities, progress, commits, and exceptions."),
+  get_transaction_import_job: read("Read the durable state and reconcilable progress of one import job across connections or retries."),
+  list_transaction_import_exceptions: read("Page through unresolved and explicitly excluded import misfits with their source records and error codes."),
+  preview_transaction_import_job: mutate("Create the final import-job preview once every source record is staged or retained as an exception.", ["CREATE"]),
+  commit_transaction_import_job: mutate("After confirmation, add ready imported transactions to the ledger while retaining import misfits for correction.", ["EXECUTE"]),
+  import_transactions: mutate("Preview a complete source-neutral transaction batch and save an exact plan before ledger commit.", ["CREATE"]),
+  get_transaction_import_plan: read("Read a saved transaction-import plan's status, preview binding, and stored commit result."),
+  commit_transaction_import: mutate("Commit the exact confirmed transaction-import plan after server revalidation.", ["EXECUTE"]),
+  list_balance_assertions: read("Read known end-of-day account balances and current differences from the posted ledger."),
+  save_balance_assertion: mutate("Store or replace one known end-of-day native-unit account balance and report its ledger difference.", ["CREATE", "UPDATE"]),
+  get_statement_reconciliation_context: read("Read bounded multi-statement balance and movement context before mapping joined statement entries."),
+  analyze_statement_observations: read("Analyze extracted statement facts for duplicates, transfers, and balance consistency before import planning."),
+  list_reference_rates: read("Read timestamped owner-scoped reference prices for valuation evidence in a bounded time range."),
+  create_reference_rate: mutate("Store one timestamped reference-only price from a verified source as an exact native-unit ratio.", ["CREATE"]),
+  verify_ledger: read("Audit posted transactions against double-entry and exchange-rate rules in bounded pages."),
+};
+
+export const accountingToolDescriptions = Object.freeze(Object.fromEntries(
+  Object.entries(descriptions).map(([name, description]) => [name, Object.freeze({
+    protocol: "agent-slayer.tool-description",
+    version: 1,
+    ...description,
+  })]),
+));

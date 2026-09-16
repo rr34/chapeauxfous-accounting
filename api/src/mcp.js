@@ -78,6 +78,7 @@ import {
   transactionSearchItemSchema,
   transactionSchema,
 } from "./mcp-contracts.js";
+import { accountingToolDescriptions } from "./mcp-tool-descriptions.js";
 import {
   accountingQuestionTags,
   getAccountingQuestion,
@@ -767,6 +768,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, {
     instructions: accountingCapabilityManifest.server.instructions,
   });
+  const registerTool = (name, definition, handler) => {
+    const selection = accountingToolDescriptions[name];
+    if (!selection) throw new Error(`Missing Accounting tool description: ${name}`);
+    return server.registerTool(name, {
+      ...definition,
+      _meta: { ...definition._meta, "agent-slayer/selection": selection },
+    }, handler);
+  };
 
   server.registerResource("accounting-capability-manifest", CAPABILITY_MANIFEST_URI, {
     title: "Accounting capability manifest",
@@ -1294,7 +1303,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     structuredErrorSchema,
   ]);
 
-  server.registerTool("describe_accounting_schema", {
+  registerTool("describe_accounting_schema", {
     title: "Describe accounting schema",
     description: "Use when accounting entities, fields, units, relationships, or invariants are unclear. A successful result proves only the meanings present in the returned bounded compiler projection.",
     inputSchema: {
@@ -1305,7 +1314,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     _meta: toolMetadata("accounting.schema"),
   }, async ({ request }) => safeToolResult(async () => ({ projection: schemaSemantics.route(request) })));
 
-  server.registerTool("list_currencies", {
+  registerTool("list_currencies", {
     title: "List currencies",
     description: "Use to resolve currency or commodity IDs and native-unit scales. A successful page proves which global and owner-scoped units were visible at read time; follow nextCursor until complete.",
     inputSchema: {
@@ -1323,7 +1332,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.listCurrencies);
   }));
 
-  server.registerTool("create_currency", {
+  registerTool("create_currency", {
     title: "Create currency or security",
     description: "Use after the user or authoritative source supplies every field, including scale, to create one private accounting unit. Never guess or choose a default scale. A successful result and receipt prove the owner-scoped unit was created with the returned ID.",
     inputSchema: {
@@ -1351,7 +1360,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.createCurrency);
   }));
 
-  server.registerTool("list_accounts", {
+  registerTool("list_accounts", {
     title: "List accounts",
     description: "Use to read the owner's chart of accounts and posted native-unit balances. A successful page proves the returned owner-scoped account state at read time; follow nextCursor until complete.",
     inputSchema: {
@@ -1369,7 +1378,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.listAccounts);
   }));
 
-  server.registerTool("list_account_objects", {
+  registerTool("list_account_objects", {
     title: "List account objects",
     description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. Use IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import. Follow nextCursor until complete.",
     inputSchema: {
@@ -1392,7 +1401,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     };
   }));
 
-  server.registerTool("create_account", {
+  registerTool("create_account", {
     title: "Create account",
     description: "Use to create one owner-scoped account after every required accounting choice is known. A successful result and receipt prove creation of the returned account ID; no root, type, or currency is inferred.",
     inputSchema: {
@@ -1423,7 +1432,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.createAccount);
   }));
 
-  server.registerTool("update_account", {
+  registerTool("update_account", {
     title: "Update account",
     description: "Use to change one existing owner-scoped account. A successful result and receipt prove the named account was updated after parent-cycle, ownership, placeholder, currency, transaction, and balance-assertion checks.",
     inputSchema: {
@@ -1612,7 +1621,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       schemaProjection: schemaProjectionSchema }),
     accountTreePlanFailureSchema,
   ]);
-  server.registerTool("import_account_tree", {
+  registerTool("import_account_tree", {
     title: "Preview account tree import",
     description: "Start or continue a complete account-tree import workflow. Call this tool with the entire intended batch even when new currency details or scales are unknown; omit unknown fields and the MCP will return status=needs_input, exact questions for the user, and a machine-readable retry instruction. Do not inspect historical receipts or guess missing values instead of calling this tool. Testing only previously blocked rows is partial validation and must be explicitly labeled incomplete. Use currency_type=security for mutual funds and stocks. A successful dry run saves the exact normalized input as a durable owner-scoped plan and returns status=ready, numerical created/reused summaries, and nextAction.onApproval containing the exact commit tool and plan ID. Present its one final confirmation question. After confirmation, call commit_account_tree_import once with that plan ID; never replay the large batch.",
     inputSchema: {
@@ -1658,7 +1667,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     includeValidationRecovery: true,
   }));
 
-  server.registerTool("get_account_tree_import_plan", {
+  registerTool("get_account_tree_import_plan", {
     title: "Get account tree import plan",
     description: "Read the durable status of an account-tree import plan without changing it. Returns ready, committed, expired, or invalidated with the opaque plan ID, expiration, preview digest, compact numerical summary, and the original commit result when committed. Plans persist across MCP connections, agent turns, blank interactions, and unrelated tool calls.",
     inputSchema: {
@@ -1671,7 +1680,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     pool, personId, importPlanId: import_plan_id,
   }), { schemaSemantics, operation: operations.importAccountTree }));
 
-  server.registerTool("commit_account_tree_import", {
+  registerTool("commit_account_tree_import", {
     title: "Commit account tree import",
     description: "After the user confirms a successful account-tree dry run, commit that exact durable plan using only import_plan_id. The server revalidates current database state, imports all currencies and accounts atomically, scopes the plan to its owner, rejects expired plans, and returns the original stored result on repeated calls.",
     inputSchema: {
@@ -1693,7 +1702,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     { schemaSemantics, operation: operations.commitAccountTreeImport },
   ));
 
-  server.registerTool("preview_delete_account", {
+  registerTool("preview_delete_account", {
     title: "Preview account deletion",
     description: "Use before deleting an account. A successful result proves the account was owner-scoped, empty, leaf-only, and unreferenced when checked, and returns a 15-minute opaque plan for explicit confirmation; it does not delete data.",
     inputSchema: { account_id: positiveInteger("Owner-scoped account id to verify for permanent deletion.") },
@@ -1716,7 +1725,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.deleteAccount);
   }, { defaultStatus: "ready", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
-  server.registerTool("get_account_delete_plan", {
+  registerTool("get_account_delete_plan", {
     title: "Get account deletion plan",
     description: "Use to inspect a durable account-deletion preview across connections. A successful result proves whether the owner-scoped plan is ready, expired, invalidated, or committed and returns the stored commit result when available.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
@@ -1729,7 +1738,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       operations.deleteAccount),
   { retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
-  server.registerTool("commit_delete_account", {
+  registerTool("commit_delete_account", {
     title: "Commit account deletion",
     description: "Use only after the user confirms the exact preview. A successful committed result and receipt prove the plan was owner-scoped, unexpired, revalidated, deleted atomically, and verified absent; repeated calls return the stored result.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
@@ -1748,7 +1757,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.deleteAccount);
   }, { defaultStatus: "committed", retryTool: "preview_delete_account", failureMapper: accountDeletePlanFailure }));
 
-  server.registerTool("preview_delete_transactions", {
+  registerTool("preview_delete_transactions", {
     title: "Preview permanent transaction deletion",
     description: "Required before permanently deleting transactions. scope=all freezes the exact current owner-scoped transaction IDs; it is never reinterpreted dynamically during commit. selected deletes only the supplied IDs. The durable 15-minute preview reports transaction, line-item, exchange-rate, tag-assignment, affected-account, state, and date totals, proves the account tree is outside the deletion scope, and requests explicit user confirmation. No ledger data is deleted by this tool.",
     inputSchema: transactionDeletionPreviewInputSchema,
@@ -1771,7 +1780,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, { defaultStatus: "ready", retryTool: "preview_delete_transactions",
     failureMapper: transactionDeletePlanFailure }));
 
-  server.registerTool("refresh_transaction_delete_plan", {
+  registerTool("refresh_transaction_delete_plan", {
     title: "Refresh transaction-deletion plan",
     description: "Use only when a prior transaction-deletion plan expired or was invalidated. The MCP recovers the opaque owner-scoped selection, re-reads current ledger state, and creates a new 15-minute preview requiring fresh explicit confirmation. It never deletes ledger data.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
@@ -1794,7 +1803,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   }, { defaultStatus: "ready", retryTool: "refresh_transaction_delete_plan",
     failureMapper: transactionDeletePlanFailure }));
 
-  server.registerTool("get_transaction_delete_plan", {
+  registerTool("get_transaction_delete_plan", {
     title: "Get transaction-deletion plan",
     description: "Recover a durable owner-scoped transaction-deletion preview across turns or connections. Returns its exact digest and bounded numerical summary, an exact MCP refresh action when expired or invalidated, or the original verified result after commit.",
     inputSchema: { deletion_plan_id: z.string().trim().uuid() },
@@ -1808,7 +1817,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
   },
   { retryTool: "preview_delete_transactions", failureMapper: transactionDeletePlanFailure }));
 
-  server.registerTool("commit_delete_transactions", {
+  registerTool("commit_delete_transactions", {
     title: "Commit permanent transaction deletion",
     description: "Use only after the user confirms the exact preview. Accepts the opaque plan ID and matching preview digest, revalidates the frozen transaction contents and—for scope=all—the complete owner transaction set, blocks unplanned reversal references, deletes dependent tag assignments, line items, transaction rates, and exact transactions atomically, preserves accounts, updates resumable-import audit references, verifies absence and account-tree identity, and returns the stored result idempotently on retry.",
     inputSchema: {
@@ -1833,7 +1842,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
 
   const decimalAmount = z.string().trim().regex(/^\d+(?:\.\d{1,18})?$/)
     .describe("Nonnegative decimal magnitude with no more than 18 fractional digits.");
-  server.registerTool("search_transactions", {
+  registerTool("search_transactions", {
     title: "Search transactions",
     description: "Search complete owner-scoped ledger transactions deterministically. text is one case-insensitive substring search across transaction descriptions and source identifiers, line memos and source identifiers, full account paths and descriptions, tags, currencies, and linked import source/error text. Account and counter-account filters include descendants by default; when both are supplied they must match different postings. Amounts are decimal magnitudes of matching account postings: either sign matches by default, tolerance is inclusive around one amount, and minimum/maximum are inclusive. Use amount+tolerance or minimum/maximum, not both. date is exact and cannot be combined with date_from/date_to. has_issues refers only to retained import exception/error evidence actually linked to a ledger transaction. Results contain complete transactions, identify matching fields and postings, and use a filter-bound stable cursor.",
     inputSchema: {
@@ -1867,16 +1876,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     },
     outputSchema: transactionSearchOutput,
     annotations: readOnly,
-    _meta: {
-      ...toolMetadata("accounting.transactions"),
-      "agent-slayer/selection": {
-        protocol: "agent-slayer.tool-description",
-        version: 1,
-        summary: "Search complete owner-scoped ledger transactions by text, accounts, dates, decimal amount or range, identifiers, currency, source, or retained issue evidence. Select this instead of list_transactions whenever any filter is needed.",
-        actionClasses: ["READ"],
-        effectClassifications: ["READ-ONLY"],
-      },
-    },
+    _meta: toolMetadata("accounting.transactions"),
   }, async (input) => safeToolResult(async () => {
     const page = await accounting.searchTransactionsPage(pool, personId, {
       text: input.text,
@@ -1911,7 +1911,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.searchTransactions);
   }));
 
-  server.registerTool("list_transactions", {
+  registerTool("list_transactions", {
     title: "List transactions",
     description: "Use to read recent owner-scoped transactions newest first. A successful page proves the returned transaction summaries were visible at read time; follow nextCursor until complete.",
     inputSchema: {
@@ -1929,7 +1929,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.listTransactions);
   }));
 
-  server.registerTool("get_transaction", {
+  registerTool("get_transaction", {
     title: "Get transaction",
     description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line amounts and valuation values, tags, and any legacy transaction exchange rates.",
     inputSchema: { transaction_id: positiveInteger("Transaction id.") },
@@ -1968,7 +1968,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     to_units: z.string().regex(/^\d+$/).describe("Positive integer units in the valuation currency."),
     to_currency_id: positiveInteger("Must equal valuation_currency_id."),
   });
-  server.registerTool("create_transaction", {
+  registerTool("create_transaction", {
     title: "Create transaction",
     description: "Use to atomically create one complete double-entry transaction. Prefer a value_units field on every foreign line so each nonzero value can carry its own implied exchange rate; a nonzero amount with zero value is a quantity-only adjustment. When an exact known-balance residual has unknown classification, post its counterline to a user-selected ordinary suspense account of the same currency and add question metadata to that suspense line. rates remains available for legacy transaction-wide conversion. A successful result proves the owner-scoped accounts, currency, values, and exact balance were validated.",
     inputSchema: {
@@ -2021,7 +2021,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.createTransaction);
   }));
 
-  server.registerTool("list_accounting_questions", {
+  registerTool("list_accounting_questions", {
     title: "List accounting questions",
     description: "Find suspense lines that are still waiting for a receipt, human decision, accountant review, or other classification. These are posted ledger lines, not failed imports: their statement-side amounts already contribute to the known balance. Use the returned lineItemId as the stable question ID.",
     inputSchema: {
@@ -2049,7 +2049,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.listAccountingQuestions);
   }));
 
-  server.registerTool("open_accounting_question", {
+  registerTool("open_accounting_question", {
     title: "Open accounting question",
     description: "Mark one existing posted suspense line as needing later classification. Use this to recover an older limbo line that was created without question metadata. The line and its transaction amounts are not changed.",
     inputSchema: {
@@ -2073,7 +2073,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.openAccountingQuestion);
   }));
 
-  server.registerTool("resolve_accounting_question", {
+  registerTool("resolve_accounting_question", {
     title: "Assign accounting question",
     description: "Resolve one open question by moving only its suspense line to an active postable account of the same currency. The native amount and valuation value remain byte-for-byte unchanged, the original transaction stays balanced, and the known statement-account balance is not disturbed. If the evidence requires another currency or a changed amount/value, create a separately reviewed correcting transaction instead.",
     inputSchema: {
@@ -2100,7 +2100,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.resolveAccountingQuestion);
   }));
 
-  server.registerTool("start_single_account_statement_import", {
+  registerTool("start_single_account_statement_import", {
     title: "Start single-account statement import",
     description: "Call this first when the user attaches one statement for one account. It returns the only four document-extraction questions, in order. Answer them from the attachment; ask the user only when the document itself does not supply an answer. Do not guess counteraccounts during this workflow.",
     inputSchema: {
@@ -2173,7 +2173,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     available_text: z.string().trim().max(16000).nullable()
       .describe("All useful transaction text copied from the document, or null when the row has none."),
   }).strict();
-  server.registerTool("import_single_account_statement", {
+  registerTool("import_single_account_statement", {
     title: "Answer and preview single-account statement",
     description: `Canonical attachment workflow for one statement and one account. Call start_single_account_statement_import first, answer its four ordered questions from the document, and submit those answers here. Accounting saves the two dated balance anchors, screens the extracted rows for duplicates, preserves each statement amount and available text, and creates a preview in which every unknown other side goes to one user-selected same-currency suspense account. It never guesses categories. A balance mismatch or duplicate candidate blocks commit and returns the evidence that needs review.`,
     inputSchema: {
@@ -2258,7 +2258,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       : error?.code === "STATEMENT_DUPLICATE_REVIEW_REQUIRED"
       ? { requiredAction: "REVIEW_DUPLICATE_CANDIDATES" } : null }));
 
-  server.registerTool("reconcile_account_through_date", {
+  registerTool("reconcile_account_through_date", {
     title: "Reconcile account through known balance",
     description: "Mark only the selected account's posted lines reconciled through a statement closing date. The exact known-balance assertion for that account and date must already match the calculated posted balance. Suspense counterlines are in another account and remain open and unreconciled for later assignment.",
     inputSchema: {
@@ -2410,7 +2410,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     artifact_upload: z.json(),
   });
 
-  server.registerTool("get_transaction_import_schema", {
+  registerTool("get_transaction_import_schema", {
     title: "Get canonical transaction import schema",
     description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record and the complete resumable artifact-upload contract. Fetch this before creating a declarative CSV-to-canonical mapping; do not infer fields or artifact semantics from examples.",
     inputSchema: {},
@@ -2423,7 +2423,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     artifact_upload: transactionImportArtifactUpload,
   })));
 
-  server.registerTool("create_transaction_import_job", {
+  registerTool("create_transaction_import_job", {
     title: "Create resumable transaction import job",
     description: "Create one durable logical import job for one exact original source file and final expected canonical record count. source_file_sha256 and source_file_name identify the original source before transformation, not the generated canonical JSONL artifact; the artifact upload records its own checksum and name. client_request_id makes retries idempotent. All later chunks retain the returned import_job_id, source_system, original source-file identity, and expected count.",
     inputSchema: {
@@ -2445,7 +2445,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       clientRequestId: input.client_request_id }),
   }), { retryTool: "create_transaction_import_job" }));
 
-  server.registerTool("stage_transaction_import_artifact", {
+  registerTool("stage_transaction_import_artifact", {
     title: "Stage a complete canonical transaction artifact",
     description: "Consume one completed, SHA-256-verified canonical artifact without placing its records or transport chunks in model context. File-originated imports should use application/x-ndjson with one canonical line record per nonblank line. The host uploads raw bytes through the advertised resumable artifact contract, then calls this tool with only import_job_id and artifact_id. Accounting waits for the complete artifact, binds it to the logical job, groups every record by transaction_external_id across the whole file, applies internal idempotent batches, owns all accounting validation and deduplication, checkpoints progress, and exposes invalid transactions only through list_transaction_import_exceptions.",
     inputSchema: {
@@ -2463,7 +2463,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       importJobId: import_job_id, artifactId: artifact_id }),
   }), { retryTool: "stage_transaction_import_artifact" }));
 
-  server.registerTool("stage_transaction_import_chunk", {
+  registerTool("stage_transaction_import_chunk", {
     title: "Stage canonical transaction records",
     description: `Ordinary inline-JSON path for bounded transactions created directly by the agent. File-originated or unusually large data must use the advertised artifact upload and stage_transaction_import_artifact so records and transport chunks do not enter model context. Each inline chunk may contain any number of complete transaction groups up to ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} records; Accounting groups by transaction_external_id and owns all validation, deduplication, staging, and exceptions. A stable chunk_id makes an exact retry idempotent. Progress always reconciles expected_source_records = newly_staged_records + previously_staged_or_reused_records + exception_records + remaining_records.`,
     inputSchema: {
@@ -2478,7 +2478,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     job: await accounting.stageTransactionImportChunk({ pool, personId, importJobId: import_job_id, chunkId: chunk_id, records }),
   }), { retryTool: "stage_transaction_import_chunk" }));
 
-  server.registerTool("retry_transaction_import_exception", {
+  registerTool("retry_transaction_import_exception", {
     title: "Retry one corrected import exception",
     description: "Replace and revalidate one current exception transaction using corrected canonical records, before or after earlier valid transactions were committed. A correction may add or remove accounting lines while Accounting preserves the original source-record count used by job reconciliation. Successful staged, committed, or reused transactions are not resubmitted or changed. The stable retry_id makes exact retries idempotent and transaction_external_id must remain unchanged.",
     inputSchema: {
@@ -2495,7 +2495,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
         retryId: retry_id, transactionExternalId: transaction_external_id, records }),
     }), { retryTool: "retry_transaction_import_exception" }));
 
-  server.registerTool("exclude_transaction_import_exception", {
+  registerTool("exclude_transaction_import_exception", {
     title: "Explicitly exclude one import exception",
     description: "Record the user's explicit decision that one current source transaction should remain outside the ledger. The reason and decision time stay attached to the structured exception; the original source identity and canonical context are preserved. This may be used before or after earlier valid transactions were committed, invalidates the prior preview, and never changes successful transactions.",
     inputSchema: {
@@ -2512,7 +2512,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       exclusionId: exclusion_id, transactionExternalId: transaction_external_id, reason }),
   }), { retryTool: "exclude_transaction_import_exception" }));
 
-  server.registerTool("list_transaction_import_jobs", {
+  registerTool("list_transaction_import_jobs", {
     title: "List transaction import jobs",
     description: "List this owner's recent durable transaction-import jobs with source identity, lifecycle status, pending commit totals, previously committed totals, unresolved exceptions, explicitly excluded exceptions, and the reconcilable source-record equation.",
     inputSchema: { limit: z.number().int().min(1).max(500).default(100) },
@@ -2523,7 +2523,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     jobs: await accounting.listTransactionImportJobs({ pool, personId, limit }),
   })));
 
-  server.registerTool("get_transaction_import_job", {
+  registerTool("get_transaction_import_job", {
     title: "Get transaction import job",
     description: "Read the durable owner-scoped state and reconcilable progress of one logical import job across connections, chunks, and retries.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
@@ -2534,7 +2534,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     job: await accounting.getTransactionImportJob({ pool, personId, importJobId: import_job_id }),
   })));
 
-  server.registerTool("list_transaction_import_exceptions", {
+  registerTool("list_transaction_import_exceptions", {
     title: "List transaction import exceptions",
     description: "Page through current invalid transactions, including explicit user exclusions. Every exception includes its unresolved or excluded resolution status, error codes, complete source identity, canonical records, and complete transaction context so only unresolved exceptions need to return to the LLM for correction.",
     inputSchema: {
@@ -2550,7 +2550,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       limit, afterExternalId: cursor }),
   })));
 
-  server.registerTool("preview_transaction_import_job", {
+  registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
     description: "After every source record is in Accounting, return a user outcome of Import succeeded, the number ready to add to the ledger, and the number already available for correction in Import misfits. Never describe Misfits data as uncommitted or not imported. Give one direct yes-or-no question about adding the ready transactions to the ledger, using the exact internal action arguments.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
@@ -2561,7 +2561,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     job: await accounting.previewTransactionImportJob({ pool, personId, importJobId: import_job_id }),
   }), { retryTool: "preview_transaction_import_job" }));
 
-  server.registerTool("commit_transaction_import_job", {
+  registerTool("commit_transaction_import_job", {
     title: "Add imported transactions to the ledger",
     description: "After the user confirms, add the ready imported transactions to the ledger. All other imported data remains available in Import misfits for correction. Report Import succeeded and give the Import misfits correction path for every transaction that still needs attention. Do not expose internal commit, staging, or validation terminology to the user.",
     inputSchema: {
@@ -2599,7 +2599,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     valuation_currency_code: z.string().trim().min(1).max(50),
     line_items: z.array(importedLineItemSchema).min(1).max(1000),
   });
-  server.registerTool("import_transactions", {
+  registerTool("import_transactions", {
     title: "Preview transaction import",
     description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. When multiple statements contain counterpart rows for the same transfer, call analyze_statement_observations and analyze all statements before submitting either side. Join the evidence into one complete transaction, use a stable composite external_id, and preserve each source row identifier on its corresponding line. Do not require sent and received native amounts to match: represent the difference as an explicit fee when the evidence supports it. For statement imports, supply reconciliation so the server refuses to create a commit plan unless proposed new line amounts exactly satisfy every selected account's remaining known-balance movement; the same constraints are revalidated at commit. When exact opening and closing balances prove residual movement but its category remains unknown, use that exact balance-derived residual in a balanced transaction against a user-selected ordinary postable suspense account of the same currency, and add question metadata to the suspense line. This records uncertainty without pretending it came from a source row. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate, except that a nonzero amount with zero value is an intentional zero-value quantity adjustment with no exchange rate. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free and reconciliation-complete result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
@@ -2650,7 +2650,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     return withSchemaProjection(schemaSemantics, { ...imported, import: imported }, operations.importTransactions);
   }, { retryTool: "import_transactions", preserveEntireBatch: true }));
 
-  server.registerTool("get_transaction_import_plan", {
+  registerTool("get_transaction_import_plan", {
     title: "Get transaction import plan",
     description: "Use to inspect a durable transaction-import plan across connections. A successful result proves whether the owner-scoped plan is ready, expired, invalidated, or committed and returns its preview binding and stored commit result.",
     inputSchema: { import_plan_id: z.string().trim().uuid() },
@@ -2663,7 +2663,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       operations.commitTransactionImport),
   { retryTool: "import_transactions", preserveEntireBatch: true }));
 
-  server.registerTool("commit_transaction_import", {
+  registerTool("commit_transaction_import", {
     title: "Commit transaction import",
     description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, per-line valuation values, balance, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent.",
     inputSchema: {
@@ -2684,7 +2684,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.commitTransactionImport);
   }, { defaultStatus: "committed", retryTool: "import_transactions", preserveEntireBatch: true }));
 
-  server.registerTool("list_balance_assertions", {
+  registerTool("list_balance_assertions", {
     title: "List balance assertions",
     description: "Use to inspect owner-scoped known end-of-day balances and ledger differences. A successful page proves the returned reconciliation comparisons at read time; follow nextCursor until complete.",
     inputSchema: {
@@ -2702,7 +2702,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.listBalanceAssertions);
   }));
 
-  server.registerTool("save_balance_assertion", {
+  registerTool("save_balance_assertion", {
     title: "Save balance assertion",
     description: "Use to create or replace one known owner-scoped end-of-day native-unit balance. A successful result and receipt prove the assertion stored for the exact account and date and show its current ledger difference. A mismatch returns a structured 'How did we get here?' investigation question; it does not silently create an adjustment. Pair opening and closing assertions in get_statement_reconciliation_context before choosing evidence-backed lines or an explicit question-bearing suspense adjustment.",
     inputSchema: {
@@ -2739,7 +2739,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.saveBalanceAssertion);
   }));
 
-  server.registerTool("get_statement_reconciliation_context", {
+  registerTool("get_statement_reconciliation_context", {
     title: "Ground a multi-statement reconciliation",
     description: "Use after saving exact opening and closing balance assertions for every statement account, and before importing any joined entries. Returns each account's required native-unit movement, already-posted movement, and remaining line-item movement for the interval after the opening date through the closing date. Analyze every related statement together; match counterpart rows by provider ID, transaction hash, timestamp, direction, and quantity even when network fees make sent and received quantities differ. Preserve actual statement quantities, use one valuation currency, value foreign lines at transaction time, and separate explicit fees from inferred spread or margin. A nonzero residual must first trigger a search for missing or misclassified evidence; if its amount is proven only by the balance boundary and its category remains unknown, identify it explicitly as a balance-derived adjustment against a user-selected suspense account and attach an accounting question rather than inventing a category or source row.",
     inputSchema: {
@@ -2767,7 +2767,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.statementReconciliation);
   }));
 
-  server.registerTool("analyze_statement_observations", {
+  registerTool("analyze_statement_observations", {
     title: "Analyze extracted statement observations",
     description: "Use for every statement import, regardless of whether the source was CSV, PDF, OCR, or a screenshot. First extract only visible source facts into format-neutral observations; do not infer balancing lines yet. This deterministic analyzer resolves native units from account scales, compares rows with existing ledger postings, identifies overlapping input documents, ranks cross-account transfer counterparts, and proves whether the proposed new observations exactly cover each account's known-balance residual. Only stable source-reference matches are automatically excluded as duplicates. Same date and amount without stable identity remains a review candidate. Do not assemble or preview transactions until readyForTransactionAssembly is true, or every reported ambiguity has been explicitly resolved and the resulting coverage remains zero.",
     inputSchema: {
@@ -2817,7 +2817,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.statementAnalysis);
   }));
 
-  server.registerTool("list_reference_rates", {
+  registerTool("list_reference_rates", {
     title: "List timestamped reference rates",
     description: "Read owner-scoped timestamped reference prices as exact positive native-unit ratios. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
     inputSchema: {
@@ -2843,7 +2843,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
       }, operations.referenceRates);
     }));
 
-  server.registerTool("create_reference_rate", {
+  registerTool("create_reference_rate", {
     title: "Create timestamped reference rate",
     description: "Store one owner-scoped, reference-only price from statement or externally verified evidence as an exact positive native-unit ratio. Use the evidence timestamp in UTC and preserve the source quantity separately in transaction lines. This does not post accounting and does not automatically value a transaction.",
     inputSchema: {
@@ -2870,7 +2870,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, schema
     }, operations.referenceRates);
   }));
 
-  server.registerTool("verify_ledger", {
+  registerTool("verify_ledger", {
     title: "Verify ledger",
     description: "Use to audit posted transactions against the central double-entry and exchange-rate invariants. A successful page proves the reported transactions were revalidated at read time; follow nextCursor until complete.",
     inputSchema: {

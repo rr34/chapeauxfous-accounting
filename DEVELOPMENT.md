@@ -172,6 +172,14 @@ referenced record in tool text. Recoverable MCP errors and incomplete
 workflows use the authoritative `agent-slayer.retry-descriptor` version-1
 field contract.
 
+Every discovered tool also publishes `_meta["agent-slayer/selection"]` using
+the Agent Slayer Tool Description version-1 contract. Its concise, validated
+routing summary and action/effect classifications let orientation select an
+Accounting tool before receiving the tool's full execution description and
+schemas. Keep the routing summary specific to the domain outcome; an exchange
+name in a ledger account does not require an exchange integration to read that
+account through `list_accounts`.
+
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated
 users see those rows plus only their own units. A unit's integer `scale` must be

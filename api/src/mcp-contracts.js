@@ -416,8 +416,8 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.accounts",
       title: "Chart of accounts",
-      summary: "Read, create, update, import, and safely delete owner-scoped accounts.",
-      aliases: ["accounts", "account tree", "chart of accounts"],
+      summary: "Read, create, update, import, and safely delete ledger accounts, including named bank, exchange, and crypto accounts.",
+      aliases: ["accounts", "account tree", "chart of accounts", "bank accounts", "exchange accounts", "crypto accounts"],
       guidance: "Deletion requires preview, explicit confirmation, commit, and post-commit verification.",
       tools: ["list_accounts", "list_account_objects", "create_account", "update_account", "import_account_tree", "get_account_tree_import_plan", "commit_account_tree_import", "preview_delete_account", "get_account_delete_plan", "commit_delete_account"],
       dependencies: ["accounting.currencies"],

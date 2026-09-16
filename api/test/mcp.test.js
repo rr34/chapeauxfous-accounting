@@ -10,8 +10,12 @@ process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
 const { createAccountingMcpHandler, createAccountingMcpServer } = await import("../src/mcp.js");
+const { accountingToolDescriptions } = await import("../src/mcp-tool-descriptions.js");
 const { extractDeferredActionReference } = await import(
   "../../../agent-chapeaux-fous/src/deferred-actions.mjs"
+);
+const { catalogToolDescription } = await import(
+  "../../../agent-chapeaux-fous/src/tool-description.mjs"
 );
 
 test("the MCP exposes scoped tools with schema-semantic projections", async () => {
@@ -355,6 +359,14 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   await client.connect(clientTransport);
 
   const tools = await client.listTools();
+  assert.deepEqual(tools.tools.map(({ name }) => name).sort(), Object.keys(accountingToolDescriptions).sort());
+  for (const tool of tools.tools) {
+    assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
+  }
+  assert.match(catalogToolDescription({
+    ...tools.tools.find(({ name }) => name === "list_accounts"),
+    metadata: tools.tools.find(({ name }) => name === "list_accounts")._meta,
+  }).summary, /Coinbase Bitcoin account/);
   assert.equal(tools.tools.some((tool) => tool.name === "describe_accounting_schema"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_account_tree_import"), true);
@@ -494,6 +506,8 @@ test("the MCP exposes scoped tools with schema-semantic projections", async () =
   const manifest = JSON.parse(manifestResource.contents[0].text);
   assert.equal(manifest.contractVersion, 1);
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
+  assert.equal(manifest.capabilities.find((capability) => capability.id === "accounting.accounts")
+    .aliases.includes("exchange accounts"), true);
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(transactionCapability.summary, /permanently delete/);
   assert.equal(transactionCapability.tools.includes("refresh_transaction_delete_plan"), true);
