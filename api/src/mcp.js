@@ -849,6 +849,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   const referenceRateMutationOutput = successOutputSchema({
     submittedCount: z.number().int().positive(), createdCount: z.number().int().nonnegative(),
     reusedCount: z.number().int().nonnegative(),
+    roundedCount: z.number().int().nonnegative(),
     outcomeRuns: z.array(z.object({
       startIndex: z.number().int().nonnegative(), endIndex: z.number().int().nonnegative(),
       status: z.enum(["created", "reused"]),
@@ -2649,7 +2650,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("list_reference_rates", {
     title: "List timestamped reference rates",
-    description: "Read owner-scoped timestamped reference prices as exact positive decimal quotes, with native-unit ratios retained for legacy rates. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
+    description: "Read owner-scoped timestamped reference prices as positive native-unit ratios. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
     inputSchema: {
       from_currency_id: positiveInteger("Optional source currency or asset.").optional(),
       to_currency_id: positiveInteger("Optional valuation currency.").optional(),
@@ -2675,7 +2676,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("get_reference_rate_import_schema", {
     title: "Get reference rate import schema",
-    description: "Read the authoritative JSON Schema for one canonical reference-rate record. For a dated CSV price series, use file_table_transform to create application/x-ndjson without putting every row in model context; map source_record_number for error correlation. A date-only valid_at means 00:00:00 UTC on that date. from_decimal and to_decimal are positive quantities in the currencies' displayed units; for a USD price of one BTC, use from_decimal=1 and to_decimal equal to the USD close price. Accounting stores both decimal strings exactly as supplied, with no rounding or precision adjustment. The transform's exceptions file retains invalid or blank source rows for reporting.",
+    description: "Read the authoritative JSON Schema for one canonical reference-rate record. For a dated CSV price series, use file_table_transform to create application/x-ndjson without putting every row in model context; map source_record_number for error correlation. A date-only valid_at means 00:00:00 UTC on that date. from_decimal and to_decimal are positive quantities in the currencies' displayed units; for a USD price of one BTC, use from_decimal=1 and to_decimal equal to the USD close price. Accounting converts to native units and rounds the target price half-up to its currency scale (cents for USD), reporting roundedCount. The transform's exceptions file retains invalid or blank source rows for reporting.",
     inputSchema: {},
     outputSchema: successOutputSchema({
       canonical_schema: z.json(), artifact_upload: z.json(), maximum_records: z.number().int().positive(),
@@ -2701,7 +2702,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   });
   registerTool("create_reference_rates", {
     title: "Create timestamped reference rates",
-    description: `Atomically store 1 through ${REFERENCE_RATE_INLINE_MAX} owner-scoped reference prices created directly in this interaction. One item uses the same collection. Duplicate pair-and-time targets in the request are rejected; exact existing ratios are reused; a different existing value causes the entire batch to fail without inserts. Both decimal strings are stored exactly as supplied, with no rounding. Outcomes are run-length encoded by zero-based input index, with one effect receipt for the whole call. File-originated data must use get_reference_rate_import_schema, file_table_transform, artifact upload, and import_reference_rates_artifact. Rates are evidence only and do not post ledger entries.`,
+    description: `Atomically store 1 through ${REFERENCE_RATE_INLINE_MAX} owner-scoped reference prices created directly in this interaction. One item uses the same collection. Duplicate pair-and-time targets in the request are rejected; exact existing native-unit ratios are reused; a different existing value causes the entire batch to fail without inserts. The target quote is rounded half-up to its currency scale and roundedCount reports affected input prices. Outcomes are run-length encoded by zero-based input index, with one effect receipt for the whole call. File-originated data must use get_reference_rate_import_schema, file_table_transform, artifact upload, and import_reference_rates_artifact. Rates are evidence only and do not post ledger entries.`,
     inputSchema: { rates: z.array(referenceRateItemInput).min(1).max(REFERENCE_RATE_INLINE_MAX) },
     outputSchema: referenceRateMutationOutput,
     annotations: idempotentWrite,

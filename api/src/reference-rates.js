@@ -1,6 +1,7 @@
 import { readCompleteArtifact } from "./artifact-upload.js";
-import { unitsToDecimal } from "./money.js";
+import { decimalToUnits } from "./money.js";
 
+const signedBigIntMaximum = (2n ** 63n) - 1n;
 export const REFERENCE_RATE_BATCH_MAX = 10000;
 export const REFERENCE_RATE_INLINE_MAX = 500;
 
@@ -52,32 +53,29 @@ function positiveDecimal(value, field, index) {
   return value;
 }
 
-function decimalRatio(fromDecimal, toDecimal, fromScale, toScale) {
-  const [fromWhole, fromFraction = ""] = fromDecimal.split(".");
+function nativeUnitRatio(fromDecimal, toDecimal, fromScale, toScale, index) {
+  let fromUnits;
+  try { fromUnits = BigInt(decimalToUnits(fromDecimal, fromScale)); } catch {
+    throw applicationError(`from_decimal must fit the source currency's ${fromScale} decimal places.`,
+      400, "INVALID_REFERENCE_RATE_AMOUNT", { index, field: "from_decimal" });
+  }
   const [toWhole, toFraction = ""] = toDecimal.split(".");
-  const fromNumber = BigInt(`${fromWhole}${fromFraction}`);
-  const toNumber = BigInt(`${toWhole}${toFraction}`);
-  return {
-    from: fromNumber * (10n ** BigInt(fromScale + toFraction.length)),
-    to: toNumber * (10n ** BigInt(toScale + fromFraction.length)),
-  };
+  let toUnits = BigInt(`${toWhole}${toFraction.slice(0, toScale).padEnd(toScale, "0")}`);
+  const discarded = toFraction.slice(toScale);
+  if (discarded && discarded[0] >= "5") toUnits += 1n;
+  if (fromUnits <= 0n || toUnits <= 0n
+    || fromUnits > signedBigIntMaximum || toUnits > signedBigIntMaximum) {
+    throw applicationError("The reference price cannot fit positive 64-bit native units.",
+      400, "INVALID_REFERENCE_RATE_AMOUNT", { index });
+  }
+  return { from: fromUnits, to: toUnits, rounded: /[1-9]/.test(discarded) };
 }
 
 function sameRatio(row, rate) {
-  const supplied = decimalRatio(rate.fromDecimal, rate.toDecimal,
-    rate.fromScale, rate.toScale);
-  if ((row.reference_from_decimal == null) !== (row.reference_to_decimal == null)) throw applicationError(
-    "Stored reference rate has an incomplete decimal quote.", 500,
-    "REFERENCE_RATE_STATE_CONFLICT");
-  if (row.reference_from_decimal != null && row.reference_to_decimal != null) {
-    const stored = decimalRatio(String(row.reference_from_decimal),
-      String(row.reference_to_decimal), rate.fromScale, rate.toScale);
-    return stored.from * supplied.to === stored.to * supplied.from;
-  }
   if (row.from_units == null || row.to_units == null) throw applicationError(
-    "Stored reference rate has no complete quote or legacy ratio.", 500,
+    "Stored reference rate has no complete native-unit ratio.", 500,
     "REFERENCE_RATE_STATE_CONFLICT");
-  return BigInt(row.from_units) * supplied.to === BigInt(row.to_units) * supplied.from;
+  return BigInt(row.from_units) * rate.toUnits === BigInt(row.to_units) * rate.fromUnits;
 }
 
 function normalizedBatch(rates, currencies) {
@@ -117,12 +115,13 @@ function normalizedBatch(rates, currencies) {
       "DUPLICATE_REFERENCE_RATE_TARGET", { index,
         source_record_number: rate.source_record_number ?? null, valid_at: isoTimestamp(validAt) });
     keys.add(key);
+    const fromDecimal = positiveDecimal(rate.from_decimal, "from_decimal", index);
+    const toDecimal = positiveDecimal(rate.to_decimal, "to_decimal", index);
+    const ratio = nativeUnitRatio(fromDecimal, toDecimal, Number(from.scale), Number(to.scale), index);
     return {
       index, key, validAt, fromCurrencyId, toCurrencyId,
       sourceRecordNumber: rate.source_record_number ?? null,
-      fromScale: Number(from.scale), toScale: Number(to.scale),
-      fromDecimal: positiveDecimal(rate.from_decimal, "from_decimal", index),
-      toDecimal: positiveDecimal(rate.to_decimal, "to_decimal", index),
+      fromUnits: ratio.from, toUnits: ratio.to, rounded: ratio.rounded,
     };
   });
 }
@@ -182,8 +181,7 @@ export async function createReferenceRates({ pool, personId, rates }) {
     for (const group of groups.values()) {
       const times = group.map((rate) => rate.validAt).sort();
       const [rows] = await connection.query(
-        `SELECT xrate_id, ValidAt, from_units, to_units,
-                reference_from_decimal, reference_to_decimal FROM xrates
+        `SELECT xrate_id, ValidAt, from_units, to_units FROM xrates
           WHERE owner_person_id = ? AND xrate_type = 'reference' AND transaction_id IS NULL
             AND from_currency_id = ? AND to_currency_id = ? AND ValidAt BETWEEN ? AND ?
           ORDER BY xrate_id FOR UPDATE`,
@@ -219,14 +217,14 @@ export async function createReferenceRates({ pool, personId, rates }) {
       const chunk = toCreate.slice(offset, offset + 500);
       await connection.query(
         `INSERT INTO xrates (owner_person_id, xrate_type, ValidAt, transaction_id,
-          from_units, from_currency_id, to_units, to_currency_id,
-          reference_from_decimal, reference_to_decimal)
-         VALUES ${chunk.map(() => "(?, 'reference', ?, NULL, NULL, ?, NULL, ?, ?, ?)").join(", ")}`,
-        chunk.flatMap((rate) => [personId, rate.validAt, rate.fromCurrencyId,
-          rate.toCurrencyId, rate.fromDecimal, rate.toDecimal]));
+          from_units, from_currency_id, to_units, to_currency_id)
+         VALUES ${chunk.map(() => "(?, 'reference', ?, NULL, ?, ?, ?, ?)").join(", ")}`,
+        chunk.flatMap((rate) => [personId, rate.validAt, String(rate.fromUnits),
+          rate.fromCurrencyId, String(rate.toUnits), rate.toCurrencyId]));
     }
     return { submittedCount: normalized.length, createdCount: toCreate.length,
       reusedCount: normalized.length - toCreate.length,
+      roundedCount: normalized.filter((rate) => rate.rounded).length,
       outcomeRuns: outcomeRuns(outcomes) };
   });
 }
@@ -264,38 +262,24 @@ function isoTimestamp(value) {
 }
 
 function mapRate(row) {
-  const fromScale = Number(row.from_scale);
-  const toScale = Number(row.to_scale);
-  if ((row.reference_from_decimal == null) !== (row.reference_to_decimal == null)) throw applicationError(
-    "Stored reference rate has an incomplete decimal quote.", 500,
-    "REFERENCE_RATE_STATE_CONFLICT");
-  const legacyRatio = row.reference_from_decimal == null && row.reference_to_decimal == null;
-  if (legacyRatio && (row.from_units == null || row.to_units == null)) throw applicationError(
-    "Stored reference rate has no complete quote or legacy ratio.", 500,
-    "REFERENCE_RATE_STATE_CONFLICT");
   return {
     id: Number(row.xrate_id),
     validAt: isoTimestamp(row.ValidAt),
-    fromUnits: row.from_units == null ? null : String(row.from_units),
-    fromDecimal: legacyRatio
-      ? unitsToDecimal(row.from_units, fromScale) : String(row.reference_from_decimal),
+    fromUnits: String(row.from_units),
     fromCurrencyId: Number(row.from_currency_id),
     fromCurrencyCode: String(row.from_currency_code).trim(),
-    fromScale,
-    toUnits: row.to_units == null ? null : String(row.to_units),
-    toDecimal: legacyRatio
-      ? unitsToDecimal(row.to_units, toScale) : String(row.reference_to_decimal),
+    fromScale: Number(row.from_scale),
+    toUnits: String(row.to_units),
     toCurrencyId: Number(row.to_currency_id),
     toCurrencyCode: String(row.to_currency_code).trim(),
-    toScale,
+    toScale: Number(row.to_scale),
   };
 }
 
 const rateSelect = `
-  SELECT x.xrate_id, x.ValidAt, x.from_units, x.reference_from_decimal,
-         x.from_currency_id,
+  SELECT x.xrate_id, x.ValidAt, x.from_units, x.from_currency_id,
          fc.CurrencyAbbreviation AS from_currency_code, fc.scale AS from_scale,
-         x.to_units, x.reference_to_decimal, x.to_currency_id,
+         x.to_units, x.to_currency_id,
          tc.CurrencyAbbreviation AS to_currency_code, tc.scale AS to_scale
     FROM xrates x
     JOIN currencies fc ON fc.currency_id = x.from_currency_id

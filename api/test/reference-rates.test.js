@@ -16,24 +16,12 @@ test("reference rate listing is owner-scoped and pageable", async () => {
   const result = await listReferenceRatesPage(pool, 7, { fromCurrencyId: 2, toCurrencyId: 1,
     validAtFrom: "2026-08-18T00:00:00Z", validAtTo: "2026-08-18T23:59:59Z", limit: 1 });
   assert.equal(result.rates[0].toCurrencyCode, "USD");
-  assert.equal(result.rates[0].fromDecimal, "1");
-  assert.equal(result.rates[0].toDecimal, "61234.56");
+  assert.equal(result.rates[0].fromUnits, "100000000");
+  assert.equal(result.rates[0].toUnits, "6123456");
   assert.equal(result.nextCursor, null);
 });
 
-test("new reference rates read back their source decimal strings unchanged", async () => {
-  const pool = { async query() { return [[{
-    ...rateRow, from_units: null, to_units: null,
-    reference_from_decimal: "1.000", reference_to_decimal: "75590.24471973324179",
-  }]]; } };
-  const result = await listReferenceRatesPage(pool, 7, { limit: 1 });
-  assert.equal(result.rates[0].fromDecimal, "1.000");
-  assert.equal(result.rates[0].toDecimal, "75590.24471973324179");
-  assert.equal(result.rates[0].fromUnits, null);
-  assert.equal(result.rates[0].toUnits, null);
-});
-
-test("a price batch reuses prior rates, preserves source precision, and replays exactly", async () => {
+test("a price batch reuses prior rates, rounds to currency scale, and replays exactly", async () => {
   const rows = [{ xrate_id: 224, ValidAt: "2013-04-28 00:00:00.000",
     from_units: "100000000", to_units: "14196", from_currency_id: 2, to_currency_id: 1 }];
   const observed = { inserts: 0, commits: 0, rollbacks: 0 };
@@ -54,9 +42,8 @@ test("a price batch reuses prior rates, preserves source precision, and replays 
         observed.inserts += 1;
         for (let index = 0; index < values.length; index += 6) rows.push({
           xrate_id: 225 + rows.length, ValidAt: values[index + 1],
-          from_units: null, from_currency_id: values[index + 2],
-          to_units: null, to_currency_id: values[index + 3],
-          reference_from_decimal: values[index + 4], reference_to_decimal: values[index + 5],
+          from_units: values[index + 2], from_currency_id: values[index + 3],
+          to_units: values[index + 4], to_currency_id: values[index + 5],
         });
         return [{ affectedRows: values.length / 6 }];
       }
@@ -71,19 +58,23 @@ test("a price batch reuses prior rates, preserves source precision, and replays 
       from_decimal: "1", to_decimal: "75590.24471973324" },
     { valid_at: "2026-09-14", from_currency_id: 2, to_currency_id: 1,
       from_decimal: "1", to_decimal: "75590.24471973324179" },
+    { valid_at: "2026-09-13", from_currency_id: 2, to_currency_id: 1,
+      from_decimal: "1", to_decimal: "1.005" },
   ];
   const first = await createReferenceRates({ pool, personId: 7, rates });
-  assert.deepEqual([first.createdCount, first.reusedCount], [2, 1]);
+  assert.deepEqual([first.createdCount, first.reusedCount, first.roundedCount], [3, 1, 3]);
   assert.deepEqual(first.outcomeRuns, [
     { startIndex: 0, endIndex: 0, status: "reused" },
-    { startIndex: 1, endIndex: 2, status: "created" },
+    { startIndex: 1, endIndex: 3, status: "created" },
   ]);
   assert.equal(rows.find((row) => row.ValidAt === "2026-09-15 00:00:00.000")
-    .reference_to_decimal, "75590.24471973324");
+    .to_units, "7559024");
   assert.equal(rows.find((row) => row.ValidAt === "2026-09-14 00:00:00.000")
-    .reference_to_decimal, "75590.24471973324179");
+    .to_units, "7559024");
+  assert.equal(rows.find((row) => row.ValidAt === "2026-09-13 00:00:00.000")
+    .to_units, "101");
   const replay = await createReferenceRates({ pool, personId: 7, rates });
-  assert.deepEqual([replay.createdCount, replay.reusedCount], [0, 3]);
+  assert.deepEqual([replay.createdCount, replay.reusedCount], [0, 4]);
   assert.equal(observed.inserts, 1);
   assert.equal(observed.commits, 2);
   assert.equal(observed.rollbacks, 0);

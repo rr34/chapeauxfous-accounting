@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.11.0";
+export const MCP_SERVER_VERSION = "0.12.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -237,17 +237,11 @@ export const balanceAssertionSchema = z.object({
 export const referenceRateSchema = z.object({
   id: z.number().int().positive(),
   validAt: z.string().datetime(),
-  fromUnits: z.string().regex(/^\d+$/).nullable()
-    .describe("Legacy positive source native units, or null when this reference price stores exact decimal quotes."),
-  fromDecimal: z.string().regex(/^\d+(?:\.\d+)?$/)
-    .describe("Exact positive source quantity in displayed currency units."),
+  fromUnits: z.string().regex(/^\d+$/),
   fromCurrencyId: z.number().int().positive(),
   fromCurrencyCode: z.string().min(1),
   fromScale: z.number().int().min(0).max(18),
-  toUnits: z.string().regex(/^\d+$/).nullable()
-    .describe("Legacy positive target native units, or null when this reference price stores exact decimal quotes."),
-  toDecimal: z.string().regex(/^\d+(?:\.\d+)?$/)
-    .describe("Exact positive target quantity in displayed currency units."),
+  toUnits: z.string().regex(/^\d+$/),
   toCurrencyId: z.number().int().positive(),
   toCurrencyCode: z.string().min(1),
   toScale: z.number().int().min(0).max(18),

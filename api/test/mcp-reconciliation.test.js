@@ -10,9 +10,8 @@ process.env.MYSQL_DATABASE = "accounting_test";
 
 const { createAccountingMcpServer } = await import("../src/mcp.js");
 
-const referenceRate = { id: 41, validAt: "2026-08-18T14:32:00.000Z", fromUnits: null,
-  fromDecimal: "1", fromCurrencyId: 2, fromCurrencyCode: "BTC", fromScale: 8,
-  toUnits: null, toDecimal: "61234.56",
+const referenceRate = { id: 41, validAt: "2026-08-18T14:32:00.000Z", fromUnits: "100000000",
+  fromCurrencyId: 2, fromCurrencyCode: "BTC", fromScale: 8, toUnits: "6123456",
   toCurrencyId: 1, toCurrencyCode: "USD", toScale: 2 };
 const openQuestion = {
   lineItemId: 901, transactionId: 81, transactionDate: "2026-08-31",
@@ -78,12 +77,12 @@ test("the MCP exposes grounded multi-statement context and reference prices", as
     },
     async createReferenceRates(input) {
       seen.createRates = input;
-      return { submittedCount: 1, createdCount: 1, reusedCount: 0,
+      return { submittedCount: 1, createdCount: 1, reusedCount: 0, roundedCount: 0,
         outcomeRuns: [{ startIndex: 0, endIndex: 0, status: "created" }] };
     },
     async importReferenceRatesArtifact(input) {
       seen.importRates = input;
-      return { submittedCount: 4889, createdCount: 4881, reusedCount: 8,
+      return { submittedCount: 4889, createdCount: 4881, reusedCount: 8, roundedCount: 4546,
         artifactSha256: `sha256:${"a".repeat(64)}`,
         outcomeRuns: [
           { startIndex: 0, endIndex: 7, status: "reused" },
