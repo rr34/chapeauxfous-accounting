@@ -84,6 +84,7 @@ export type BalanceAssertion = {
 export type TransactionSummary = {
   id: number;
   date: string;
+  transactionAt: string | null;
   description: string | null;
   state: "draft" | "posted" | "voided";
   valuationCurrencyId: number;
@@ -95,6 +96,7 @@ export type TransactionSummary = {
 export type TransactionDetail = {
   id: number;
   date: string;
+  transactionAt: string | null;
   description: string | null;
   state: string;
   valuationCurrencyId: number;
@@ -117,11 +119,13 @@ export type CanonicalImportRecord = {
   transaction_external_id: string;
   line_external_id?: string | null;
   transaction_date: string;
+  transaction_at?: string | null;
   description?: string | null;
   valuation_currency_code: string;
+  fee_account_full_name?: string | null;
   account_full_name: string;
   amount_decimal: string;
-  value_decimal: string | null;
+  value_decimal?: string | null;
   memo?: string | null;
 };
 
@@ -176,6 +180,7 @@ export type TransactionImportException = {
   transaction_context: {
     externalId: string;
     transactionDate: string;
+    transactionAt: string | null;
     description: string | null;
     valuationCurrencyCode: string;
     lineItems: Array<{

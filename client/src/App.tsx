@@ -465,7 +465,8 @@ function ExchangeRateFraction({ direction, valueCurrencyCode, amountCurrencyCode
 }
 type EditableLine = { id: number | null; accountId: string; amount: string; value: string; memo: string;
   rateDecimal: string; rateDirection: RateDirection; rateChanges: "amount" | "value"; autoBalance: boolean };
-type EditableImportRecord = CanonicalImportRecord & {
+type EditableImportRecord = Omit<CanonicalImportRecord, "value_decimal"> & {
+  value_decimal: string | null;
   editorKey: string;
   rateDecimal: string;
   rateDirection: RateDirection;
@@ -635,6 +636,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     rateDecimal: "", rateDirection: "value-per-amount", rateChanges: "value", autoBalance: false });
   const [description, setDescription] = useState(initialTransaction?.description ?? "");
   const [date, setDate] = useState(initialTransaction?.date ?? today());
+  const [transactionAt, setTransactionAt] = useState(initialTransaction?.transactionAt ?? "");
   const [valuationCurrencyId, setValuationCurrencyId] = useState<number | "">(
     initialTransaction?.valuationCurrencyId ?? initialAccount?.currencyId ?? "");
   const [lines, setLines] = useState<EditableLine[]>(() => {
@@ -800,9 +802,10 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       });
       await api(initialTransaction ? `/transactions/${initialTransaction.id}` : "/transactions",
         { method: initialTransaction ? "PATCH" : "POST", body: JSON.stringify({ description, transactionDate: date,
+        transactionAt: transactionAt.trim() || null,
         valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines, rates: [], post: true }) }, token);
       if (!initialTransaction) {
-        setDescription(""); setDate(today()); setLines([
+        setDescription(""); setDate(today()); setTransactionAt(""); setLines([
           blankLine(initialAccountId == null ? "" : String(initialAccountId)),
         ]);
       }
@@ -885,6 +888,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
             setLines((current) => rebalanceLines(current.map((candidate) => synchronizeLine(candidate, Number(nextId))), Number(nextId)));
           }}><option value="">Choose currency…</option>
           <CurrencyOptions currencies={currencies} accounts={accounts} /></select></label>
+        <label>UTC time (optional)<input aria-label="Transaction UTC time" value={transactionAt}
+          onChange={(event) => setTransactionAt(event.target.value)} placeholder="YYYY-MM-DDTHH:mm:ssZ" /></label>
         <button type="button" className="link-button" aria-expanded={showValuationDetails}
           onClick={() => setShowValuationDetails((current) => !current)}>
           {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button>
@@ -900,6 +905,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
   return <section className="composer">
     <form onSubmit={submit}>
       <div className="transaction-meta"><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+        <label>UTC time (optional)<input value={transactionAt} onChange={(event) => setTransactionAt(event.target.value)}
+          placeholder="YYYY-MM-DDTHH:mm:ssZ" /></label>
         <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What happened?" /></label>
         <label>Value currency<select required value={valuationCurrencyId}
           onChange={(event) => {
@@ -1000,8 +1007,10 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
         transaction_external_id: String(record.transaction_external_id ?? exception.source_identity.transaction_external_id),
         line_external_id: record.line_external_id == null ? null : String(record.line_external_id),
         transaction_date: String(record.transaction_date ?? today()),
+        transaction_at: record.transaction_at == null ? null : String(record.transaction_at),
         description: record.description == null ? null : String(record.description),
         valuation_currency_code: String(record.valuation_currency_code ?? "USD"),
+        fee_account_full_name: record.fee_account_full_name == null ? null : String(record.fee_account_full_name),
         account_full_name: String(record.account_full_name ?? ""),
         amount_decimal: record.amount_decimal == null ? "" : String(record.amount_decimal),
         value_decimal: record.value_decimal == null ? null : String(record.value_decimal),
@@ -1058,7 +1067,7 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
   }
 
   function updateTransaction(patch: Partial<Pick<CanonicalImportRecord,
-    "transaction_date" | "description" | "valuation_currency_code">>) {
+    "transaction_date" | "transaction_at" | "description" | "valuation_currency_code" | "fee_account_full_name">>) {
     setRecords((current) => rebalanceRecords(current.map((record) => synchronizeRate({ ...record, ...patch }))));
   }
 
@@ -1112,14 +1121,21 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
 
   function addSplit() {
     setRecords((current) => {
-      const currentTotal = sumDecimals(current.map((record) => record.value_decimal), { ignoreBlank: true });
+      const hasForeignLine = current.some((record) => {
+        const account = accountByFullName.get(record.account_full_name);
+        return account && account.currencyCode !== record.valuation_currency_code;
+      });
+      const currentTotal = hasForeignLine ? null
+        : sumDecimals(current.map((record) => record.value_decimal), { ignoreBlank: true });
       const balancing = currentTotal == null ? "" : negateDecimal(currentTotal);
       return rebalanceRecords([...current.map((record) => ({ ...record, autoBalance: false })), {
       transaction_external_id: exception.source_identity.transaction_external_id,
       line_external_id: null,
       transaction_date: current[0]?.transaction_date ?? today(),
+      transaction_at: current[0]?.transaction_at ?? null,
       description: current[0]?.description ?? null,
       valuation_currency_code: current[0]?.valuation_currency_code ?? "USD",
+      fee_account_full_name: current[0]?.fee_account_full_name ?? null,
       account_full_name: "",
       amount_decimal: balancing,
       value_decimal: balancing,
@@ -1128,14 +1144,21 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
       rateDirection: "value-per-amount",
       rateDecimal: "",
       rateChanges: "value",
-      autoBalance: true,
+      autoBalance: !hasForeignLine,
     }]);
     });
   }
 
   const valueTotal = sumDecimals(records.map((record) => record.value_decimal));
-  const incompleteLine = records.findIndex((record) => !accountByFullName.has(record.account_full_name)
-    || !decimalParts(record.amount_decimal) || !decimalParts(record.value_decimal));
+  const hasForeignLine = records.some((record) => {
+    const account = accountByFullName.get(record.account_full_name);
+    return account && account.currencyCode !== record.valuation_currency_code;
+  });
+  const incompleteLine = records.findIndex((record) => {
+    const account = accountByFullName.get(record.account_full_name);
+    return !account || !decimalParts(record.amount_decimal)
+      || (account.currencyCode === record.valuation_currency_code && !decimalParts(record.value_decimal));
+  });
   const valueWithoutAmountLine = records.findIndex((record) => {
     const account = accountByFullName.get(record.account_full_name);
     const amount = decimalParts(record.amount_decimal);
@@ -1153,7 +1176,7 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
     const account = accountByFullName.get(record.account_full_name);
     const amount = decimalParts(record.amount_decimal);
     const value = decimalParts(record.value_decimal);
-    return Boolean(account && account.currencyCode !== first?.valuation_currency_code
+    return Boolean(!hasForeignLine && account && account.currencyCode !== first?.valuation_currency_code
       && amount && value && amount.units !== 0n && value.units !== 0n
       && (!decimalParts(record.rateDecimal) || decimalParts(record.rateDecimal)!.units <= 0n));
   });
@@ -1168,19 +1191,21 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
   const hasEnoughLines = records.length >= 2 || singleLineQuantityAdjustment;
   const removableIncompleteLine = records.length === 2 && incompleteLine >= 0
     && isQuantityAdjustment(records[incompleteLine === 0 ? 1 : 0]);
-  const balanced = valueTotal === "0";
+  const balanced = hasForeignLine || valueTotal === "0";
   const canSave = Boolean(first?.transaction_date && first?.valuation_currency_code && hasEnoughLines
-    && incompleteLine < 0 && valueWithoutAmountLine < 0 && signMismatchLine < 0
+    && incompleteLine < 0 && (hasForeignLine || valueWithoutAmountLine < 0)
+    && (hasForeignLine || signMismatchLine < 0)
     && invalidRateLine < 0 && balanced);
   const liveStatus = removableIncompleteLine
     ? `Remove split ${incompleteLine + 1}; this zero-value quantity adjustment is valid with one split.`
     : incompleteLine >= 0 ? `Complete the account, amount, and value for split ${incompleteLine + 1}.`
     : !hasEnoughLines ? "Add a balancing split; only a zero-value quantity adjustment may contain one split."
-    : valueWithoutAmountLine >= 0 ? `Split ${valueWithoutAmountLine + 1} cannot have value without an amount.`
-    : signMismatchLine >= 0 ? `Amount and value must have the same debit or credit sign on split ${signMismatchLine + 1}.`
+    : valueWithoutAmountLine >= 0 && !hasForeignLine ? `Split ${valueWithoutAmountLine + 1} cannot have value without an amount.`
+    : signMismatchLine >= 0 && !hasForeignLine ? `Amount and value must have the same debit or credit sign on split ${signMismatchLine + 1}.`
     : invalidRateLine >= 0 ? `Enter a positive exchange rate for split ${invalidRateLine + 1}.`
     : !balanced ? `Out of balance by ${valueTotal ?? "an invalid value"} ${first?.valuation_currency_code ?? ""}.`
-    : `Balanced in ${first?.valuation_currency_code ?? "the value currency"} and ready to revalidate.`;
+    : hasForeignLine ? "Ready for Accounting to value foreign amounts from reference rates and check the transaction."
+      : `Balanced in ${first?.valuation_currency_code ?? "the value currency"} and ready to revalidate.`;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1215,12 +1240,18 @@ function MisfitEditor({ exception, accounts, currencies, token, importJobId, onS
     <div className="misfit-meta">
       <label>Date<input type="date" required value={first.transaction_date}
         onChange={(event) => updateTransaction({ transaction_date: event.target.value })} /></label>
+      <label>UTC time (optional)<input value={first.transaction_at ?? ""}
+        onChange={(event) => updateTransaction({ transaction_at: event.target.value || null })}
+        placeholder="YYYY-MM-DDTHH:mm:ssZ" /></label>
       <label>Description<input value={first.description ?? ""}
         onChange={(event) => updateTransaction({ description: event.target.value })} /></label>
       <label>Value currency<select required value={first.valuation_currency_code}
         onChange={(event) => updateTransaction({ valuation_currency_code: event.target.value })}>
         <CurrencyOptions currencies={currencies} accounts={accounts} valueBy="code" />
       </select></label>
+      <label>Fee account (if applicable)<input value={first.fee_account_full_name ?? ""}
+        onChange={(event) => updateTransaction({ fee_account_full_name: event.target.value || null })}
+        placeholder="Expenses:Conversion Fees" /></label>
     </div>
     <div className="transaction-editor-toolbar"><div><strong>Transaction splits</strong>
       <small>Each indented row is one posting under this transaction.</small></div>
@@ -1441,7 +1472,7 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   }
 
   async function commitPreview() {
-    if (!selectedJobId || !preview?.preview_digest) return;
+    if (!selectedJobId || !preview?.preview_digest || !preview.ready_to_commit) return;
     const pending = preview.progress.transaction_totals.pending_commit;
     if (!window.confirm(`Add ${pending} imported transaction${pending === 1 ? "" : "s"} to the ledger now? Transactions already in the ledger will not be duplicated.`)) return;
     setBusy("commit"); setError("");
@@ -1487,15 +1518,15 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
       </div>
       <p className="reconciliation-equation">{job.progress.equation}</p>
       <div className="misfit-commit-panel">
-        <div><strong>Import succeeded</strong>
+        <div><strong>{job.progress.transaction_totals.pending_commit > 0 ? "Source data received" : "No ledger additions ready"}</strong>
           <span>All source data is in Accounting. {job.progress.transaction_totals.pending_commit} transactions are ready for the ledger; {job.progress.transaction_totals.exceptions} are here for correction.</span></div>
-        {!preview ? <button className="secondary" disabled={Boolean(busy) || job.job_status === "committed"}
+        {!preview && job.progress.transaction_totals.pending_commit > 0 ? <button className="secondary" disabled={Boolean(busy) || job.job_status === "committed"}
           onClick={() => void preparePreview()}>{busy === "preview" ? "Preparing…" : "Review ledger addition"}</button>
-          : <button className="primary" disabled={Boolean(busy)} onClick={() => void commitPreview()}>
+          : preview?.ready_to_commit ? <button className="primary" disabled={Boolean(busy)} onClick={() => void commitPreview()}>
             {busy === "commit" ? "Adding…" : `Add ${preview.progress.transaction_totals.pending_commit} to ledger`}
-          </button>}
+          </button> : null}
       </div>
-      {preview && <div className="preview-notice"><strong>Ready to add.</strong><span>{preview.commit_scope}</span></div>}
+      {preview && <div className="preview-notice"><strong>{preview.ready_to_commit ? "Ready to add." : "Needs correction."}</strong><span>{preview.ready_to_commit ? preview.commit_scope : "Correct unresolved Import misfits before adding transactions to the ledger."}</span></div>}
       <div className="misfit-filters">
         {[{ value: "unresolved", label: "Unresolved" }, { value: "excluded", label: "Excluded" },
           { value: "all", label: "All" }, ...errorCodes.map((code) => ({ value: code, label: code.replaceAll("_", " ") }))]
@@ -1567,7 +1598,8 @@ function Ledger({ transactions, selected, onSelect, onEdit, onVerify, onDelete, 
       className={`transaction-row ${selected?.id === transaction.id ? "selected" : ""}`} onClick={() => onSelect(transaction.id)}>
       <span>{transaction.date}</span><strong>{transaction.description || "Untitled transaction"}</strong><small>{transaction.lineItemCount} lines · {transaction.state}</small>
     </button>)}</div>
-    <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p></div>
+      <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p>
+        {selected.transactionAt && <p>Source time (UTC): {selected.transactionAt}</p>}</div>
       <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="secondary"
         onClick={() => onEdit(selected)}>Edit transaction</button><button type="button" className="danger-link"
           onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>

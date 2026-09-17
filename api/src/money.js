@@ -28,7 +28,7 @@ export function addFractions(left, right) {
   );
 }
 
-export function decimalToUnits(value, scale) {
+export function decimalToUnits(value, scale, { round = false } = {}) {
   const normalized = String(value ?? "").trim();
   const resolvedScale = Number(scale);
   if (!Number.isInteger(resolvedScale) || resolvedScale < 0 || resolvedScale > 18) {
@@ -37,8 +37,9 @@ export function decimalToUnits(value, scale) {
   const match = normalized.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
   if (!match) throw new Error(`Invalid amount: ${normalized || "empty"}`);
   const fractional = match[3] ?? "";
-  if (fractional.length > resolvedScale) throw new Error(`Amount exceeds ${resolvedScale} decimal places`);
-  const magnitude = BigInt(`${match[2]}${fractional.padEnd(resolvedScale, "0")}`);
+  if (fractional.length > resolvedScale && !round) throw new Error(`Amount exceeds ${resolvedScale} decimal places`);
+  let magnitude = BigInt(`${match[2]}${fractional.slice(0, resolvedScale).padEnd(resolvedScale, "0")}`);
+  if (round && fractional.length > resolvedScale && fractional[resolvedScale] >= "5") magnitude += 1n;
   return `${match[1] === "-" ? -magnitude : magnitude}`;
 }
 
@@ -52,4 +53,3 @@ export function unitsToDecimal(value, scale) {
   const decimal = digits.slice(-resolvedScale).replace(/0+$/, "");
   return decimal ? `${sign}${whole}.${decimal}` : `${sign}${whole}`;
 }
-

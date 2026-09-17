@@ -25,7 +25,8 @@ function memoryPool() {
     ],
     accounts: [
       { account_id: 10, AccountName: "Assets", parent_account_id: null, account_currency_id: 1, is_placeholder: 1, archived_at: null },
-      { account_id: 11, AccountName: "Checking", parent_account_id: 10, account_currency_id: 1, is_placeholder: 0, archived_at: null },
+      { account_id: 11, AccountName: "Checking", parent_account_id: 10, AccountType: "asset",
+        account_currency_id: 1, is_placeholder: 0, archived_at: null },
       { account_id: 12, AccountName: "Investments", parent_account_id: 10, account_currency_id: 1, is_placeholder: 1, archived_at: null },
       { account_id: 13, AccountName: "VTSAX", parent_account_id: 12, account_currency_id: 2, is_placeholder: 0, archived_at: null },
       { account_id: 20, AccountName: "Expenses", parent_account_id: null, account_currency_id: 1, is_placeholder: 1, archived_at: null },
@@ -34,6 +35,7 @@ function memoryPool() {
     transactions: [],
     lineItems: [],
     rates: [],
+    referenceRates: [],
     tags: [],
     tagJoins: [],
     balanceAssertions: [],
@@ -107,6 +109,7 @@ function memoryPool() {
               })];
           }
           if (sql.includes("FROM accounts a") && sql.includes("JOIN currencies c")) {
+            assert.match(sql, /a\.AccountType/);
             return [state.accounts.map((account) => ({
               ...account,
               CurrencyAbbreviation: state.currencies.find((currency) =>
@@ -145,11 +148,12 @@ function memoryPool() {
             return [[plan && Number(plan.owner_person_id) === Number(ownerPersonId) ? plan : undefined].filter(Boolean)];
           }
           if (sql.includes("INSERT INTO transactions")) {
-            const [ownerPersonId, description, valuationCurrencyId, transactionDate,
+            const [ownerPersonId, description, valuationCurrencyId, transactionDate, transactionAt,
               sourceSystem, sourceId, sourceFingerprint] = params;
             const row = { transaction_id: state.nextTransactionId++, owner_person_id: ownerPersonId,
               description, valuation_currency_id: valuationCurrencyId, TransactionState: "draft",
-              TransactionDate: transactionDate, source_system: sourceSystem, source_id: sourceId,
+              TransactionDate: transactionDate, TransactionAtUtc: transactionAt,
+              source_system: sourceSystem, source_id: sourceId,
               source_fingerprint: sourceFingerprint };
             state.transactions.push(row);
             return [{ insertId: row.transaction_id }];
@@ -203,6 +207,12 @@ function memoryPool() {
             return [state.rates.filter((rate) => Number(rate.transaction_id) === Number(transactionId)
               && Number(rate.owner_person_id) === Number(ownerPersonId))];
           }
+          if (sql.includes("FROM xrates") && sql.includes("xrate_type = 'reference'")) {
+            const [ownerPersonId, left, right] = params;
+            return [state.referenceRates.filter((rate) => Number(rate.owner_person_id) === Number(ownerPersonId)
+              && ((Number(rate.from_currency_id) === Number(left) && Number(rate.to_currency_id) === Number(right))
+                || (Number(rate.from_currency_id) === Number(right) && Number(rate.to_currency_id) === Number(left))))];
+          }
           if (sql.includes("UPDATE transactions SET TransactionState")) {
             const [transactionId, ownerPersonId] = params;
             const transaction = state.transactions.find((candidate) =>
@@ -219,7 +229,7 @@ function memoryPool() {
               plan.plan_status = committing ? "committed" : "invalidated";
               plan.committed_at = committing ? "now" : null;
               plan.invalidation_code = committing ? null
-                : (sql.includes("PAYLOAD_INTEGRITY_FAILURE") ? "PAYLOAD_INTEGRITY_FAILURE" : "DATABASE_STATE_CHANGED");
+                : (sql.match(/invalidation_code = '([^']+)'/)?.[1] ?? "DATABASE_STATE_CHANGED");
               plan.result_json = resultJson;
             }
             return [{ affectedRows: plan ? 1 : 0 }];
@@ -401,6 +411,105 @@ test("transaction import preserves distinct per-line exchange rates", async () =
   await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
   assert.deepEqual(pool.state.lineItems.map((line) => line.value_units), ["10000", "-6000", "-4000"]);
   assert.deepEqual(pool.state.rates, []);
+});
+
+test("transaction import rounds USD values while retaining exact BTC quantities", async () => {
+  const pool = memoryPool();
+  pool.state.currencies.push({ currency_id: 3, owner_person_id: 7,
+    CurrencyAbbreviation: "BTC", scale: 8 });
+  pool.state.accounts.push({ account_id: 30, AccountName: "Bitcoin", parent_account_id: 10,
+    account_currency_id: 3, is_placeholder: 0, archived_at: null });
+  const transaction = {
+    externalId: "crypto-send", transactionDate: "2026-07-20", valuationCurrencyCode: "USD",
+    lineItems: [
+      { accountFullName: "Assets:Bitcoin", amountDecimal: "-0.12060432", valueDecimal: "-7818.78377" },
+      { accountFullName: "Assets:Checking", amountDecimal: "7818.78" },
+    ],
+  };
+  const preview = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [transaction] });
+  assert.equal(preview.rejectedTransactionCount, 0);
+  assert.equal(preview.readyToCommit, true);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(pool.state.lineItems[0].amount_units, "-12060432");
+  assert.equal(pool.state.lineItems[0].value_units, "-781878");
+  const invalid = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [{ ...transaction, externalId: "too-precise",
+      lineItems: [{ ...transaction.lineItems[0], amountDecimal: "-0.120604321" }, transaction.lineItems[1]] }] });
+  assert.equal(invalid.rejectedTransactionCount, 1);
+  assert.equal(invalid.transactions[0].errors.some((error) =>
+    error.code === "INVALID_DECIMAL_AMOUNT" && error.details.field === "amount_decimal"), true);
+});
+
+test("reference rates override source prices and Accounting derives the cash-conversion fee", async () => {
+  const pool = memoryPool();
+  pool.state.currencies.push({ currency_id: 3, owner_person_id: 7,
+    CurrencyAbbreviation: "BTC", scale: 8 });
+  pool.state.accounts.push(
+    { account_id: 30, AccountName: "Bitcoin", parent_account_id: 10,
+      account_currency_id: 3, is_placeholder: 0, archived_at: null },
+    { account_id: 31, AccountName: "Conversion Fees", parent_account_id: 20, AccountType: "expense",
+      account_currency_id: 1, is_placeholder: 0, archived_at: null },
+  );
+  pool.state.referenceRates.push(
+    { xrate_id: 1, owner_person_id: 7, ValidAt: "2026-09-01 00:00:00",
+      from_currency_id: 3, to_currency_id: 1, from_units: "100000000", to_units: "10000000" },
+    { xrate_id: 2, owner_person_id: 7, ValidAt: "2026-09-02 00:00:00",
+      from_currency_id: 1, to_currency_id: 3, from_units: "8000000", to_units: "100000000" },
+  );
+  const transaction = {
+    externalId: "btc-sale", transactionDate: "2026-09-01", transactionAt: "2026-09-01T23:00:00Z",
+    valuationCurrencyCode: "USD", feeAccountFullName: "Expenses:Conversion Fees",
+    lineItems: [
+      { accountFullName: "Assets:Bitcoin", amountDecimal: "-0.01", valueDecimal: "999.99999" },
+      { accountFullName: "Assets:Checking", amountDecimal: "790.00", valueDecimal: "790.00" },
+    ],
+  };
+  const preview = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [transaction] });
+  assert.equal(preview.readyToCommit, true);
+  assert.equal(preview.wouldCreateLineItemCount, 3);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(pool.state.transactions[0].TransactionDate, "2026-09-01");
+  assert.equal(pool.state.transactions[0].TransactionAtUtc, "2026-09-01 23:00:00.000");
+  assert.deepEqual(pool.state.lineItems.map((line) => [line.amount_units, line.value_units]), [
+    ["-1000000", "-80000"], ["79000", "79000"], ["1000", "1000"],
+  ]);
+  const missingFee = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [{ ...transaction, externalId: "missing-fee",
+      feeAccountFullName: null }] });
+  assert.equal(missingFee.rejectedTransactionCount, 1);
+  assert.equal(missingFee.transactions[0].errors.some((error) => error.code === "FEE_ACCOUNT_REQUIRED"), true);
+
+  const changing = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [{ ...transaction, externalId: "btc-sale-rate-changed" }] });
+  assert.equal(changing.readyToCommit, true);
+  pool.state.referenceRates.push({ xrate_id: 3, owner_person_id: 7,
+    ValidAt: "2026-09-01 23:00:00", from_currency_id: 3, to_currency_id: 1,
+    from_units: "100000000", to_units: "9000000" });
+  await assert.rejects(
+    commitTransactionImportPlan({ pool, personId: 7, importPlanId: changing.importPlanId }),
+    (error) => error.code === "IMPORT_PLAN_VALUATION_CHANGED",
+  );
+  assert.equal(pool.state.transactions.length, 1);
+  assert.equal(pool.state.plans.get(changing.importPlanId).invalidation_code, "VALUATION_CHANGED");
+
+  const oneSided = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [{ ...transaction, externalId: "one-sided",
+      lineItems: [{ ...transaction.lineItems[0], valueDecimal: "0" }] }] });
+  assert.equal(oneSided.rejectedTransactionCount, 1);
+  assert.equal(oneSided.transactions[0].errors.some((error) => error.code === "TOO_FEW_LINE_ITEMS"), true);
+
+  const { transactionAt: _sourceTime, ...dateOnlyTransaction } = transaction;
+  const dateOnly = await previewTransactionImport({ pool, personId: 7,
+    sourceSystem: "coinbase", transactions: [{ ...dateOnlyTransaction, externalId: "date-only",
+      lineItems: [transaction.lineItems[0], { ...transaction.lineItems[1], amountDecimal: "990.00",
+        valueDecimal: "990.00" }] }] });
+  assert.equal(dateOnly.readyToCommit, true);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: dateOnly.importPlanId });
+  assert.equal(pool.state.transactions[1].TransactionAtUtc, null);
+  assert.deepEqual(pool.state.lineItems.slice(3).map((line) => line.value_units),
+    ["-100000", "99000", "1000"]);
 });
 
 test("transaction import preserves both sides of a crypto transfer and its asset-denominated fee", async () => {

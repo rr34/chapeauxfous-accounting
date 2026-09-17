@@ -2,6 +2,7 @@ import { addFractions, fraction } from "./money.js";
 import { withTransaction } from "./db.js";
 import { requireAccessibleCurrency } from "./currencies.js";
 import { normalBalanceSign, normalBalanceUnits } from "./account-balances.js";
+import { normalizeTransactionAt, transactionAtForDatabase, transactionAtFromDatabase } from "./transaction-time.js";
 
 function applicationError(message, status = 400, code = "INVALID_ACCOUNTING_OPERATION", details = undefined) {
   return Object.assign(new Error(message), { status, code, details });
@@ -501,8 +502,10 @@ export async function validateTransaction(connection, transactionId, personId, {
   return { valid: true, lineItemCount: lines.length, valuationCurrencyId, foreignCurrencyIds: [...usedForeignCurrencies] };
 }
 
-export async function createTransaction({ personId, description, transactionDate, valuationCurrencyId, lineItems, rates, post = true, sourceSystem, sourceId }, runInTransaction = withTransaction) {
+export async function createTransaction({ personId, description, transactionDate, transactionAt = null,
+  valuationCurrencyId, lineItems, rates, post = true, sourceSystem, sourceId }, runInTransaction = withTransaction) {
   const resolvedTransactionDate = calendarDate(transactionDate);
+  const resolvedTransactionAt = normalizeTransactionAt(transactionAt);
   if (!Array.isArray(lineItems) || lineItems.length === 0) throw applicationError("At least one line item is required.");
   const resolvedDescription = optionalBoundedText(description, "transaction description", 16000);
   const resolvedSourceSystem = optionalBoundedText(sourceSystem, "source system", 32);
@@ -515,9 +518,11 @@ export async function createTransaction({ personId, description, transactionDate
       await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
       const [result] = await connection.query(
         `INSERT INTO transactions
-          (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate, source_system, source_id)
-         VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
-        [personId, resolvedDescription, valuationCurrencyId, resolvedTransactionDate, resolvedSourceSystem, resolvedSourceId],
+          (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate,
+           TransactionAtUtc, source_system, source_id)
+         VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)`,
+        [personId, resolvedDescription, valuationCurrencyId, resolvedTransactionDate,
+          transactionAtForDatabase(resolvedTransactionAt), resolvedSourceSystem, resolvedSourceId],
       );
       const transactionId = Number(result.insertId);
       for (const line of lineItems) {
@@ -571,19 +576,20 @@ export async function createTransaction({ personId, description, transactionDate
   }
 }
 
-export async function updateTransaction({ personId, transactionId, description, transactionDate,
+export async function updateTransaction({ personId, transactionId, description, transactionDate, transactionAt,
   valuationCurrencyId, lineItems, rates }, runInTransaction = withTransaction) {
   const resolvedTransactionId = Number(transactionId);
   if (!Number.isInteger(resolvedTransactionId) || resolvedTransactionId <= 0) {
     throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
   }
   const resolvedTransactionDate = calendarDate(transactionDate);
+  const normalizedTransactionAt = transactionAt === undefined ? undefined : normalizeTransactionAt(transactionAt);
   if (!Array.isArray(lineItems) || lineItems.length === 0) throw applicationError("At least one line item is required.");
   const resolvedDescription = optionalBoundedText(description, "transaction description", 16000);
 
   return runInTransaction(async (connection) => {
     const [transactionRows] = await connection.query(
-      `SELECT transaction_id, TransactionState, TransactionDate, valuation_currency_id
+      `SELECT transaction_id, TransactionState, TransactionDate, TransactionAtUtc, valuation_currency_id
          FROM transactions
         WHERE transaction_id = ? AND owner_person_id = ?
         FOR UPDATE`,
@@ -640,9 +646,12 @@ export async function updateTransaction({ personId, transactionId, description, 
 
     await connection.query(
       `UPDATE transactions
-          SET description = ?, valuation_currency_id = ?, TransactionDate = ?, UpdatedAt = CURRENT_TIMESTAMP()
+          SET description = ?, valuation_currency_id = ?, TransactionDate = ?, TransactionAtUtc = ?,
+              UpdatedAt = CURRENT_TIMESTAMP()
         WHERE transaction_id = ? AND owner_person_id = ?`,
-      [resolvedDescription, Number(valuationCurrencyId), resolvedTransactionDate, resolvedTransactionId, personId],
+      [resolvedDescription, Number(valuationCurrencyId), resolvedTransactionDate,
+        normalizedTransactionAt === undefined ? transactionRows[0].TransactionAtUtc
+          : transactionAtForDatabase(normalizedTransactionAt), resolvedTransactionId, personId],
     );
 
     for (const line of lineItems) {
@@ -724,14 +733,14 @@ export async function listTransactionsPage(pool, personId, { limit = 100, before
     ? [personId, resolvedLimit + 1]
     : [personId, cursor, personId, cursor, personId, cursor, resolvedLimit + 1];
   const [rows] = await pool.query(
-    `SELECT t.transaction_id, t.TransactionDate, t.description, t.TransactionState,
+    `SELECT t.transaction_id, t.TransactionDate, t.TransactionAtUtc, t.description, t.TransactionState,
             t.valuation_currency_id, c.CurrencyAbbreviation, c.scale,
             COUNT(li.line_item_id) AS line_item_count
        FROM transactions t
        JOIN currencies c ON c.currency_id = t.valuation_currency_id
        LEFT JOIN line_items li ON li.transaction_id = t.transaction_id
       WHERE t.owner_person_id = ?${cursorSql}
-      GROUP BY t.transaction_id, t.TransactionDate, t.description, t.TransactionState,
+      GROUP BY t.transaction_id, t.TransactionDate, t.TransactionAtUtc, t.description, t.TransactionState,
                t.valuation_currency_id, c.CurrencyAbbreviation, c.scale
       ORDER BY t.TransactionDate DESC, t.transaction_id DESC
       LIMIT ?`,
@@ -739,7 +748,9 @@ export async function listTransactionsPage(pool, personId, { limit = 100, before
   );
   const hasMore = rows.length > resolvedLimit;
   const transactions = rows.slice(0, resolvedLimit).map((row) => ({
-    id: Number(row.transaction_id), date: row.TransactionDate, description: row.description, state: row.TransactionState,
+    id: Number(row.transaction_id), date: row.TransactionDate,
+    transactionAt: transactionAtFromDatabase(row.TransactionAtUtc),
+    description: row.description, state: row.TransactionState,
     valuationCurrencyId: Number(row.valuation_currency_id), valuationCurrencyCode: row.CurrencyAbbreviation.trim(),
     scale: Number(row.scale), lineItemCount: Number(row.line_item_count),
   }));
@@ -752,7 +763,8 @@ export async function listTransactions(pool, personId, limit = 100) {
 
 export async function getTransaction(pool, personId, transactionId) {
   const [transactions] = await pool.query(
-    `SELECT t.transaction_id, t.TransactionDate, t.description, t.TransactionState, t.valuation_currency_id
+    `SELECT t.transaction_id, t.TransactionDate, t.TransactionAtUtc, t.description,
+            t.TransactionState, t.valuation_currency_id
        FROM transactions t WHERE t.transaction_id = ? AND t.owner_person_id = ?`,
     [transactionId, personId],
   );
@@ -784,6 +796,7 @@ export async function getTransaction(pool, personId, transactionId) {
   }
   return {
     id: Number(transactions[0].transaction_id), date: transactions[0].TransactionDate,
+    transactionAt: transactionAtFromDatabase(transactions[0].TransactionAtUtc),
     description: transactions[0].description, state: transactions[0].TransactionState,
     valuationCurrencyId: Number(transactions[0].valuation_currency_id),
     lineItems: lines.map((line) => ({ id: Number(line.line_item_id), amountUnits: String(line.amount_units),

@@ -911,6 +911,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     }),
     transactions: z.array(z.object({
       externalId: z.string().min(1), transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      transactionAt: z.string().datetime().nullable(),
       description: z.string().nullable(), valuationCurrencyCode: z.string().min(1),
       lineItemCount: z.number().int().min(1), status: z.enum(["planned", "existing", "created", "rejected"]),
       transactionId: z.number().int().positive().nullable(), errors: z.array(importIssueSchema),
@@ -1732,6 +1733,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     inputSchema: {
       description: z.string().trim().max(16000).nullable().optional(),
       transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Calendar date in YYYY-MM-DD form."),
+      transaction_at: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/).nullable().optional()
+        .describe("Optional exact source event time in UTC ending in Z; independent of the accounting date."),
       valuation_currency_id: positiveInteger("Currency in which transaction balance is evaluated."),
       line_items: z.array(lineItemSchema).min(1),
       rates: z.array(rateSchema).optional(),
@@ -1752,6 +1755,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       personId,
       description: input.description,
       transactionDate: input.transaction_date,
+      transactionAt: input.transaction_at,
       valuationCurrencyId: input.valuation_currency_id,
       lineItems: input.line_items.map((line) => ({
         accountId: line.account_id,
@@ -2073,11 +2077,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     transaction_external_id: z.string().trim().min(1).max(128),
     line_external_id: z.string().trim().min(1).max(128).nullable().optional(),
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    transaction_at: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/).nullable().optional(),
     description: z.string().max(16000).nullable().optional(),
     valuation_currency_code: z.string().trim().min(1).max(50),
+    fee_account_full_name: z.string().trim().min(1).max(4096).nullable().optional(),
     account_full_name: z.string().trim().min(1).max(4096),
     amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
-    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
+    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional(),
     memo: z.string().max(16000).nullable().optional(),
     question_audience: z.string().trim().min(1).max(50).nullable().optional(),
     question_prompt: z.string().trim().min(1).max(16000).nullable().optional(),
@@ -2141,7 +2147,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     job_status: z.literal("review_ready"),
     progress: transactionImportProgressSchema,
     preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-    ready_to_commit: z.literal(true),
+    ready_to_commit: z.boolean(),
     unresolved_exceptions: z.number().int().nonnegative(),
     excluded_exceptions: z.number().int().nonnegative(),
     user_outcome: z.object({
@@ -2166,8 +2172,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       }),
     }),
     commit_scope: z.string().min(1),
-    requiredAction: z.literal("REQUEST_USER_CONFIRMATION"),
-    nextAction: z.object({
+    requiredAction: z.enum(["REQUEST_USER_CONFIRMATION", "CORRECT_IMPORT_MISFITS", "NONE"]),
+    nextAction: z.union([z.object({
       type: z.literal("request_user_confirmation"),
       instruction: z.string().min(1),
       onApproval: z.object({
@@ -2177,7 +2183,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
           preview_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
         }),
       }),
-    }),
+    }), z.object({
+      type: z.enum(["correct_import_misfits", "none"]),
+      instruction: z.string().min(1),
+    })]),
   });
   const transactionImportCommittedJobSchema = z.object({
     ...transactionImportJobIdentityShape,
@@ -2199,7 +2208,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("get_transaction_import_schema", {
     title: "Get canonical transaction import schema",
-    description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record and the complete resumable artifact-upload contract. Fetch this before creating a declarative CSV-to-canonical mapping; do not infer fields or artifact semantics from examples.",
+    description: "Return the exact authoritative draft-2020-12 JSON Schema for every source-neutral line record and the complete resumable artifact-upload contract. Fetch this before creating a declarative file-to-canonical mapping. Group source rows into complete transactions by transaction_external_id; a one-account movement needs an evidence-backed counterpart. Preserve account quantities exactly and map source UTC time to transaction_at. Accounting selects the nearest owner-scoped reference rate in either direction and calculates each foreign line's signed valuation, rounded half-up to the valuation currency scale. A supplied source value is only a fallback when no rate exists. Preserve exact cash proceeds as a separate line and supply fee_account_full_name for Accounting to derive a cash-conversion residual fee. When the user provides known balance endpoints, use get_statement_reconciliation_context and analyze_statement_observations before staging.",
     inputSchema: {},
     outputSchema: transactionImportSchemaOutput,
     annotations: readOnly,
@@ -2234,7 +2243,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("stage_transaction_import_artifact", {
     title: "Stage a complete canonical transaction artifact",
-    description: "Consume one completed, SHA-256-verified canonical artifact without placing its records or transport chunks in model context. File-originated imports should use application/x-ndjson with one canonical line record per nonblank line. The host uploads raw bytes through the advertised resumable artifact contract, then calls this tool with only import_job_id and artifact_id. Accounting waits for the complete artifact, binds it to the logical job, groups every record by transaction_external_id across the whole file, applies internal idempotent batches, owns all accounting validation and deduplication, checkpoints progress, and exposes invalid transactions only through list_transaction_import_exceptions.",
+    description: "Consume one completed, SHA-256-verified canonical artifact without placing its records or transport chunks in model context. File-originated imports should use application/x-ndjson with one canonical line record per nonblank line. Before upload, group all account and counterpart lines for each transaction under the same transaction_external_id; a one-account source row alone cannot balance. The host uploads raw bytes through the advertised resumable artifact contract, then calls this tool with only import_job_id and artifact_id. Accounting waits for the complete artifact, binds it to the logical job, groups every record by transaction_external_id across the whole file, applies internal idempotent batches, owns all accounting validation and deduplication, checkpoints progress, and exposes invalid transactions only through list_transaction_import_exceptions.",
     inputSchema: {
       import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
@@ -2363,7 +2372,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("preview_transaction_import_job", {
     title: "Create final transaction import preview",
-    description: "After every source record is in Accounting, return a user outcome of Import succeeded, the number ready to add to the ledger, and the number already available for correction in Import misfits. Never describe Misfits data as uncommitted or not imported. Give one direct yes-or-no question about adding the ready transactions to the ledger, using the exact internal action arguments.",
+    description: "After every source record is in Accounting, report separately how many transactions are ready to add to the ledger, already in the ledger, and held in Import misfits. Source ingestion does not mean ledger posting. Ask for confirmation to add ready transactions only when at least one is ready. When none is ready, direct correction of unresolved misfits without offering to add zero transactions.",
     inputSchema: { import_job_id: z.string().trim().uuid() },
     outputSchema: transactionImportPreviewOutput,
     annotations: idempotentWrite,
@@ -2395,7 +2404,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
       .describe("Signed decimal amount in the matched account's native currency. The server converts it using that currency's established scale."),
     value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
-      .describe("Signed value in the transaction valuation currency. Optional only when the account uses the valuation currency; required for foreign-currency lines."),
+      .describe("Optional source value in the transaction valuation currency. Accounting replaces it with the nearest reference-rate valuation for a foreign line when a rate exists; supply it as fallback when no rate exists. Native-currency lines use their exact amount."),
     memo: z.string().trim().max(16000).nullable().optional(),
     question: accountingQuestionInputSchema.optional()
       .describe("Attach a durable unresolved question to this suspense line when exact statement movement is known but classification is not."),
@@ -2406,13 +2415,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     external_id: z.string().trim().min(1).max(128)
       .describe("Stable transaction identifier within source_system. Group flat source rows by this generic identifier before submitting one nested transaction."),
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    transaction_at: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/).nullable().optional(),
     description: z.string().trim().max(16000).nullable().optional(),
     valuation_currency_code: z.string().trim().min(1).max(50),
+    fee_account_full_name: z.string().trim().min(1).max(4096).nullable().optional(),
     line_items: z.array(importedLineItemSchema).min(1).max(1000),
   });
   registerTool("import_transactions", {
     title: "Preview transaction import",
-    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. When multiple statements contain counterpart rows for the same transfer, call analyze_statement_observations and analyze all statements before submitting either side. Join the evidence into one complete transaction, use a stable composite external_id, and preserve each source row identifier on its corresponding line. Do not require sent and received native amounts to match: represent the difference as an explicit fee when the evidence supports it. For statement imports, supply reconciliation so the server refuses to create a commit plan unless proposed new line amounts exactly satisfy every selected account's remaining known-balance movement; the same constraints are revalidated at commit. When exact opening and closing balances prove residual movement but its category remains unknown, use that exact balance-derived residual in a balanced transaction against a user-selected ordinary postable suspense account of the same currency, and add question metadata to the suspense line. This records uncertainty without pretending it came from a source row. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Decimal amounts use established currency scales. Each foreign line carries its own valuation value and therefore its own implied positive exchange rate, except that a nonzero amount with zero value is an intentional zero-value quantity adjustment with no exchange rate. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free and reconciliation-complete result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
+    description: `Validate and preview an atomic source-neutral batch of up to ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} complete transactions and ${TRANSACTION_IMPORT_MAX_LINE_ITEMS.toLocaleString("en-US")} nested line items. The caller, normally the LLM, must parse source files and group flat rows into complete nested transactions; this MCP does not parse CSV. When multiple statements contain counterpart rows for the same transfer, call analyze_statement_observations and analyze all statements before submitting either side. Join the evidence into one complete transaction, use a stable composite external_id, and preserve each source row identifier on its corresponding line. Do not require sent and received native amounts to match: represent the difference as an explicit fee when the evidence supports it. For statement imports, supply reconciliation so the server refuses to create a commit plan unless proposed new line amounts exactly satisfy every selected account's remaining known-balance movement; the same constraints are revalidated at commit. When exact opening and closing balances prove residual movement but its category remains unknown, use that exact balance-derived residual in a balanced transaction against a user-selected ordinary postable suspense account of the same currency, and add question metadata to the suspense line. This records uncertainty without pretending it came from a source row. For larger datasets, split only between complete transactions, keep the same stable source_system across every batch, and preview and confirm each plan sequentially. Commit a confirmed plan before submitting the next batch. Stable external IDs make repeated or resumed batches idempotent. source_system plus each generic external_id provides idempotency; this tool is not specific to GnuCash. Exact full account paths are resolved against the existing tree. Account-currency amounts retain their exact established scale. Accounting selects the nearest owner-scoped reference rate at transaction_at (or midnight UTC on transaction_date) in either currency direction and derives each foreign line valuation from its exact amount; a supplied source value is only a fallback when no rate exists. Keep exact matched cash consideration as its own native-currency line. When the reference-rate value and exact cash differ, Accounting derives the residual fee in fee_account_full_name, which must name an existing postable expense account in the valuation currency. An unmatched account side is never treated as a fee. A single-line nonzero quantity with explicit zero value remains a quantity-only adjustment only when no reference rate is available. The transaction must balance in its valuation currency. The result lists unknown or ambiguous paths, rejected transactions, numerical create/reuse/reject counts, and summaries by status, currency, year, and top-level branch. A rejection-free and reconciliation-complete result saves a durable owner-scoped plan and returns readyToCommit=true plus importPlanId. Present the preview and its one final confirmation question. After confirmation call commit_transaction_import with only the plan ID; never replay the batch.`,
     inputSchema: {
       source_system: z.string().trim().min(1).max(32)
         .describe("Stable, source-neutral namespace for external IDs, such as an application or dataset name."),
@@ -2440,8 +2451,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       transactions: transactions.map((transaction) => ({
         externalId: transaction.external_id,
         transactionDate: transaction.transaction_date,
+        transactionAt: transaction.transaction_at,
         description: transaction.description,
         valuationCurrencyCode: transaction.valuation_currency_code,
+        feeAccountFullName: transaction.fee_account_full_name,
         lineItems: transaction.line_items.map((line) => ({
           externalId: line.external_id,
           accountFullName: line.account_full_name,
@@ -2650,7 +2663,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("list_reference_rates", {
     title: "List timestamped reference rates",
-    description: "Read owner-scoped timestamped reference prices as positive native-unit ratios. Use a narrow transaction-time range for crypto valuation and spread analysis. A reference rate is evidence only: copy the selected value into each imported foreign line's value_decimal, and never let a price replace an account's actual statement quantity.",
+    description: "Read owner-scoped timestamped reference prices as positive native-unit ratios for inspection and audit. Transaction import automatically chooses the nearest rate in either currency direction and derives each foreign line's signed valuation from its exact account-currency quantity. A rate is a unit price, not a line value; cash proceeds remain exact separate lines, and valuation residuals become fees only when an exact cash counterpart and expense fee account are supplied. Never let a price replace an account's actual statement quantity.",
     inputSchema: {
       from_currency_id: positiveInteger("Optional source currency or asset.").optional(),
       to_currency_id: positiveInteger("Optional valuation currency.").optional(),
@@ -2676,7 +2689,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("get_reference_rate_import_schema", {
     title: "Get reference rate import schema",
-    description: "Read the authoritative JSON Schema for one canonical reference-rate record. For a dated CSV price series, use file_table_transform to create application/x-ndjson without putting every row in model context; map source_record_number for error correlation. A date-only valid_at means 00:00:00 UTC on that date. from_decimal and to_decimal are positive quantities in the currencies' displayed units; for a USD price of one BTC, use from_decimal=1 and to_decimal equal to the USD close price. Accounting converts to native units and rounds the target price half-up to its currency scale (cents for USD), reporting roundedCount. The transform's exceptions file retains invalid or blank source rows for reporting.",
+    description: "Read the authoritative JSON Schema for one canonical reference-rate record. For a dated price file, use file_table_transform to create application/x-ndjson without putting every row in model context; map source_record_number for error correlation. For OHLC historical bars, use close as the price unless the user or source specifies another measure. A date-only valid_at means 00:00:00 UTC on that date. from_decimal and to_decimal are positive quantities in the currencies' displayed units; for a USD price of one BTC, use from_decimal=1 and to_decimal equal to the USD close price. Accounting converts to native units and rounds the target price half-up to its currency scale (cents for USD), reporting roundedCount. The transform's exceptions file retains invalid or blank source rows for reporting.",
     inputSchema: {},
     outputSchema: successOutputSchema({
       canonical_schema: z.json(), artifact_upload: z.json(), maximum_records: z.number().int().positive(),
@@ -2715,7 +2728,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("import_reference_rates_artifact", {
     title: "Import complete reference rate artifact",
-    description: `Atomically consume one completed, SHA-256-verified canonical application/x-ndjson artifact of 1 through ${REFERENCE_RATE_BATCH_MAX} reference-rate records. Use get_reference_rate_import_schema and file_table_transform on an uploaded price CSV, upload the generated successful-record JSON Lines file through the advertised resumable artifact tool, then call this tool with only artifact_id. Accounting validates every record before writing, reuses exact pair-and-time matches including partial earlier imports, rejects conflicts, and returns counts and compact per-item outcome ranges. Transform exceptions remain a separate generated file and must be reported. An exact replay is safe.`,
+    description: `Atomically consume one completed, SHA-256-verified canonical application/x-ndjson artifact of 1 through ${REFERENCE_RATE_BATCH_MAX} reference-rate records. For an uploaded price file, use get_reference_rate_import_schema and file_table_transform to transform the full file to canonical JSON Lines. Compare transformedRecordCount with maximum_records; if larger, use file_jsonl_partition with records_per_file no greater than maximum_records to make bounded parts. Upload each part through the advertised resumable artifact tool and import each part by calling this tool with only artifact_id; use the whole artifact as one part when it fits. On resumption, recover successful per-part import receipts and continue with parts lacking a successful receipt. Verify aggregate submittedCount equals transformedRecordCount and aggregate createdCount plus reusedCount equals aggregate submittedCount. Accounting validates every record before writing, reuses exact pair-and-time matches including partial earlier imports, rejects conflicts, and returns counts and compact per-item outcome ranges. Transform exceptions remain a separate generated file and must be reported. An exact replay is safe.`,
     inputSchema: { artifact_id: z.string().trim().uuid() },
     outputSchema: referenceRateMutationOutput,
     annotations: idempotentWrite,

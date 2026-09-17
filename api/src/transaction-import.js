@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { currencyKey } from "./currencies.js";
-import { decimalToUnits } from "./money.js";
+import { decimalToUnits, unitsToDecimal } from "./money.js";
+import { nearestReferenceRate, referenceRatePairKey, valueAtReferenceRate } from "./reference-valuation.js";
+import { normalizeTransactionAt, transactionAtForDatabase } from "./transaction-time.js";
 import { attachTags, validateTransaction } from "./accounting.js";
 import { accountingQuestionTags, normalizeAccountingQuestion } from "./accounting-questions.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
@@ -94,11 +96,15 @@ function normalizeTransaction(transaction) {
   if (!Array.isArray(transaction?.lineItems) || transaction.lineItems.length === 0) {
     throw importError(`Transaction "${externalId}" requires at least one line item.`, "TOO_FEW_LINE_ITEMS", { externalId });
   }
+  const transactionDate = normalizeDate(transaction?.transactionDate);
   return {
     externalId,
-    transactionDate: normalizeDate(transaction?.transactionDate),
+    transactionDate,
+    transactionAt: normalizeTransactionAt(transaction?.transactionAt),
     description: optionalLimitedText(transaction?.description, "description", 16000),
     valuationCurrencyCode: limitedRequiredText(transaction?.valuationCurrencyCode, "valuation currency code", 50),
+    feeAccountFullName: transaction?.feeAccountFullName == null ? null
+      : normalizeAccountPath(transaction.feeAccountFullName),
     lineItems: transaction.lineItems.map((line) => normalizeLine(line, externalId)),
   };
 }
@@ -133,6 +139,7 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
   }
   return {
     sourceSystem: normalizedSourceSystem,
+    valuationContractVersion: 3,
     transactions: [...byExternalId.values()],
     submittedTransactionCount: transactions.length,
     submittedLineItemCount,
@@ -250,6 +257,7 @@ function buildAccountPaths(rows) {
     const candidate = {
       id: Number(row.account_id),
       path,
+      type: String(row.AccountType ?? "").trim().toLowerCase(),
       currencyId: Number(row.account_currency_id),
       currencyCode: String(row.CurrencyAbbreviation ?? "").trim(),
       scale: Number(row.scale),
@@ -266,9 +274,9 @@ function issue(code, message, details = undefined) {
   return { code, message, ...(details === undefined ? {} : { details }) };
 }
 
-function checkedDecimalToUnits(value, scale, field, details) {
+function checkedDecimalToUnits(value, scale, field, details, options = {}) {
   try {
-    const units = decimalToUnits(value, scale);
+    const units = decimalToUnits(value, scale, options);
     const integer = BigInt(units);
     if (integer < signedBigIntMinimum || integer > signedBigIntMaximum) {
       throw new Error("Amount is outside the signed 64-bit range");
@@ -298,11 +306,27 @@ function fingerprintFor(transaction) {
   })).sort((left, right) => left.fromCurrencyId - right.fromCurrencyId);
   return createHash("sha256").update(JSON.stringify({
     transactionDate: transaction.transactionDate,
+    ...(transaction.transactionAt == null ? {} : { transactionAt: transaction.transactionAt }),
     description: transaction.description,
     valuationCurrencyId: transaction.valuationCurrencyId,
     lineItems,
     rates,
   }), "utf8").digest("hex");
+}
+
+export function transactionValuationSignature(transaction) {
+  return createHash("sha256").update(JSON.stringify({
+    fingerprint: transaction.fingerprint,
+    referenceRates: transaction.lineItems.map((line) => line.referenceRate?.id ?? null),
+  }), "utf8").digest("hex");
+}
+
+function importResolutionDigest(entries) {
+  return createHash("sha256").update(JSON.stringify(entries.map((entry) => ({
+    externalId: entry.input.externalId,
+    status: entry.status,
+    signature: entry.resolved == null ? null : transactionValuationSignature(entry.resolved),
+  }))), "utf8").digest("hex");
 }
 
 function resolveTransaction(input, context, conflictingExternalIds) {
@@ -367,19 +391,41 @@ function resolveTransaction(input, context, conflictingExternalIds) {
         externalId: input.externalId, accountFullName: line.accountFullName,
       });
       let valueUnits = null;
+      let referenceRate = null;
       if (valuationCurrency) {
         if (account.currencyId === valuationCurrency.id && line.valueDecimal == null) {
           valueUnits = amountUnits;
-        } else if (line.valueDecimal == null) {
-          errors.push(issue("FOREIGN_VALUE_REQUIRED",
-            `Line for "${line.accountFullName}" requires its value in ${valuationCurrency.code}.`, {
-              accountFullName: line.accountFullName, valuationCurrencyCode: valuationCurrency.code,
-            }));
+        } else if (account.currencyId !== valuationCurrency.id) {
+          const pair = referenceRatePairKey(account.currencyId, valuationCurrency.id);
+          const selected = nearestReferenceRate(context.referenceRatesByPair.get(pair),
+            input.transactionAt ?? `${input.transactionDate}T00:00:00.000Z`,
+            account.currencyId, valuationCurrency.id);
+          if (selected) {
+            valueUnits = valueAtReferenceRate(amountUnits, selected);
+            referenceRate = { id: Number(selected.rate.xrate_id),
+              validAt: new Date(selected.validAtMs).toISOString() };
+            const nativeValue = BigInt(valueUnits);
+            if (nativeValue < signedBigIntMinimum || nativeValue > signedBigIntMaximum) {
+              errors.push(issue("REFERENCE_VALUATION_OUT_OF_RANGE",
+                `Reference-rate value for "${line.accountFullName}" exceeds the valuation currency's native-unit range.`, {
+                  accountFullName: line.accountFullName, referenceRateId: referenceRate.id,
+                }));
+            }
+          } else if (line.valueDecimal == null) {
+            errors.push(issue("FOREIGN_VALUE_REQUIRED",
+              `No reference rate is available for "${line.accountFullName}"; supply a source value in ${valuationCurrency.code}.`, {
+                accountFullName: line.accountFullName, valuationCurrencyCode: valuationCurrency.code,
+              }));
+          } else {
+            valueUnits = checkedDecimalToUnits(line.valueDecimal, valuationCurrency.scale, "value_decimal", {
+              externalId: input.externalId, accountFullName: line.accountFullName,
+            }, { round: true });
+          }
         } else {
           valueUnits = checkedDecimalToUnits(line.valueDecimal, valuationCurrency.scale, "value_decimal", {
             externalId: input.externalId, accountFullName: line.accountFullName,
-          });
-          if (account.currencyId === valuationCurrency.id && valueUnits !== amountUnits) {
+          }, { round: true });
+          if (valueUnits !== amountUnits) {
             errors.push(issue("NATIVE_VALUE_MISMATCH",
               `Amount and value differ for native-currency account "${line.accountFullName}".`, {
                 accountFullName: line.accountFullName, amountUnits, valueUnits,
@@ -388,14 +434,49 @@ function resolveTransaction(input, context, conflictingExternalIds) {
         }
       }
       resolvedLines.push({ ...line, accountId: account.id, accountCurrencyId: account.currencyId,
-        accountCurrencyCode: account.currencyCode, amountUnits, valueUnits });
+        accountCurrencyCode: account.currencyCode, accountType: account.type,
+        amountUnits, valueUnits, referenceRate });
     } catch (error) {
-      if (error.code === "INVALID_DECIMAL_AMOUNT") errors.push(issue(error.code, error.message, error.details));
-      else throw error;
+      if (error.code === "INVALID_DECIMAL_AMOUNT" || error.code === "CONFLICTING_REFERENCE_RATES") {
+        errors.push(issue(error.code, error.message, error.details));
+      } else throw error;
     }
   }
 
-  if (valuationCurrency && resolvedLines.length === input.lineItems.length) {
+  const allSourceLinesResolved = resolvedLines.length === input.lineItems.length;
+  if (valuationCurrency && allSourceLinesResolved) {
+    let valueTotal = resolvedLines.reduce((sum, line) => sum + BigInt(line.valueUnits ?? "0"), 0n);
+    const hasRatedForeignLine = resolvedLines.some((line) => line.referenceRate != null);
+    const hasNativeCashLine = resolvedLines.some((line) => line.accountCurrencyId === valuationCurrency.id
+      && (line.accountType === "asset" || line.accountType === "liability"));
+    if (errors.length === 0 && resolvedLines.length >= 2 && hasRatedForeignLine
+        && hasNativeCashLine && valueTotal !== 0n) {
+      const feePath = input.feeAccountFullName;
+      const candidates = feePath == null ? [] : context.accountsByPath.get(feePath) ?? [];
+      const feeAccount = candidates.length === 1 ? candidates[0] : null;
+      if (feeAccount == null || feeAccount.type !== "expense" || feeAccount.currencyId !== valuationCurrency.id
+          || feeAccount.placeholder || feeAccount.archived) {
+        errors.push(issue("FEE_ACCOUNT_REQUIRED",
+          "The reference-rate valuation and exact cash amount differ; supply one postable expense account in the valuation currency for the residual fee.", {
+            feeAccountFullName: feePath, feeValueUnits: (-valueTotal).toString(),
+          }));
+      } else {
+        const feeUnits = -valueTotal;
+        if (feeUnits < signedBigIntMinimum || feeUnits > signedBigIntMaximum) {
+          errors.push(issue("FEE_VALUE_OUT_OF_RANGE", "The derived fee exceeds the native-unit range."));
+        } else {
+          const feeDecimal = unitsToDecimal(feeUnits, valuationCurrency.scale);
+          resolvedLines.push({ externalId: null, accountFullName: feePath,
+            amountDecimal: feeDecimal, valueDecimal: feeDecimal,
+            memo: "Reference-rate valuation difference", question: null,
+            reconciliationState: "unreconciled", accountId: feeAccount.id,
+            accountCurrencyId: feeAccount.currencyId, accountCurrencyCode: feeAccount.currencyCode,
+            accountType: feeAccount.type,
+            amountUnits: feeUnits.toString(), valueUnits: feeUnits.toString(), referenceRate: null });
+          valueTotal = 0n;
+        }
+      }
+    }
     const onlyLine = resolvedLines.length === 1 ? resolvedLines[0] : null;
     const singleLineQuantityAdjustment = onlyLine != null
       && onlyLine.accountCurrencyId !== valuationCurrency.id
@@ -425,7 +506,6 @@ function resolveTransaction(input, context, conflictingExternalIds) {
       }
     }
 
-    const valueTotal = resolvedLines.reduce((sum, line) => sum + BigInt(line.valueUnits ?? "0"), 0n);
     if (valueTotal !== 0n) {
       errors.push(issue("UNBALANCED_TRANSACTION",
         `Transaction values do not balance in ${valuationCurrency.code}.`, {
@@ -461,6 +541,7 @@ function transactionSummary(entry) {
   return {
     externalId: transaction.externalId,
     transactionDate: transaction.transactionDate,
+    transactionAt: transaction.transactionAt,
     description: transaction.description,
     valuationCurrencyCode: transaction.valuationCurrencyCode,
     lineItemCount: transaction.lineItems.length,
@@ -534,7 +615,7 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
 async function loadContext(connection, personId, lock) {
   const suffix = lock ? " FOR UPDATE" : "";
   const [accountRows] = await connection.query(
-    `SELECT a.account_id, a.AccountName, a.parent_account_id, a.account_currency_id,
+    `SELECT a.account_id, a.AccountName, a.parent_account_id, a.AccountType, a.account_currency_id,
             a.is_placeholder, a.archived_at, c.CurrencyAbbreviation, c.scale
        FROM accounts a
        JOIN currencies c ON c.currency_id = a.account_currency_id
@@ -577,8 +658,39 @@ async function loadExistingTransactions(connection, personId, sourceSystem, exte
   }]));
 }
 
+async function loadReferenceRatesForImport(connection, personId, transactions, context) {
+  const pairs = new Map();
+  for (const transaction of transactions) {
+    const currencies = context.currenciesByCode.get(currencyKey(transaction.valuationCurrencyCode)) ?? [];
+    if (currencies.length !== 1) continue;
+    for (const line of transaction.lineItems) {
+      const accounts = context.accountsByPath.get(line.accountFullName) ?? [];
+      if (accounts.length !== 1 || accounts[0].currencyId === currencies[0].id) continue;
+      const left = accounts[0].currencyId;
+      const right = currencies[0].id;
+      pairs.set(referenceRatePairKey(left, right), { left, right });
+    }
+  }
+  const result = new Map();
+  for (const [key, { left, right }] of pairs) {
+    const [rows] = await connection.query(
+      `SELECT xrate_id, ValidAt, from_currency_id, to_currency_id, from_units, to_units
+         FROM xrates
+        WHERE owner_person_id = ? AND xrate_type = 'reference' AND transaction_id IS NULL
+          AND ((from_currency_id = ? AND to_currency_id = ?)
+            OR (from_currency_id = ? AND to_currency_id = ?))
+        ORDER BY ValidAt, xrate_id`,
+      [personId, left, right, right, left],
+    );
+    result.set(key, rows);
+  }
+  return result;
+}
+
 export async function analyzeTransactionImport(connection, personId, normalized, lock = false) {
   const context = await loadContext(connection, personId, lock);
+  context.referenceRatesByPair = await loadReferenceRatesForImport(connection, personId,
+    normalized.transactions, context);
   const existingByExternalId = await loadExistingTransactions(connection, personId, normalized.sourceSystem,
     normalized.transactions.map((transaction) => transaction.externalId), lock);
   const conflictingExternalIds = new Set(normalized.conflictingExternalIds);
@@ -658,6 +770,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     const importPlanId = randomUUID();
     const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const expiresAt = mariaDbUtcTimestamp(expiresAtDate);
+    normalized.previewResolutionDigest = importResolutionDigest(entries);
     const payloadJson = JSON.stringify(normalized);
     const preview = { ...summarize(normalized, entries),
       ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
@@ -726,10 +839,11 @@ export async function getTransactionImportPlan({ pool, personId, importPlanId })
 export async function insertImportedTransaction(connection, personId, sourceSystem, resolved) {
   const [insert] = await connection.query(
     `INSERT INTO transactions
-      (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate,
+      (owner_person_id, description, valuation_currency_id, TransactionState, TransactionDate, TransactionAtUtc,
        source_system, source_id, source_fingerprint)
-     VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
     [personId, resolved.description, resolved.valuationCurrencyId, resolved.transactionDate,
+      transactionAtForDatabase(resolved.transactionAt),
       sourceSystem, resolved.externalId, resolved.fingerprint],
   );
   const transactionId = Number(insert.insertId);
@@ -796,6 +910,17 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     }
 
     const normalized = JSON.parse(plan.payload_json);
+    if (normalized.valuationContractVersion !== 3) {
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'VALUATION_CONTRACT_CHANGED'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: importError("Valuation rules changed; review a new import preview.",
+        "IMPORT_PLAN_VALUATION_CHANGED") };
+    }
     const entries = await analyzeTransactionImport(connection, personId, normalized, true);
     if (entries.some((entry) => entry.status === "rejected")) {
       const details = summarize(normalized, entries);
@@ -808,6 +933,17 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
       );
       return { failure: importError("Transaction import plan is no longer valid; review a new dry run.",
         "IMPORT_PLAN_NO_LONGER_VALID", details) };
+    }
+    if (importResolutionDigest(entries) !== normalized.previewResolutionDigest) {
+      await connection.query(
+        `UPDATE accounting_import_plans
+            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
+                invalidation_code = 'VALUATION_CHANGED'
+          WHERE import_plan_id = ? AND owner_person_id = ?`,
+        [resolvedPlanId, personId],
+      );
+      return { failure: importError("A reference valuation changed after preview; review a new import preview.",
+        "IMPORT_PLAN_VALUATION_CHANGED") };
     }
     const reconciliationValidation = await validateReconciliation(connection, personId,
       normalized.reconciliation ?? null, entries);

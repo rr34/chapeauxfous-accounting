@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  commitTransactionImportJob,
   excludeTransactionImportException,
   getTransactionImportJob,
   groupCanonicalTransactionRecords,
@@ -13,6 +14,7 @@ import {
   parseCanonicalTransactionArtifact,
   TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES,
 } from "../src/artifact-upload.js";
+import { analyzeTransactionImport, normalizeTransactionImport } from "../src/transaction-import.js";
 
 test("a committed job keeps its current job shape when its stored result predates that shape", async () => {
   const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
@@ -54,10 +56,23 @@ test("the canonical import schema is exact, source-neutral, and line-oriented", 
     "valuation_currency_code",
     "account_full_name",
     "amount_decimal",
-    "value_decimal",
   ]);
+  assert.equal(transactionImportCanonicalJsonSchema.required.includes("value_decimal"), false);
   assert.deepEqual(transactionImportCanonicalJsonSchema.properties.line_external_id.type, ["string", "null"]);
+  assert.deepEqual(transactionImportCanonicalJsonSchema.properties.transaction_at.type, ["string", "null"]);
+  assert.equal(transactionImportCanonicalJsonSchema.required.includes("transaction_at"), false);
+  assert.deepEqual(transactionImportCanonicalJsonSchema.properties.fee_account_full_name.type, ["string", "null"]);
+  assert.match(transactionImportCanonicalJsonSchema.properties.amount_decimal.description, /Exact signed account-currency quantity/);
+  assert.match(transactionImportCanonicalJsonSchema.properties.value_decimal.description,
+    /replaces it with the nearest reference-rate valuation/);
   assert.doesNotMatch(JSON.stringify(transactionImportCanonicalJsonSchema), /csv|gnucash/i);
+  const [withoutSourceValue] = groupCanonicalTransactionRecords([{
+    transaction_external_id: "source-value-omitted", transaction_date: "2026-09-01",
+    transaction_at: "2026-09-01T23:00:00Z", valuation_currency_code: "USD",
+    account_full_name: "Assets:Bitcoin", amount_decimal: "-0.01",
+  }]);
+  assert.deepEqual(withoutSourceValue.errors, []);
+  assert.equal(withoutSourceValue.transaction.transactionAt, "2026-09-01T23:00:00Z");
 });
 
 test("canonical line records are grouped by stable transaction identity with complete context", () => {
@@ -219,6 +234,132 @@ test("the final job preview publishes an executable confirmation handoff", async
     tool: "commit_transaction_import_job",
     arguments: { import_job_id: importJobId, preview_digest: result.preview_digest },
   });
+});
+
+test("an import with only misfits offers correction and cannot commit zero transactions", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  const job = {
+    import_job_id: importJobId, owner_person_id: 7, source_system: "source_app",
+    source_file_sha256: "7".repeat(64), source_file_name: "source.csv",
+    expected_record_count: 2, job_status: "receiving", preview_sha256: null, result_json: null,
+  };
+  const connection = {
+    async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+    async query(sql, params) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[job]];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        exception_records: 2, received_records: 2, exception_transactions: 2,
+      }]];
+      if (sql.includes("SELECT transaction_external_id, canonical_sha256, item_status")) return [[{
+        transaction_external_id: "tx-1", canonical_sha256: "a".repeat(64), item_status: "exception",
+      }]];
+      if (sql.includes("UPDATE accounting_transaction_import_jobs")) {
+        job.job_status = "review_ready";
+        job.preview_sha256 = params[0];
+        return [{ affectedRows: 1 }];
+      }
+      if (sql.includes("FROM accounting_transaction_import_items") && sql.includes("item_status = 'staged'")) return [[]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const pool = { async getConnection() { return connection; } };
+  const preview = await previewTransactionImportJob({ pool, personId: 7, importJobId });
+  assert.equal(preview.ready_to_commit, false);
+  assert.equal(preview.requiredAction, "CORRECT_IMPORT_MISFITS");
+  assert.equal(preview.nextAction.type, "correct_import_misfits");
+  assert.equal(Object.hasOwn(preview.nextAction, "onApproval"), false);
+  assert.match(preview.nextAction.instruction, /No transactions are ready/);
+  await assert.rejects(
+    commitTransactionImportJob({ pool, personId: 7, importJobId, previewDigest: preview.preview_digest }),
+    (error) => error.code === "IMPORT_JOB_NOTHING_TO_COMMIT",
+  );
+});
+
+test("a staged job rejects a changed reference valuation before ledger posting", async () => {
+  const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
+  const job = { import_job_id: importJobId, owner_person_id: 7, source_system: "coinbase",
+    source_file_sha256: "7".repeat(64), source_file_name: "bitcoin.csv",
+    expected_record_count: 2, job_status: "receiving", preview_sha256: null, result_json: null };
+  const item = { transaction_external_id: "sale-1", canonical_sha256: "8".repeat(64),
+    item_status: "staged", errors_json: null, source_record_count: 2, resolved_json: null };
+  const accounts = [
+    { account_id: 10, AccountName: "Assets", parent_account_id: null, AccountType: "asset",
+      account_currency_id: 1, is_placeholder: 1, archived_at: null, CurrencyAbbreviation: "USD", scale: 2 },
+    { account_id: 11, AccountName: "Checking", parent_account_id: 10, AccountType: "asset",
+      account_currency_id: 1, is_placeholder: 0, archived_at: null, CurrencyAbbreviation: "USD", scale: 2 },
+    { account_id: 12, AccountName: "Bitcoin", parent_account_id: 10, AccountType: "asset",
+      account_currency_id: 2, is_placeholder: 0, archived_at: null, CurrencyAbbreviation: "BTC", scale: 8 },
+    { account_id: 20, AccountName: "Expenses", parent_account_id: null, AccountType: "expense",
+      account_currency_id: 1, is_placeholder: 1, archived_at: null, CurrencyAbbreviation: "USD", scale: 2 },
+    { account_id: 21, AccountName: "Conversion Fees", parent_account_id: 20, AccountType: "expense",
+      account_currency_id: 1, is_placeholder: 0, archived_at: null, CurrencyAbbreviation: "USD", scale: 2 },
+  ];
+  const currencies = [
+    { currency_id: 1, CurrencyAbbreviation: "USD", scale: 2 },
+    { currency_id: 2, CurrencyAbbreviation: "BTC", scale: 8 },
+  ];
+  const rates = [{ xrate_id: 1, ValidAt: "2026-09-01 00:00:00", from_currency_id: 2,
+    to_currency_id: 1, from_units: "100000000", to_units: "8000000" }];
+  const connection = {
+    async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+    async query(sql, params = []) {
+      if (sql.includes("FROM accounting_transaction_import_jobs")) return [[job]];
+      if (sql.includes("COALESCE(SUM(CASE")) return [[{
+        staged_records: item.item_status === "staged" ? 2 : 0,
+        pending_staged_records: item.item_status === "staged" ? 2 : 0,
+        exception_records: item.item_status === "exception" ? 2 : 0,
+        received_records: 2,
+        staged_transactions: item.item_status === "staged" ? 1 : 0,
+        pending_staged_transactions: item.item_status === "staged" ? 1 : 0,
+        exception_transactions: item.item_status === "exception" ? 1 : 0,
+      }]];
+      if (sql.includes("SELECT transaction_external_id, canonical_sha256, item_status")) return [[item]];
+      if (sql.includes("SELECT transaction_external_id, resolved_json")) return [[item]];
+      if (sql.includes("FROM accounts a") && sql.includes("JOIN currencies c")) return [accounts];
+      if (sql.includes("FROM currencies")) return [currencies];
+      if (sql.includes("FROM xrates") && sql.includes("xrate_type = 'reference'")) return [rates];
+      if (sql.includes("FROM transactions t") && sql.includes("LEFT JOIN line_items")) return [[]];
+      if (sql.includes("UPDATE accounting_transaction_import_items")) {
+        item.item_status = "exception";
+        item.errors_json = params[0];
+        item.resolved_json = null;
+        return [{ affectedRows: 1 }];
+      }
+      if (sql.includes("UPDATE accounting_transaction_import_jobs")) {
+        if (sql.includes("job_status = 'review_ready'")) {
+          job.job_status = "review_ready";
+          job.preview_sha256 = params[0];
+        } else {
+          job.job_status = "receiving";
+          job.preview_sha256 = null;
+        }
+        return [{ affectedRows: 1 }];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const normalized = normalizeTransactionImport({ sourceSystem: "coinbase", transactions: [{
+    externalId: "sale-1", transactionDate: "2026-09-01", transactionAt: "2026-09-01T01:00:00Z",
+    valuationCurrencyCode: "USD", feeAccountFullName: "Expenses:Conversion Fees",
+    lineItems: [
+      { accountFullName: "Assets:Bitcoin", amountDecimal: "-0.01" },
+      { accountFullName: "Assets:Checking", amountDecimal: "790" },
+    ],
+  }] });
+  const [staged] = await analyzeTransactionImport(connection, 7, normalized);
+  assert.equal(staged.status, "planned");
+  item.resolved_json = JSON.stringify(staged.resolved);
+  const pool = { async getConnection() { return connection; } };
+  const preview = await previewTransactionImportJob({ pool, personId: 7, importJobId });
+  assert.equal(preview.ready_to_commit, true);
+  rates.push({ xrate_id: 2, ValidAt: "2026-09-01 01:00:00", from_currency_id: 2,
+    to_currency_id: 1, from_units: "100000000", to_units: "9000000" });
+  const result = await commitTransactionImportJob({ pool, personId: 7, importJobId,
+    previewDigest: preview.preview_digest });
+  assert.equal(result.code, "IMPORT_JOB_ACCOUNTING_CONTEXT_CHANGED");
+  assert.equal(item.item_status, "exception");
+  assert.equal(JSON.parse(item.errors_json)[0].code, "IMPORT_VALUATION_CHANGED");
+  assert.equal(job.job_status, "receiving");
 });
 
 test("a committed job can retry one exception with supplemental accounting lines", async () => {

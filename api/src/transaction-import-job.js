@@ -9,6 +9,7 @@ import {
   analyzeTransactionImport,
   insertImportedTransaction,
   normalizeTransactionImport,
+  transactionValuationSignature,
 } from "./transaction-import.js";
 
 export const TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI =
@@ -27,18 +28,22 @@ export const transactionImportCanonicalJsonSchema = Object.freeze({
     "valuation_currency_code",
     "account_full_name",
     "amount_decimal",
-    "value_decimal",
   ],
   properties: {
     transaction_external_id: { type: "string", minLength: 1, maxLength: 128 },
     line_external_id: { type: ["string", "null"], minLength: 1, maxLength: 128 },
     transaction_date: { type: "string", format: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+    transaction_at: { description: "Optional exact source UTC instant, stored separately from the accounting date. Null means only the accounting date is known; rate lookup then uses midnight UTC on that date.",
+      type: ["string", "null"], pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z$" },
     description: { type: ["string", "null"], maxLength: 16000 },
     valuation_currency_code: { type: "string", minLength: 1, maxLength: 50 },
+    fee_account_full_name: { description: "Existing postable expense account in the valuation currency for an automatically derived cash-conversion residual fee.",
+      type: ["string", "null"], minLength: 1, maxLength: 4096 },
     account_full_name: { type: "string", minLength: 1, maxLength: 4096 },
-    amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128 },
+    amount_decimal: { description: "Exact signed account-currency quantity; must fit the account currency's scale.",
+      type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128 },
     value_decimal: {
-      description: "Value in the transaction valuation currency. Null is allowed only for a native-currency account, where the server derives the same value as amount_decimal.",
+      description: "Optional source valuation. Accounting replaces it with the nearest reference-rate valuation when one exists, using the exact account-currency amount and reciprocal ratio in either direction. Without a reference rate, a foreign line needs this value; Accounting rounds it half-up to the valuation currency scale. A native-currency account always uses its exact amount.",
       type: ["string", "null"],
       pattern: "^[+-]?\\d+(?:\\.\\d+)?$",
       maxLength: 128,
@@ -148,11 +153,14 @@ function canonicalRecordSchemaErrors(record, sourceOrdinal) {
   stringField("transaction_external_id", { required: true, minimum: 1, maximum: 128 });
   stringField("line_external_id", { nullable: true, minimum: 1, maximum: 128 });
   stringField("transaction_date", { required: true, maximum: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+  stringField("transaction_at", { nullable: true, maximum: 24,
+    pattern: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/ });
   stringField("description", { nullable: true, maximum: 16000 });
   stringField("valuation_currency_code", { required: true, minimum: 1, maximum: 50 });
+  stringField("fee_account_full_name", { nullable: true, minimum: 1, maximum: 4096 });
   stringField("account_full_name", { required: true, minimum: 1, maximum: 4096 });
   stringField("amount_decimal", { required: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
-  stringField("value_decimal", { required: true, nullable: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
+  stringField("value_decimal", { nullable: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
   stringField("memo", { nullable: true, maximum: 16000 });
   stringField("question_audience", { nullable: true, minimum: 1, maximum: 50 });
   stringField("question_prompt", { nullable: true, minimum: 1, maximum: 16000 });
@@ -193,7 +201,8 @@ export function groupCanonicalTransactionRecords(records) {
     const first = recordObjects[0];
     const errors = groupedRecords.flatMap(({ schemaErrors }) => schemaErrors);
     if (!externalId) errors.push({ code: "TRANSACTION_EXTERNAL_ID_REQUIRED", message: "transaction_external_id is required." });
-    for (const field of ["transaction_date", "description", "valuation_currency_code"]) {
+    for (const field of ["transaction_date", "transaction_at", "description", "valuation_currency_code",
+      "fee_account_full_name"]) {
       const values = new Set(recordObjects.map((record) => JSON.stringify(record[field] ?? null)));
       if (values.size > 1) errors.push({
         code: "INCONSISTENT_TRANSACTION_CONTEXT",
@@ -208,8 +217,10 @@ export function groupCanonicalTransactionRecords(records) {
       transaction: {
         externalId,
         transactionDate: first?.transaction_date,
+        transactionAt: first?.transaction_at ?? null,
         description: first?.description ?? null,
         valuationCurrencyCode: first?.valuation_currency_code,
+        feeAccountFullName: first?.fee_account_full_name ?? null,
         lineItems: recordObjects.map((record) => ({
           externalId: record.line_external_id ?? null,
           accountFullName: record.account_full_name,
@@ -735,11 +746,13 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
           SET job_status = 'review_ready', preview_sha256 = ?, updated_at = UTC_TIMESTAMP(6)
         WHERE import_job_id = ?`, [previewSha256, normalizedJobId],
     );
+    const readyToCommit = progress.transaction_totals.pending_commit > 0;
+    const hasMisfits = progress.transaction_totals.unresolved_exceptions > 0;
     return {
       ...jobIdentity({ ...job, job_status: "review_ready" }),
       progress,
       preview_digest: `sha256:${previewSha256}`,
-      ready_to_commit: true,
+      ready_to_commit: readyToCommit,
       unresolved_exceptions: progress.transaction_totals.unresolved_exceptions,
       excluded_exceptions: progress.transaction_totals.excluded,
       user_outcome: {
@@ -759,14 +772,19 @@ export async function previewTransactionImportJob({ pool, personId, importJobId 
         correct_with: { tool: "retry_transaction_import_exception", arguments: { import_job_id: normalizedJobId } },
       },
       commit_scope: `Import succeeded. All ${progress.expected_source_records} source records are in Accounting. ${progress.transaction_totals.pending_commit} transactions are ready to add to the ledger, ${progress.transaction_totals.previously_committed + progress.transaction_totals.reused} are already there, and ${progress.transaction_totals.exceptions} are in Import misfits where they can be corrected.`,
-      requiredAction: "REQUEST_USER_CONFIRMATION",
-      nextAction: {
+      requiredAction: readyToCommit ? "REQUEST_USER_CONFIRMATION" : hasMisfits ? "CORRECT_IMPORT_MISFITS" : "NONE",
+      nextAction: readyToCommit ? {
         type: "request_user_confirmation",
         instruction: `Import succeeded. All ${progress.expected_source_records} source records are in Accounting. Add ${progress.transaction_totals.pending_commit} ready transactions to the ledger now? ${progress.transaction_totals.exceptions} transactions are in Import misfits and can be corrected there.`,
         onApproval: {
           tool: "commit_transaction_import_job",
           arguments: { import_job_id: normalizedJobId, preview_digest: `sha256:${previewSha256}` },
         },
+      } : {
+        type: hasMisfits ? "correct_import_misfits" : "none",
+        instruction: hasMisfits
+          ? `No transactions are ready to add to the ledger. Correct the ${progress.transaction_totals.unresolved_exceptions} unresolved transactions in Import misfits, then preview again.`
+          : "All transactions are already in the ledger or explicitly excluded. No ledger addition is needed.",
       },
     };
   });
@@ -786,7 +804,7 @@ export async function getTransactionImportJob({ pool, personId, importJobId }) {
     };
     return { ...current,
       preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
-      ready_to_commit: job.job_status === "review_ready" };
+      ready_to_commit: job.job_status === "review_ready" && current.progress.transaction_totals.pending_commit > 0 };
   });
 }
 
@@ -806,13 +824,16 @@ export async function listTransactionImportJobs({ pool, personId, limit = 100 })
       [personId, normalizedLimit],
     );
     const jobs = [];
-    for (const job of rows) jobs.push({
-      ...await currentJobResult(connection, job),
-      preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
-      ready_to_commit: job.job_status === "review_ready",
-      created_at: job.created_at == null ? null : String(job.created_at),
-      updated_at: job.updated_at == null ? null : String(job.updated_at),
-    });
+    for (const job of rows) {
+      const current = await currentJobResult(connection, job);
+      jobs.push({
+        ...current,
+        preview_digest: job.preview_sha256 ? `sha256:${job.preview_sha256}` : null,
+        ready_to_commit: job.job_status === "review_ready" && current.progress.transaction_totals.pending_commit > 0,
+        created_at: job.created_at == null ? null : String(job.created_at),
+        updated_at: job.updated_at == null ? null : String(job.updated_at),
+      });
+    }
     return jobs;
   });
 }
@@ -874,6 +895,10 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
         WHERE import_job_id = ? AND item_status = 'staged'
         ORDER BY transaction_external_id FOR UPDATE`, [normalizedJobId],
     );
+    if (itemRows.length === 0) throw jobError(
+      "No transactions are ready to add to the ledger. Correct unresolved Import misfits and preview again.",
+      "IMPORT_JOB_NOTHING_TO_COMMIT", undefined, 409,
+    );
     const transactions = itemRows.map((row) => parseJson(row.resolved_json, "resolved transaction"));
     if (transactions.length) {
       const entries = await analyzeTransactionImport(connection, personId, {
@@ -882,7 +907,14 @@ export async function commitTransactionImportJob({ pool, personId, importJobId, 
         submittedLineItemCount: transactions.reduce((sum, transaction) => sum + transaction.lineItems.length, 0),
         duplicateInputTransactionCount: 0, conflictingExternalIds: [],
       }, true);
-      const newlyInvalid = entries.filter((entry) => entry.status === "rejected");
+      const stagedById = new Map(transactions.map((transaction) => [transaction.externalId, transaction]));
+      const newlyInvalid = entries.flatMap((entry) => {
+        if (entry.status === "rejected") return [entry];
+        const original = stagedById.get(entry.input.externalId);
+        if (transactionValuationSignature(entry.resolved) === transactionValuationSignature(original)) return [];
+        return [{ ...entry, errors: [{ code: "IMPORT_VALUATION_CHANGED",
+          message: "Reference-rate valuation changed after staging; correct and preview this transaction again." }] }];
+      });
       if (newlyInvalid.length) {
         for (const entry of newlyInvalid) await connection.query(
           `UPDATE accounting_transaction_import_items

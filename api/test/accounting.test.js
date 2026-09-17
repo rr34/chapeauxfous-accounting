@@ -6,8 +6,36 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { createTransaction, deleteAccount, listAccountLedger, listAccounts, updateAccount, updateTransaction,
+const { createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
+  listTransactionsPage, updateAccount, updateTransaction,
   validateTransaction } = await import("../src/accounting.js");
+
+test("ledger reads expose an optional UTC source instant while ordering by accounting date", async () => {
+  const queries = [];
+  const pool = { async query(sql) {
+    queries.push(sql);
+    if (sql.includes("COUNT(li.line_item_id)")) return [[{
+      transaction_id: 44, TransactionDate: "2026-09-02", TransactionAtUtc: "2026-09-01 23:30:00.000",
+      description: "Bitcoin sale", TransactionState: "posted", valuation_currency_id: 1,
+      CurrencyAbbreviation: "USD", scale: 2, line_item_count: 2,
+    }]];
+    if (sql.includes("FROM transactions t WHERE")) return [[{
+      transaction_id: 44, TransactionDate: "2026-09-02", TransactionAtUtc: "2026-09-01 23:30:00.000",
+      description: "Bitcoin sale", TransactionState: "posted", valuation_currency_id: 1,
+    }]];
+    if (sql.includes("FROM line_items li JOIN accounts")) return [[]];
+    if (sql.includes("FROM lineitems_tags_join")) return [[]];
+    if (sql.includes("FROM xrates")) return [[]];
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+  const page = await listTransactionsPage(pool, 7);
+  assert.equal(page.transactions[0].date, "2026-09-02");
+  assert.equal(page.transactions[0].transactionAt, "2026-09-01T23:30:00.000Z");
+  assert.match(queries[0], /ORDER BY t\.TransactionDate DESC, t\.transaction_id DESC/);
+  const detail = await getTransaction(pool, 7, 44);
+  assert.equal(detail.date, "2026-09-02");
+  assert.equal(detail.transactionAt, "2026-09-01T23:30:00.000Z");
+});
 
 test("account balances follow each account type's normal side", async () => {
   const accountTypes = [
@@ -139,6 +167,17 @@ test("transaction creation rejects impossible dates before opening a transaction
   assert.equal(opened, false);
 });
 
+test("transaction creation rejects a non-UTC source time before opening a transaction", async () => {
+  let opened = false;
+  await assert.rejects(
+    createTransaction({ personId: 7, transactionDate: "2026-09-02",
+      transactionAt: "2026-09-01T19:30:00-04:00", valuationCurrencyId: 1,
+      lineItems: [{}, {}] }, async () => { opened = true; }),
+    (error) => error.code === "INVALID_TRANSACTION_AT",
+  );
+  assert.equal(opened, false);
+});
+
 test("transaction source identity must be complete", async () => {
   await assert.rejects(
     createTransaction({ personId: 7, transactionDate: "2026-02-28", valuationCurrencyId: 1,
@@ -185,6 +224,7 @@ test("an existing transaction is updated atomically without replacing retained l
 
   const result = await updateTransaction({
     personId: 7, transactionId: 44, description: "Corrected", transactionDate: "2026-08-12",
+    transactionAt: "2026-08-12T19:30:00Z",
     valuationCurrencyId: 3, rates: [], lineItems: [
       { id: 10, accountId: 20, amountUnits: "1250", valueUnits: "1250", memo: "Debit" },
       { id: 11, accountId: 21, amountUnits: "-1250", valueUnits: "-1250", memo: "Credit" },
@@ -198,6 +238,8 @@ test("an existing transaction is updated atomically without replacing retained l
   assert.equal(lineUpdates.length, 2);
   assert.deepEqual(lineUpdates.map(({ params }) => params.slice(-2)), [[10, 44], [11, 44]]);
   assert.equal(statements.some(({ sql }) => sql.startsWith("INSERT INTO line_items")), false);
+  const headerUpdate = statements.find(({ sql }) => sql.startsWith("UPDATE transactions"));
+  assert.equal(headerUpdate.params[3], "2026-08-12 19:30:00.000");
 });
 
 test("a reconciled account line cannot be moved or have its amount changed", async () => {

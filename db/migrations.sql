@@ -7,6 +7,18 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0017: store-optional-transaction-utc-timestamp
+-- writer downtime: schedule maintenance; adding a transaction column takes a metadata lock.
+-- deployment order: apply before deploying code that reads or writes TransactionAtUtc.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+-- Existing transactions have no asserted source instant, so leave the new field NULL.
+
+ALTER TABLE `transactions`
+  ADD COLUMN `TransactionAtUtc` datetime(3) NULL DEFAULT NULL AFTER `TransactionDate`
+    COMMENT 'Optional exact UTC instant supplied by the source when meaningful. Format: UTC date-time with millisecond precision; null when only the accounting date is known. Rules: TransactionDate remains the ledger ordering and reconciliation date.';
+
+-- end migration 0017
+
 -- migration 0016: document-accounting-storage
 -- writer downtime: schedule maintenance; altering comments takes metadata locks on ledger tables.
 -- deployment order: apply before relying on describe_accounting_schema for full storage comments.

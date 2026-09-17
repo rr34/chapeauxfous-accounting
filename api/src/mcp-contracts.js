@@ -110,6 +110,7 @@ export const accountSchema = z.object({
 export const transactionListItemSchema = z.object({
   id: z.number().int().positive().describe("Stable owner-scoped transaction ID."),
   date: z.string().describe("Accounting calendar date, not the time the row was entered."),
+  transactionAt: z.string().datetime().nullable().describe("Optional source event instant in UTC; null when only an accounting date is known."),
   description: z.string().nullable().describe("Optional user-written explanation of the transaction."),
   state: z.enum(["draft", "posted", "voided"]).describe("Transaction lifecycle state; posted entries affect balances."),
   valuationCurrencyId: z.number().int().positive().describe("Currency ID used to value and balance this transaction."),
@@ -138,6 +139,7 @@ const transactionLineSchema = z.object({
 export const transactionSchema = z.object({
   id: z.number().int().positive().describe("Stable owner-scoped transaction ID."),
   date: z.string().describe("Accounting calendar date of this transaction."),
+  transactionAt: z.string().datetime().nullable().describe("Optional source event instant in UTC; independent of the ledger date."),
   description: z.string().nullable().describe("Optional user-written explanation of the complete transaction."),
   state: z.enum(["draft", "posted", "voided"]).describe("Transaction lifecycle state; posted entries affect balances."),
   valuationCurrencyId: z.number().int().positive().describe("Currency ID in which line values must sum to zero."),
@@ -434,8 +436,11 @@ export const accountingCapabilityManifest = Object.freeze({
         "commit_delete_transactions", "verify_ledger"],
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [
+        "For a transaction file tied to a named account, select the accounting.accounts.active_paths context view to resolve its full path and currency once; use list_accounts only when current posted balances are needed.",
         "Fetch the authoritative canonical line-record JSON Schema before mapping a source file.",
         "For a file-originated import, persist canonical application/x-ndjson and use the advertised resumable artifact upload; byte chunks are host-managed transport and must not enter model context.",
+        "Group all lines of each transaction under one stable transaction_external_id before staging. A one-account source row is not a complete double-entry transaction: identify its counterpart from source evidence or use an existing user-selected suspense account when classification remains unknown. Preserve source account quantities exactly; valuation values are rounded to the valuation currency scale.",
+        "When opening and closing known balances are available, use get_statement_reconciliation_context and analyze_statement_observations before staging, then prove that exact source quantities cover the required remaining account movement. Map the source UTC time to transaction_at. Accounting automatically chooses the nearest owner-scoped reference rate in either currency direction and values each foreign line from its exact amount; a supplied source value is used only when no reference rate exists. Keep exact cash proceeds as their own line and supply an existing expense fee_account_full_name for a cash-conversion residual; Accounting computes that fee. A missing counterpart is not a fee.",
         `Inline JSON is reserved for direct agent-created transactions and bounded calls of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
         "Retry only structured exceptions; successful transaction groups remain staged or committed and must not be resubmitted.",
         "Corrected exceptions may add accounting lines without changing the immutable count of original source records represented by the job.",
@@ -458,7 +463,7 @@ export const accountingCapabilityManifest = Object.freeze({
         "start_single_account_statement_import", "import_single_account_statement", "reconcile_account_through_date"],
       dependencies: ["accounting.accounts", "accounting.currencies", "accounting.transactions"],
       attachmentHints: [
-        "For an uploaded price CSV, get the reference-rate import schema, transform the full file to canonical JSON Lines, upload the successful-record artifact, and import it in one call; report any transform exceptions.",
+        "For an uploaded price file, get the reference-rate import schema and transform the full file to canonical JSON Lines with file_table_transform; for OHLC historical bars, use close as the price unless the user or source specifies another measure. Report transform exceptions. Compare transformedRecordCount with maximum_records; if larger, use file_jsonl_partition with records_per_file no greater than maximum_records. Upload and import each part, or the whole artifact when it fits. On resumption, recover successful per-part import receipts and continue with parts lacking a successful receipt. Verify aggregate submittedCount equals transformedRecordCount and aggregate createdCount plus reusedCount equals aggregate submittedCount.",
         "For a statement, bind one CSV, PDF, image, OCR result, or screenshot to one confirmed accounting.account object.",
         "For a statement, call start_single_account_statement_import before extracting or importing the attachment.",
         "Answer its four questions in order and preserve printed balances, dates, signed amounts, and text exactly.",

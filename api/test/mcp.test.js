@@ -72,7 +72,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     lineItemSummary: { byAccountCurrency: { USD: transactionCount * 2 }, byTopLevelBranch: { Assets: transactionCount } },
     questionSummary: { openQuestionCount: 0, byAudience: {}, bySuspenseAccount: {} },
-    transactions: [{ externalId: "tx-1", transactionDate: "2026-01-01", description: "Test",
+    transactions: [{ externalId: "tx-1", transactionDate: "2026-01-01", transactionAt: null,
+      description: "Test",
       valuationCurrencyCode: "USD", lineItemCount: 2, status: ledgerChanged ? "created" : "planned",
       transactionId: ledgerChanged ? 91 : null, errors: [] }],
   });
@@ -465,7 +466,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "analyze_statement_observations").description,
     /Same date and amount without stable identity remains a review candidate/);
   assert.match(tools.tools.find((tool) => tool.name === "list_reference_rates").description,
-    /never let a price replace an account's actual statement quantity/);
+    /Never let a price replace an account's actual statement quantity/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /even when new currency details or scales are unknown/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /entire intended batch/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /status=needs_input/);
@@ -554,7 +555,41 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(manifest.capabilities.some((capability) => capability.id === "accounting.accounts"), true);
   assert.equal(manifest.capabilities.find((capability) => capability.id === "accounting.accounts")
     .aliases.includes("exchange accounts"), true);
+  const referenceRateCapability = manifest.capabilities.find((capability) =>
+    capability.id === "accounting.reconciliation");
+  const referenceRateSchemaTool = tools.tools.find((tool) => tool.name === "get_reference_rate_import_schema");
+  const referenceRateImportTool = tools.tools.find((tool) => tool.name === "import_reference_rates_artifact");
+  assert.match(referenceRateSchemaTool.description,
+    /OHLC historical bars.*close as the price unless the user or source specifies another measure/);
+  assert.match(referenceRateSchemaTool.description, /USD close price/);
+  assert.match(referenceRateCapability.attachmentHints[0],
+    /OHLC historical bars.*close as the price unless the user or source specifies another measure/);
+  const referenceRateSchema = await client.callTool({ name: "get_reference_rate_import_schema", arguments: {} });
+  assert.equal(referenceRateSchema.structuredContent.maximum_records, 10000);
+  for (const guidance of [referenceRateCapability.attachmentHints[0], referenceRateImportTool.description]) {
+    assert.match(guidance, /Compare transformedRecordCount with maximum_records/);
+    assert.match(guidance, /file_jsonl_partition.*records_per_file.*maximum_records/);
+    assert.match(guidance, /Upload (?:and import each part|each part.*import each part)/i);
+    assert.match(guidance, /whole artifact(?: as one part)? when it fits/);
+    assert.match(guidance, /recover successful per-part import receipts/);
+    assert.match(guidance, /continue with parts lacking a successful receipt/);
+    assert.match(guidance, /aggregate submittedCount equals transformedRecordCount/);
+    assert.match(guidance, /aggregate createdCount plus reusedCount equals aggregate submittedCount/);
+  }
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
+  assert.match(transactionCapability.attachmentHints.join(" "), /accounting\.accounts\.active_paths.*resolve its full path and currency once/);
+  assert.match(transactionCapability.attachmentHints.join(" "), /one-account source row is not a complete double-entry transaction/);
+  assert.match(transactionCapability.attachmentHints.join(" "), /known balances.*get_statement_reconciliation_context.*analyze_statement_observations/);
+  assert.match(transactionCapability.attachmentHints.join(" "), /Accounting automatically chooses the nearest owner-scoped reference rate in either currency direction/);
+  assert.match(transactionCapability.attachmentHints.join(" "), /A missing counterpart is not a fee/);
+  assert.match(tools.tools.find((tool) => tool.name === "get_transaction_import_schema").description,
+    /Preserve account quantities exactly.*Accounting selects the nearest owner-scoped reference rate in either direction/);
+  assert.match(tools.tools.find((tool) => tool.name === "stage_transaction_import_artifact").description,
+    /one-account source row alone cannot balance/);
+  assert.match(tools.tools.find((tool) => tool.name === "list_reference_rates").description,
+    /Transaction import automatically chooses the nearest rate in either currency direction/);
+  assert.match(tools.tools.find((tool) => tool.name === "preview_transaction_import_job").description,
+    /When none is ready, direct correction.*without offering to add zero transactions/);
   assert.match(transactionCapability.summary, /permanently delete/);
   assert.equal(transactionCapability.tools.includes("refresh_transaction_delete_plan"), true);
   assert.equal(transactionCapability.tools.includes("stage_transaction_import_artifact"), true);
@@ -566,7 +601,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   const canonicalSchema = JSON.parse(canonicalSchemaResource.contents[0].text);
   assert.equal(canonicalSchema.additionalProperties, false);
   assert.equal(canonicalSchema.properties.transaction_external_id.type, "string");
-  assert.equal(canonicalSchema.required.includes("value_decimal"), true);
+  assert.deepEqual(canonicalSchema.properties.transaction_at.type, ["string", "null"]);
+  assert.equal(canonicalSchema.required.includes("value_decimal"), false);
   const canonicalSchemaToolResult = await client.callTool({ name: "get_transaction_import_schema", arguments: {} });
   assert.deepEqual(canonicalSchemaToolResult.structuredContent.artifact_upload,
     artifactImportTool._meta["agent-slayer/artifactUpload"]);
