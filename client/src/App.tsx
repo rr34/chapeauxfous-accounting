@@ -558,6 +558,13 @@ function formattedDecimal(units: bigint, scale: number) {
   return scale === 0 ? value : value.replace(/\.?0+$/, "");
 }
 
+function signedAccountMovementDecimal(amount: string | null, account: Pick<Account, "type" | "currencyCode">) {
+  const parts = decimalParts(amount);
+  if (!parts) return "—";
+  const movementUnits = parts.units * (debitIncreasesAccount(account.type) ? 1n : -1n);
+  return `${movementUnits > 0n ? "+" : ""}${formattedDecimal(movementUnits, parts.scale)} ${account.currencyCode}`;
+}
+
 function sumDecimals(values: Array<string | null | undefined>, { ignoreBlank = false } = {}) {
   const parsed: DecimalParts[] = [];
   for (const value of values) {
@@ -680,13 +687,13 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
 
 function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null,
   initialLineItemId = null, initialDateEditorOpen = false, runningBalanceUnits = null,
-  runningBalancesByLineItemId = null, knownBalanceAction = null, journalHeader = false,
+  knownBalanceAction = null, journalHeader = false,
   layout = "standard", token, onSaved, onCancel }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
   initialDateEditorOpen?: boolean; runningBalanceUnits?: string | null;
-  runningBalancesByLineItemId?: Map<number, string> | null; knownBalanceAction?: React.ReactNode;
-  journalHeader?: boolean; layout?: "standard" | "register" | "register-edit"; token: string;
+  knownBalanceAction?: React.ReactNode; journalHeader?: boolean;
+  layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: () => Promise<void>; onCancel?: () => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
@@ -978,6 +985,10 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
 
   if (isRegisterEdit) {
     const mainLine = lines[0];
+    const currentAccountTotal = initialAccount ? sumDecimals(lines
+      .filter((line) => !line.autoBalance && Number(line.accountId) === initialAccount.id)
+      .map((line) => line.amount), { ignoreBlank: true }) : null;
+    const totalParts = decimalParts(currentAccountTotal);
     return <>
       <tr className={`register-entry-row register-edit-transaction-row ${journalHeader ? "register-journal-header" : ""}`}>
         <td><button type="button" className="register-date-edit" aria-label={`Edit date for transaction ${initialTransaction.id}`}
@@ -993,10 +1004,14 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
             {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button></td>
         <td>{journalHeader ? <span className="register-transaction-label">Transaction</span>
           : <strong>{initialAccount?.name ?? accountMap.get(Number(mainLine.accountId))?.name}</strong>}</td>
-        <td>{!journalHeader && registerMovementInput(mainLine, 0)}</td>
+        <td className={`amount ${journalHeader && totalParts && initialAccount
+          ? movementEffectClass(totalParts.units.toString(), initialAccount.type) : ""}`}>
+          {journalHeader && initialAccount
+            ? signedAccountMovementDecimal(currentAccountTotal, initialAccount)
+            : registerMovementInput(mainLine, 0)}</td>
         <td />
-        <td className="amount balance" title={journalHeader ? undefined : "Running balance before these edits; updates after save"}>
-          {journalHeader ? null : runningBalanceUnits != null && initialAccount
+        <td className="amount balance" title="Running balance before these edits; updates after save">
+          {runningBalanceUnits != null && initialAccount
             ? unitsToDecimal(runningBalanceUnits, initialAccount.scale) : "—"}</td>
         <td className="amount known-balance">{date === initialTransaction.date ? knownBalanceAction : null}</td>
       </tr>
@@ -1029,11 +1044,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
               {line.autoBalance && line.value && <small>Balancing value {line.value} {valuationCurrency?.code ?? ""}; choose an account to see its signed amount and save.</small>}</td>
             <td>{isThisAccount && registerMovementInput(line, index)}</td>
             <td>{!isThisAccount && registerMovementInput(line, index)}</td>
-            <td className="amount balance" title={journalHeader && isThisAccount && line.id != null
-              ? "Running balance before these edits; updates after save" : undefined}>
-              {journalHeader && isThisAccount && line.id != null && initialAccount
-                && runningBalancesByLineItemId?.has(line.id)
-                ? unitsToDecimal(runningBalancesByLineItemId.get(line.id)!, initialAccount.scale) : null}</td>
+            <td />
             <td>{!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
               aria-label={`Remove line ${index + 1}`}
               onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}</td>
@@ -1061,13 +1072,20 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     </>;
   }
 
-  if (layout === "register") return <>
+  if (layout === "register") {
+    const currentAccountAmounts = lines.filter((line) => Number(line.accountId) === initialAccountId
+      && line.amount.trim() !== "").map((line) => line.amount);
+    const currentAccountTotal = currentAccountAmounts.length > 0 ? sumDecimals(currentAccountAmounts) : null;
+    return <>
     <tr className="register-new-transaction-row">
       <td><input type="date" aria-label="New transaction date" value={date}
         onChange={(event) => setDate(event.target.value)} /></td>
       <td className="register-description"><input autoFocus aria-label="New transaction description" value={description}
         onChange={(event) => setDescription(event.target.value)} placeholder="Description" /></td>
-      <td><span className="register-new-label">New transaction</span></td><td /><td /><td /><td />
+      <td><span className="register-new-label">New transaction</span></td>
+      <td className="amount">{initialAccount && currentAccountTotal
+        ? signedAccountMovementDecimal(currentAccountTotal, initialAccount) : null}</td>
+      <td /><td /><td />
     </tr>
     {lines.map((line, index) => {
       const lineAccount = accountMap.get(Number(line.accountId));
@@ -1145,6 +1163,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       </div>
     </td></tr>
   </>;
+  }
 
   return <section className="composer">
     <form onSubmit={submit}>
@@ -1843,7 +1862,8 @@ function Ledger({ transactions, selected, onSelect, onOpenInRegister, onVerify, 
 }
 
 type AccountRegisterRow =
-  | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry }
+  | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry;
+      totalAmountUnits: string; currentAccountLineCount: number }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
 
 function formatRegisterDate(value: string) {
@@ -1885,20 +1905,25 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     for (const entry of entries) lastEntries.set(entry.date, entry.lineItemId);
     return lastEntries;
   }, [entries]);
-  const runningBalanceByLineItemId = useMemo(() => new Map(entries.map((entry) =>
-    [entry.lineItemId, entry.runningBalanceUnits])), [entries]);
   const registerRows = useMemo<AccountRegisterRow[]>(() => {
-    const entryRows = entries.map((entry, order) => ({ kind: "entry" as const, date: entry.date, order, entry }));
-    const lastRowByTransactionId = new Map(entryRows.map((row) => [row.entry.transactionId, row]));
+    const groupedEntries = new Map<number, Extract<AccountRegisterRow, { kind: "entry" }>>();
+    entries.forEach((entry, order) => {
+      const previous = groupedEntries.get(entry.transactionId);
+      const amountUnits = BigInt(entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`));
+      groupedEntries.set(entry.transactionId, { kind: "entry", date: entry.date, order, entry,
+        totalAmountUnits: (BigInt(previous?.totalAmountUnits ?? "0") + amountUnits).toString(),
+        currentAccountLineCount: (previous?.currentAccountLineCount ?? 0) + 1 });
+    });
     return [
-    ...(view === "journal" ? [...lastRowByTransactionId.values()] : entryRows),
-    ...accountAssertions.map((assertion) => ({ kind: "assertion" as const, date: assertion.date, order: assertion.id, assertion })),
-  ].sort((left, right) => {
-    const chronologicalOrder = left.date.localeCompare(right.date)
-      || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1);
-    return sortOrder === "recent" ? -chronologicalOrder : chronologicalOrder;
-  });
-  }, [accountAssertions, entries, sortOrder, view]);
+      ...groupedEntries.values(),
+      ...accountAssertions.map((assertion) => ({ kind: "assertion" as const,
+        date: assertion.date, order: assertion.id, assertion })),
+    ].sort((left, right) => {
+      const chronologicalOrder = left.date.localeCompare(right.date)
+        || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1);
+      return sortOrder === "recent" ? -chronologicalOrder : chronologicalOrder;
+    });
+  }, [accountAssertions, entries, sortOrder]);
 
   useEffect(() => {
     selectionRequest.current += 1;
@@ -2041,8 +2066,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>Account</th>
-          <th>This account <span>+ increase · − decrease · {account.currencyCode}</span></th>
-          <th>Other accounts <span>+ increase · − decrease · each line's currency</span></th><th>Running balance</th>
+          <th>This account</th><th>Other accounts</th><th>Running balance</th>
           <th>Known balance</th></tr></thead>
         <tbody>{sortOrder === "recent" && newTransactionRows}{registerRows.map((row) => {
           if (row.kind === "assertion") {
@@ -2063,7 +2087,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             </Fragment>;
           }
           const { entry } = row;
-          const entryAmountUnits = entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`);
+          const counterpartNames = [...new Map(entry.splits
+            .filter((split) => split.accountId !== account.id)
+            .map((split) => [split.accountId, split.accountName])).values()];
+          const counterpartLabel = counterpartNames.length === 0 ? "—"
+            : counterpartNames.length === 1 ? counterpartNames[0] : "Split";
           const expanded = view !== "basic";
           const isEndOfDateEntry = lastEntryByDate.get(entry.date) === entry.lineItemId;
           const showAddKnownBalance = isEndOfDateEntry && !assertionDates.has(entry.date)
@@ -2076,16 +2104,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             onKeyDown={(event) => event.stopPropagation()}>+</button>;
           const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "row" && knownBalanceDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
-          if (selectedTransaction?.id === entry.transactionId
-            && (view === "journal" || selectedLineItemId === entry.lineItemId)) {
+          if (selectedTransaction?.id === entry.transactionId) {
             return <Fragment key={entry.lineItemId}>
               {sortOrder === "recent" && rowBalanceForm}
               <TransactionComposer key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
-                initialLineItemId={view === "journal" ? selectedLineItemId : entry.lineItemId}
-                initialTransaction={selectedTransaction} journalHeader={view === "journal"}
+                initialLineItemId={selectedLineItemId ?? entry.lineItemId}
+                initialTransaction={selectedTransaction}
+                journalHeader={view === "journal" || row.currentAccountLineCount > 1}
                 initialDateEditorOpen={dateEditorOpen} runningBalanceUnits={entry.runningBalanceUnits}
-                runningBalancesByLineItemId={runningBalanceByLineItemId}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
                 onCancel={closeSelectedTransaction} onSaved={async () => {
                   await onTransactionCreated(); closeSelectedTransaction();
@@ -2112,13 +2139,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
               <td>{view === "journal" ? <span className="register-transaction-label">Transaction</span>
                 : <strong>{account.name}</strong>}</td>
-              <td className={`amount ${view === "journal" ? "" : movementEffectClass(entryAmountUnits, account.type)}`}>
-                {view !== "journal" && signedAccountMovement(entryAmountUnits, account)}</td>
-              <td />
-              <td className="amount balance">{view !== "journal" && unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
+              <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
+                {signedAccountMovement(row.totalAmountUnits, account)}</td>
+              <td className={view === "basic" ? "register-other-account-summary" : undefined}>
+                {view === "basic" ? counterpartLabel : null}</td>
+              <td className="amount balance">{unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
               <td className="amount known-balance">{knownBalanceAction}</td>
             </tr>
-            {entry.splits.filter((split) => view === "journal" || split.lineItemId !== entry.lineItemId)
+            {view !== "basic" && entry.splits
+              .filter((split) => view === "journal" || split.accountId !== account.id)
               .map((split) => {
                 const splitAccount = accountById.get(split.accountId);
                 const isThisAccount = split.accountId === account.id;
@@ -2129,7 +2158,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                       event.preventDefault(); void activateTransaction(entry);
                     }
                   }}>
-                  <td></td><td>{view !== "basic" && split.memo && <small>{split.memo}</small>}</td>
+                  <td></td><td>{split.memo && <small>{split.memo}</small>}</td>
                   <td><strong>{split.accountName}</strong></td>
                   <td className={`amount ${splitAccount && isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
@@ -2137,9 +2166,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   <td className={`amount ${splitAccount && !isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
                     {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
-                  <td className="amount balance">{view === "journal" && isThisAccount
-                    && runningBalanceByLineItemId.has(split.lineItemId)
-                    ? unitsToDecimal(runningBalanceByLineItemId.get(split.lineItemId)!, account.scale) : null}</td><td></td>
+                  <td></td><td></td>
                 </tr>;
               })}
             {sortOrder === "oldest" && rowBalanceForm}
