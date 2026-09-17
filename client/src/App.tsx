@@ -495,6 +495,37 @@ function signedAmountForSide(side: "debit" | "credit", value: string) {
   return side === "credit" ? `-${unsigned}` : unsigned;
 }
 
+function debitIncreasesAccount(type: Account["type"]) {
+  return type === "asset" || type === "expense";
+}
+
+function reversePostingSign(value: string) {
+  if (!value) return "";
+  if (value.startsWith("-")) return `+${value.slice(1)}`;
+  if (value.startsWith("+")) return `-${value.slice(1)}`;
+  return `-${value}`;
+}
+
+function accountMovementInput(amount: string, accountType: Account["type"]) {
+  const movement = debitIncreasesAccount(accountType) ? amount : reversePostingSign(amount);
+  return movement.startsWith("+") && movement.length > 1 ? movement.slice(1) : movement;
+}
+
+function postingAmountFromMovement(movement: string, accountType: Account["type"]) {
+  return debitIncreasesAccount(accountType) ? movement : reversePostingSign(movement);
+}
+
+function signedAccountMovement(amountUnits: string, account: Pick<Account, "type" | "scale" | "currencyCode">) {
+  const movementUnits = BigInt(amountUnits) * (debitIncreasesAccount(account.type) ? 1n : -1n);
+  const amount = unitsToDecimal(movementUnits.toString(), account.scale);
+  return `${movementUnits > 0n ? "+" : ""}${amount} ${account.currencyCode}`;
+}
+
+function movementEffectClass(amountUnits: string, accountType: Account["type"]) {
+  const movementUnits = BigInt(amountUnits) * (debitIncreasesAccount(accountType) ? 1n : -1n);
+  return movementUnits > 0n ? "increase-effect" : movementUnits < 0n ? "decrease-effect" : "";
+}
+
 type DecimalParts = { units: bigint; scale: number };
 
 function decimalParts(value: string | null | undefined): DecimalParts | null {
@@ -649,11 +680,13 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
 
 function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null,
   initialLineItemId = null, initialDateEditorOpen = false, runningBalanceUnits = null,
-  knownBalanceAction = null, layout = "standard", token, onSaved, onCancel }: {
+  runningBalancesByLineItemId = null, knownBalanceAction = null, journalHeader = false,
+  layout = "standard", token, onSaved, onCancel }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
   initialDateEditorOpen?: boolean; runningBalanceUnits?: string | null;
-  knownBalanceAction?: React.ReactNode; layout?: "standard" | "register" | "register-edit"; token: string;
+  runningBalancesByLineItemId?: Map<number, string> | null; knownBalanceAction?: React.ReactNode;
+  journalHeader?: boolean; layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: () => Promise<void>; onCancel?: () => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
@@ -674,7 +707,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       return layout === "register" ? [firstLine, { ...blankLine(), autoBalance: true }] : [firstLine];
     }
     const valuationScale = currencyMap.get(initialTransaction.valuationCurrencyId)?.scale ?? 2;
-    const transactionLines = initialLineItemId == null ? initialTransaction.lineItems
+    const transactionLines = initialLineItemId == null || journalHeader ? initialTransaction.lineItems
       : [...initialTransaction.lineItems].sort((left, right) =>
         Number(right.id === initialLineItemId) - Number(left.id === initialLineItemId));
     const editableLines = transactionLines.map((line) => {
@@ -737,7 +770,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     const accountId = isRegisterEdit ? "" : target.accountId;
     const account = accountMap.get(Number(accountId));
     const rate = decimalParts(target.rateDecimal);
-    let amount = value;
+    let amount = account && account.currencyId !== nextValuationCurrencyId ? "" : value;
     if (account && account.currencyId !== nextValuationCurrencyId && rate && rate.units > 0n) {
       amount = target.rateDirection === "value-per-amount"
         ? decimalQuotientToScale(value, target.rateDecimal, account.scale) ?? target.amount
@@ -754,7 +787,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       const consumeBlank = isRegisterEdit && current[index]?.autoBalance
         && (Boolean(patch.accountId) || Object.hasOwn(patch, "memo") || manualValue);
       const chosenAccount = Object.hasOwn(patch, "accountId") ? accountMap.get(Number(patch.accountId)) : null;
-      const needsNativeAmount = consumeBlank && chosenAccount
+      const needsNativeAmount = current[index]?.autoBalance && chosenAccount
         && chosenAccount.currencyId !== resolvedValuationCurrencyId;
       const updated = current.map((line, lineIndex) => lineIndex === index
         ? synchronizeLine({ ...line, ...patch, amount: needsNativeAmount ? "" : patch.amount ?? line.amount,
@@ -768,6 +801,18 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
 
   function updateLineAmount(index: number, side: "debit" | "credit", value: string) {
     updateLine(index, { amount: signedAmountForSide(side, value) });
+  }
+
+  function registerMovementInput(line: EditableLine, index: number) {
+    const lineAccount = accountMap.get(Number(line.accountId));
+    const accountName = lineAccount?.name ?? "unassigned line";
+    return <input className="amount-input" inputMode="decimal"
+      aria-label={`Signed amount for ${accountName}, line ${index + 1}`}
+      placeholder={lineAccount ? "± amount" : "Choose account first"}
+      disabled={!lineAccount}
+      value={lineAccount ? accountMovementInput(line.amount, lineAccount.type) : ""}
+      onChange={(event) => updateLine(index, { amount: lineAccount
+        ? postingAmountFromMovement(event.target.value, lineAccount.type) : event.target.value })} />;
   }
 
   function updateLineRate(index: number, rateDecimal: string) {
@@ -934,27 +979,24 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
   if (isRegisterEdit) {
     const mainLine = lines[0];
     return <>
-      <tr className="register-entry-row register-edit-transaction-row">
+      <tr className={`register-entry-row register-edit-transaction-row ${journalHeader ? "register-journal-header" : ""}`}>
         <td><button type="button" className="register-date-edit" aria-label={`Edit date for transaction ${initialTransaction.id}`}
           aria-expanded={showDateEditor} onClick={() => setShowDateEditor((current) => !current)}>
           {formatRegisterDate(date)} <span aria-hidden="true">✎</span></button></td>
         <td className="register-description"><textarea aria-label="Transaction description" value={description}
           onChange={(event) => setDescription(event.target.value)} rows={2} />
-          <input className="register-main-memo" aria-label="Memo for selected account line"
+          {!journalHeader && <input className="register-main-memo" aria-label="Memo for selected account line"
             value={mainLine.memo} onChange={(event) => updateLine(0, { memo: event.target.value })}
-            placeholder="Memo for this account line" />
+            placeholder="Memo for this account line" />}
           <button type="button" className="register-values-toggle" aria-expanded={showValuationDetails}
             onClick={() => setShowValuationDetails((current) => !current)}>
             {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button></td>
-        <td><strong>{initialAccount?.name ?? accountMap.get(Number(mainLine.accountId))?.name}</strong></td>
-        <td><input className="amount-input" inputMode="decimal" aria-label="Debit for selected account"
-          value={amountForSide(mainLine.amount, "debit")}
-          onChange={(event) => updateLineAmount(0, "debit", event.target.value)} /></td>
-        <td><input className="amount-input" inputMode="decimal" aria-label="Credit for selected account"
-          value={amountForSide(mainLine.amount, "credit")}
-          onChange={(event) => updateLineAmount(0, "credit", event.target.value)} /></td>
-        <td className="amount balance" title="Running balance before these edits; updates after save">
-          {runningBalanceUnits != null && initialAccount
+        <td>{journalHeader ? <span className="register-transaction-label">Transaction</span>
+          : <strong>{initialAccount?.name ?? accountMap.get(Number(mainLine.accountId))?.name}</strong>}</td>
+        <td>{!journalHeader && registerMovementInput(mainLine, 0)}</td>
+        <td />
+        <td className="amount balance" title={journalHeader ? undefined : "Running balance before these edits; updates after save"}>
+          {journalHeader ? null : runningBalanceUnits != null && initialAccount
             ? unitsToDecimal(runningBalanceUnits, initialAccount.scale) : "—"}</td>
         <td className="amount known-balance">{date === initialTransaction.date ? knownBalanceAction : null}</td>
       </tr>
@@ -968,26 +1010,31 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
           <button type="button" className="link-button" onClick={() => setShowDateEditor(false)}>Done</button>
         </div>
       </td></tr>}
-      {registerEditValueRow(mainLine, 0)}
-      {lines.slice(1).map((line, offset) => {
-        const index = offset + 1;
+      {!journalHeader && registerEditValueRow(mainLine, 0)}
+      {(journalHeader ? lines : lines.slice(1)).map((line, offset) => {
+        const index = journalHeader ? offset : offset + 1;
+        const isSelectedAccountLine = journalHeader && line.id === initialLineItemId;
+        const isThisAccount = Number(line.accountId) === initialAccountId;
         return <Fragment key={line.id ?? `new-${index}`}>
-          <tr className={`register-inline-line ${line.autoBalance ? "auto-balanced" : ""}`}>
+          <tr className={`register-inline-line ${journalHeader ? "register-journal-line" : ""} ${line.autoBalance ? "auto-balanced" : ""}`}>
             <td><span className="register-line-marker" aria-hidden="true">↳</span></td>
             <td><input aria-label={`Memo for line ${index + 1}`} value={line.memo}
               onChange={(event) => updateLine(index, { memo: event.target.value })}
-              placeholder={line.autoBalance ? "New line or balancing line" : "Memo"} /></td>
-            <td><AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
+              placeholder={line.autoBalance ? "New line or balancing line" : isSelectedAccountLine ? "Memo for this account line" : "Memo"} /></td>
+            <td>{isSelectedAccountLine && initialAccount
+              ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
+              : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
               choices={accountChoices} placeholder={line.autoBalance ? "Unassigned — choose account" : undefined}
-              onChange={(accountId) => updateLine(index, { accountId })} />
-              {line.autoBalance && line.value && <small>Balancing amount in {valuationCurrency?.code ?? "value currency"}; choose an account to save.</small>}</td>
-            <td><input className="amount-input" inputMode="decimal" aria-label={`Debit for line ${index + 1}`}
-              value={amountForSide(line.amount, "debit")}
-              onChange={(event) => updateLineAmount(index, "debit", event.target.value)} /></td>
-            <td><input className="amount-input" inputMode="decimal" aria-label={`Credit for line ${index + 1}`}
-              value={amountForSide(line.amount, "credit")}
-              onChange={(event) => updateLineAmount(index, "credit", event.target.value)} /></td>
-            <td /><td>{!line.autoBalance && <button type="button" className="quiet"
+              onChange={(accountId) => updateLine(index, { accountId })} />}
+              {line.autoBalance && line.value && <small>Balancing value {line.value} {valuationCurrency?.code ?? ""}; choose an account to see its signed amount and save.</small>}</td>
+            <td>{isThisAccount && registerMovementInput(line, index)}</td>
+            <td>{!isThisAccount && registerMovementInput(line, index)}</td>
+            <td className="amount balance" title={journalHeader && isThisAccount && line.id != null
+              ? "Running balance before these edits; updates after save" : undefined}>
+              {journalHeader && isThisAccount && line.id != null && initialAccount
+                && runningBalancesByLineItemId?.has(line.id)
+                ? unitsToDecimal(runningBalancesByLineItemId.get(line.id)!, initialAccount.scale) : null}</td>
+            <td>{!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
               aria-label={`Remove line ${index + 1}`}
               onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}</td>
           </tr>
@@ -1024,6 +1071,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     </tr>
     {lines.map((line, index) => {
       const lineAccount = accountMap.get(Number(line.accountId));
+      const isThisAccount = Number(line.accountId) === initialAccountId;
       const isNative = Boolean(lineAccount && lineAccount.currencyId === resolvedValuationCurrencyId);
       const amount = decimalParts(line.amount);
       const value = decimalParts(line.value);
@@ -1044,12 +1092,8 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
             ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
             : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
                 choices={accountChoices} onChange={(accountId) => updateLine(index, { accountId })} />}</td>
-          <td><input className="amount-input" inputMode="decimal" aria-label={`Debit for line ${index + 1}`}
-            value={amountForSide(line.amount, "debit")}
-            onChange={(event) => updateLineAmount(index, "debit", event.target.value)} /></td>
-          <td><input className="amount-input" inputMode="decimal" aria-label={`Credit for line ${index + 1}`}
-            value={amountForSide(line.amount, "credit")}
-            onChange={(event) => updateLineAmount(index, "credit", event.target.value)} /></td>
+          <td>{isThisAccount && registerMovementInput(line, index)}</td>
+          <td>{!isThisAccount && registerMovementInput(line, index)}</td>
           <td />
           <td><button type="button" className="quiet" aria-label={`Remove line ${index + 1}`}
             disabled={index === 0 || lines.length <= 1}
@@ -1833,9 +1877,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [knownBalanceError, setKnownBalanceError] = useState("");
   const [knownBalanceBusy, setKnownBalanceBusy] = useState(false);
   const [showAccountEditor, setShowAccountEditor] = useState(false);
-  const debitIncreases = account.type === "asset" || account.type === "expense";
-  const debitEffect = debitIncreases ? "increases" : "decreases";
-  const creditEffect = debitIncreases ? "decreases" : "increases";
+  const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
   const accountAssertions = useMemo(() => assertions.filter((assertion) => assertion.accountId === account.id), [account.id, assertions]);
   const assertionDates = useMemo(() => new Set(accountAssertions.map((assertion) => assertion.date)), [accountAssertions]);
   const lastEntryByDate = useMemo(() => {
@@ -1843,14 +1885,20 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     for (const entry of entries) lastEntries.set(entry.date, entry.lineItemId);
     return lastEntries;
   }, [entries]);
-  const registerRows = useMemo<AccountRegisterRow[]>(() => [
-    ...entries.map((entry, order) => ({ kind: "entry" as const, date: entry.date, order, entry })),
+  const runningBalanceByLineItemId = useMemo(() => new Map(entries.map((entry) =>
+    [entry.lineItemId, entry.runningBalanceUnits])), [entries]);
+  const registerRows = useMemo<AccountRegisterRow[]>(() => {
+    const entryRows = entries.map((entry, order) => ({ kind: "entry" as const, date: entry.date, order, entry }));
+    const lastRowByTransactionId = new Map(entryRows.map((row) => [row.entry.transactionId, row]));
+    return [
+    ...(view === "journal" ? [...lastRowByTransactionId.values()] : entryRows),
     ...accountAssertions.map((assertion) => ({ kind: "assertion" as const, date: assertion.date, order: assertion.id, assertion })),
   ].sort((left, right) => {
     const chronologicalOrder = left.date.localeCompare(right.date)
       || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1);
     return sortOrder === "recent" ? -chronologicalOrder : chronologicalOrder;
-  }), [accountAssertions, entries, sortOrder]);
+  });
+  }, [accountAssertions, entries, sortOrder, view]);
 
   useEffect(() => {
     selectionRequest.current += 1;
@@ -1902,6 +1950,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     selectionRequest.current += 1;
     setSelectedTransaction(null); setSelectedLineItemId(null); setSelectingTransactionId(null);
     setDateEditorOpen(false); setSelectionError("");
+  }
+
+  function changeRegisterView(nextView: "basic" | "auto-split" | "journal") {
+    if (view === nextView) return;
+    if (selectedTransaction) {
+      setSelectionError("Save or cancel the selected transaction before changing register views.");
+      return;
+    }
+    setView(nextView);
   }
 
   function editKnownBalance(assertion: BalanceAssertion) {
@@ -1967,11 +2024,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     {knownBalanceFormMode === "manual" && knownBalanceForm}
     <div className="register-view-controls" role="group" aria-label="Register view">
       <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
-        onClick={() => setView("basic")}>Basic Ledger</button>
+        onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
       <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
-        onClick={() => setView("auto-split")}>Auto-Split Ledger</button>
+        onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
       <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
-        onClick={() => setView("journal")}>Transaction Journal</button>
+        onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
       <button className="register-sort-control"
         title={sortOrder === "recent" ? "Show oldest transactions first" : "Show recent transactions first"}
         onClick={() => setSortOrder((current) => current === "recent" ? "oldest" : "recent")}>
@@ -1984,8 +2041,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>Account</th>
-          <th>Debit {view === "basic" && <span>({debitEffect} {account.type})</span>}</th>
-          <th>Credit {view === "basic" && <span>({creditEffect} {account.type})</span>}</th><th>Running balance</th>
+          <th>This account <span>+ increase · − decrease · {account.currencyCode}</span></th>
+          <th>Other accounts <span>+ increase · − decrease · each line's currency</span></th><th>Running balance</th>
           <th>Known balance</th></tr></thead>
         <tbody>{sortOrder === "recent" && newTransactionRows}{registerRows.map((row) => {
           if (row.kind === "assertion") {
@@ -2006,9 +2063,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             </Fragment>;
           }
           const { entry } = row;
-          const splitLabel = entry.splitAccountNames.length === 0 ? "—"
-            : entry.splitAccountNames.length === 1 ? entry.splitAccountNames[0] : "Split";
-          const expanded = view === "journal";
+          const entryAmountUnits = entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`);
+          const expanded = view !== "basic";
           const isEndOfDateEntry = lastEntryByDate.get(entry.date) === entry.lineItemId;
           const showAddKnownBalance = isEndOfDateEntry && !assertionDates.has(entry.date)
             && !account.placeholder && !account.archivedAt;
@@ -2020,13 +2076,16 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             onKeyDown={(event) => event.stopPropagation()}>+</button>;
           const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "row" && knownBalanceDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
-          if (selectedTransaction?.id === entry.transactionId && selectedLineItemId === entry.lineItemId) {
+          if (selectedTransaction?.id === entry.transactionId
+            && (view === "journal" || selectedLineItemId === entry.lineItemId)) {
             return <Fragment key={entry.lineItemId}>
               {sortOrder === "recent" && rowBalanceForm}
               <TransactionComposer key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
-                initialLineItemId={entry.lineItemId} initialTransaction={selectedTransaction}
+                initialLineItemId={view === "journal" ? selectedLineItemId : entry.lineItemId}
+                initialTransaction={selectedTransaction} journalHeader={view === "journal"}
                 initialDateEditorOpen={dateEditorOpen} runningBalanceUnits={entry.runningBalanceUnits}
+                runningBalancesByLineItemId={runningBalanceByLineItemId}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
                 onCancel={closeSelectedTransaction} onSaved={async () => {
                   await onTransactionCreated(); closeSelectedTransaction();
@@ -2036,9 +2095,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           }
           return <Fragment key={entry.lineItemId}>
             {sortOrder === "recent" && rowBalanceForm}
-            <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""}`}
+            <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""} ${view === "journal" ? "register-journal-header" : ""}`}
               tabIndex={0}
-              aria-expanded={view === "auto-split" ? false : undefined}
               onClick={() => void activateTransaction(entry)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -2051,22 +2109,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
               <td className="register-description"><strong title={entry.description || "Untitled transaction"}>
                 {entry.description || "Untitled transaction"}</strong>
-                {view === "journal" && entry.memo && <small>{entry.memo}</small>}
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
-              <td><strong>{account.name}</strong>{view !== "journal" && splitLabel !== "—"
-                && <small>Other side: {splitLabel}</small>}</td>
-              <td className={`amount ${debitIncreases ? "increase-effect" : "decrease-effect"}`}>
-                {entry.debitUnits == null ? "" : unitsToDecimal(entry.debitUnits, account.scale)}</td>
-              <td className={`amount ${debitIncreases ? "decrease-effect" : "increase-effect"}`}>
-                {entry.creditUnits == null ? "" : unitsToDecimal(entry.creditUnits, account.scale)}</td>
-              <td className="amount balance">{unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
+              <td>{view === "journal" ? <span className="register-transaction-label">Transaction</span>
+                : <strong>{account.name}</strong>}</td>
+              <td className={`amount ${view === "journal" ? "" : movementEffectClass(entryAmountUnits, account.type)}`}>
+                {view !== "journal" && signedAccountMovement(entryAmountUnits, account)}</td>
+              <td />
+              <td className="amount balance">{view !== "journal" && unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
               <td className="amount known-balance">{knownBalanceAction}</td>
             </tr>
-            {view === "journal"
-              && entry.splits.filter((split) => split.lineItemId !== entry.lineItemId)
+            {entry.splits.filter((split) => view === "journal" || split.lineItemId !== entry.lineItemId)
               .map((split) => {
-                const amount = BigInt(split.amountUnits);
-                const magnitude = unitsToDecimal((amount < 0n ? -amount : amount).toString(), split.scale);
+                const splitAccount = accountById.get(split.accountId);
+                const isThisAccount = split.accountId === account.id;
                 return <tr className="register-line-item-row selectable" key={split.lineItemId} tabIndex={0}
                   onClick={() => void activateTransaction(entry)}
                   onKeyDown={(event) => {
@@ -2074,11 +2129,17 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                       event.preventDefault(); void activateTransaction(entry);
                     }
                   }}>
-                  <td></td><td>{split.memo && <small>{split.memo}</small>}</td>
+                  <td></td><td>{view !== "basic" && split.memo && <small>{split.memo}</small>}</td>
                   <td><strong>{split.accountName}</strong></td>
-                  <td className="amount">{amount > 0n ? `${magnitude} ${split.currencyCode}` : ""}</td>
-                  <td className="amount">{amount < 0n ? `${magnitude} ${split.currencyCode}` : ""}</td>
-                  <td></td><td></td>
+                  <td className={`amount ${splitAccount && isThisAccount
+                    ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
+                    {isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
+                  <td className={`amount ${splitAccount && !isThisAccount
+                    ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
+                    {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
+                  <td className="amount balance">{view === "journal" && isThisAccount
+                    && runningBalanceByLineItemId.has(split.lineItemId)
+                    ? unitsToDecimal(runningBalanceByLineItemId.get(split.lineItemId)!, account.scale) : null}</td><td></td>
                 </tr>;
               })}
             {sortOrder === "oldest" && rowBalanceForm}
