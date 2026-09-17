@@ -14,8 +14,9 @@
 -- Existing transactions have no asserted source instant, so leave the new field NULL.
 
 ALTER TABLE `transactions`
-  ADD COLUMN `TransactionAtUtc` datetime(3) NULL DEFAULT NULL AFTER `TransactionDate`
-    COMMENT 'Optional exact UTC instant supplied by the source when meaningful. Format: UTC date-time with millisecond precision; null when only the accounting date is known. Rules: TransactionDate remains the ledger ordering and reconciliation date.';
+  ADD COLUMN `TransactionAtUtc` datetime(3) NULL DEFAULT NULL
+    COMMENT 'Optional exact UTC instant supplied by the source when meaningful. Format: UTC date-time with millisecond precision; null when only the accounting date is known. Rules: TransactionDate remains the ledger ordering and reconciliation date.'
+    AFTER `TransactionDate`;
 
 -- end migration 0017
 
