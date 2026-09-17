@@ -57,27 +57,34 @@ function requiredText(value, field, maximum) {
 }
 
 export function compileSingleAccountStatementImport({
-  accounts, accountId, suspenseAccountId, valuationCurrencyCode, lines, questionAudience = "human",
+  accounts, accountId, suspenseAccountId = null, valuationCurrencyCode, lines, questionAudience = "human",
 }) {
   const resolvedAccountId = Number(accountId);
-  const resolvedSuspenseId = Number(suspenseAccountId);
-  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0
-      || !Number.isInteger(resolvedSuspenseId) || resolvedSuspenseId <= 0) {
-    throw workflowError("Statement and suspense account IDs are required.", "INVALID_SINGLE_ACCOUNT_IMPORT_ACCOUNTS");
-  }
-  if (resolvedAccountId === resolvedSuspenseId) {
-    throw workflowError("The suspense bucket must be different from the statement account.",
-      "SUSPENSE_ACCOUNT_MATCHES_STATEMENT_ACCOUNT");
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw workflowError("A statement account ID is required.", "INVALID_SINGLE_ACCOUNT_IMPORT_ACCOUNTS");
   }
   if (!Array.isArray(lines) || lines.length === 0) {
     throw workflowError("At least one authoritative statement line is required.", "STATEMENT_LINES_REQUIRED");
   }
   const statementAccount = accounts.find((account) => account.id === resolvedAccountId);
-  const suspenseAccount = accounts.find((account) => account.id === resolvedSuspenseId);
-  if (!statementAccount || !suspenseAccount) {
-    throw workflowError("Statement or suspense account not found.", "ACCOUNT_NOT_FOUND", {
-      accountId: resolvedAccountId, suspenseAccountId: resolvedSuspenseId,
-    }, 404);
+  if (!statementAccount) {
+    throw workflowError("Statement account not found.", "ACCOUNT_NOT_FOUND", { accountId: resolvedAccountId }, 404);
+  }
+  const designated = accounts.filter((account) => account.suspense
+    && account.currencyId === statementAccount.currencyId && account.archivedAt == null && !account.placeholder);
+  if (designated.length !== 1) {
+    throw workflowError("Designate one active, postable suspense account in the statement currency before importing.",
+      "SUSPENSE_ACCOUNT_NOT_CONFIGURED", { accountId: resolvedAccountId,
+        currencyCode: statementAccount.currencyCode, designatedAccountIds: designated.map((account) => account.id) });
+  }
+  const suspenseAccount = designated[0];
+  if (suspenseAccountId != null && Number(suspenseAccountId) !== suspenseAccount.id) {
+    throw workflowError("The supplied suspense account is not the designated account for this currency.",
+      "SUSPENSE_ACCOUNT_NOT_DESIGNATED", { designatedAccountId: suspenseAccount.id });
+  }
+  if (resolvedAccountId === suspenseAccount.id) {
+    throw workflowError("The statement account cannot also hold its own unresolved counterlines.",
+      "SUSPENSE_ACCOUNT_MATCHES_STATEMENT_ACCOUNT");
   }
   for (const [label, account] of [["Statement", statementAccount], ["Suspense", suspenseAccount]]) {
     if (account.placeholder || account.archivedAt != null) {
@@ -100,7 +107,7 @@ export function compileSingleAccountStatementImport({
       : decimalText(line.valueDecimal, `lines[${index}].value_decimal`);
     const description = String(line?.description ?? "").trim() || null;
     const prompt = String(line?.questionPrompt ?? "").trim()
-      || `What is the final account for ${description ? JSON.stringify(description) : `statement line ${JSON.stringify(externalId)}`}?`;
+      || `What evidence identifies the other side of ${description ? JSON.stringify(description) : `statement line ${JSON.stringify(externalId)}`}? Check for a matching imported account entry, including near matches affected by fees.`;
     return {
       externalId,
       transactionDate: line?.transactionDate,
@@ -132,8 +139,8 @@ export function compileSingleAccountStatementImport({
 }
 
 export async function previewSingleAccountStatementImport({
-  pool, personId, accountId, suspenseAccountId, sourceSystem, valuationCurrencyCode,
-  lines, questionAudience = "human", reconciliation = null,
+  pool, personId, accountId, suspenseAccountId = null, sourceSystem, valuationCurrencyCode,
+  lines, questionAudience = "human", reconciliation = null, knownBalanceAssertions = [],
 }) {
   const accounts = await listAccounts(pool, personId);
   const compiled = compileSingleAccountStatementImport({
@@ -141,6 +148,7 @@ export async function previewSingleAccountStatementImport({
   });
   return previewTransactionImport({
     pool, personId, sourceSystem, transactions: compiled.transactions,
+    knownBalanceAssertions,
     reconciliation: reconciliation == null ? null : {
       accountIds: [compiled.statementAccount.id],
       openingBalanceDate: reconciliation.openingBalanceDate,

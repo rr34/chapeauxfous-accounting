@@ -6,7 +6,7 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
+const { createAccount, createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
   listTransactionsPage, updateAccount, updateTransaction,
   validateTransaction } = await import("../src/accounting.js");
 
@@ -384,6 +384,7 @@ test("an owner can edit ordinary account fields", async () => {
   const runInTransaction = async (work) => work({
     async query(sql, params) {
       statements.push({ sql, params });
+      if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
       if (sql.startsWith("UPDATE accounts")) return [{ affectedRows: 1 }];
       if (sql.includes("AccountName") && sql.includes("FROM accounts")) {
         return [[{
@@ -407,12 +408,13 @@ test("an owner can edit ordinary account fields", async () => {
   assert.deepEqual(result, { updated: true, accountId: 3 });
   const update = statements.at(-1);
   assert.match(update.sql, /^UPDATE accounts/);
-  assert.deepEqual(update.params, ["Owner Equity", "Capital and retained earnings", false, null, "equity", 1, 3, 7]);
+  assert.deepEqual(update.params, ["Owner Equity", "Capital and retained earnings", false, false, null, "equity", 1, 3, 7]);
 });
 
 test("an account currency cannot change after transactions reference it", async () => {
   const runInTransaction = async (work) => work({
     async query(sql) {
+      if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
       if (sql.includes("AccountName") && sql.includes("FROM accounts")) {
         return [[{
           account_id: 3, AccountName: "Equity", description: null, is_placeholder: 0,
@@ -430,6 +432,62 @@ test("an account currency cannot change after transactions reference it", async 
     }, runInTransaction),
     (error) => error.code === "ACCOUNT_CURRENCY_IN_USE" && error.status === 409,
   );
+});
+
+test("one postable suspense account may be designated per owner and currency", async () => {
+  const statements = [];
+  const runInTransaction = async (work) => work({
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
+      if (sql.includes("is_suspense = 1")) return [[]];
+      if (sql.includes("AccountName") && sql.includes("FROM accounts")) return [[{
+        account_id: 3, AccountName: "Ask Accountant", description: null, is_placeholder: 0,
+        is_suspense: 0, parent_account_id: null, AccountType: "asset", account_currency_id: 1,
+      }]];
+      if (sql.startsWith("UPDATE accounts")) return [{ affectedRows: 1 }];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  await updateAccount({ personId: 7, accountId: 3, name: "Ask Accountant", description: null,
+    suspense: true, placeholder: false, parentAccountId: null, type: "asset", currencyId: 1 }, runInTransaction);
+  assert.equal(statements.at(-1).params[3], true);
+  assert.match(statements[0].sql, /FROM people2_people/);
+
+  const conflictingTransaction = async (work) => work({
+    async query(sql) {
+      if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
+      if (sql.includes("is_suspense = 1")) return [[{ account_id: 8 }]];
+      if (sql.includes("AccountName") && sql.includes("FROM accounts")) return [[{
+        account_id: 3, AccountName: "Ask Accountant", description: null, is_placeholder: 0,
+        is_suspense: 0, parent_account_id: null, AccountType: "asset", account_currency_id: 1,
+      }]];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  await assert.rejects(updateAccount({ personId: 7, accountId: 3, name: "Ask Accountant",
+    suspense: true, placeholder: false, parentAccountId: null, type: "asset", currencyId: 1 },
+  conflictingTransaction), (error) => error.code === "SUSPENSE_ACCOUNT_ALREADY_DESIGNATED");
+});
+
+test("a newly created suspense account is checked before insertion", async () => {
+  const statements = [];
+  const runInTransaction = async (work) => work({
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
+      if (sql.includes("is_suspense = 1")) return [[]];
+      if (sql.includes("FROM currencies")) return [[{ currency_id: 1, owner_person_id: null,
+        CurrencyAbbreviation: "USD", display_name: "US Dollar", currency_type: "iso_4217", scale: 2 }]];
+      if (sql.startsWith("INSERT INTO accounts")) return [{ insertId: 9 }];
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  });
+  const created = await createAccount({ personId: 7, name: "Ask Accountant", type: "asset",
+    currencyId: 1, suspense: true, parentAccountId: null }, runInTransaction);
+  assert.equal(created.id, 9);
+  assert.match(statements.at(-1).sql, /is_suspense/);
+  assert.equal(statements.at(-1).params[4], true);
 });
 
 function deletionTransaction({ account = { account_id: 3, AccountName: "Equity" }, children = [], lineItems = [], assertions = [] } = {}) {

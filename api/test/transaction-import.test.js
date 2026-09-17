@@ -52,7 +52,7 @@ function memoryPool() {
     async getConnection() {
       const snapshot = structuredClone({
         transactions: state.transactions, lineItems: state.lineItems, rates: state.rates,
-        tags: state.tags, tagJoins: state.tagJoins,
+        tags: state.tags, tagJoins: state.tagJoins, balanceAssertions: state.balanceAssertions,
         plans: [...state.plans], nextTransactionId: state.nextTransactionId,
         nextLineItemId: state.nextLineItemId, nextRateId: state.nextRateId, nextTagId: state.nextTagId,
       });
@@ -66,6 +66,7 @@ function memoryPool() {
           state.rates = snapshot.rates;
           state.tags = snapshot.tags;
           state.tagJoins = snapshot.tagJoins;
+          state.balanceAssertions = snapshot.balanceAssertions;
           state.plans = new Map(snapshot.plans);
           state.nextTransactionId = snapshot.nextTransactionId;
           state.nextLineItemId = snapshot.nextLineItemId;
@@ -146,6 +147,23 @@ function memoryPool() {
             const [planId, ownerPersonId] = params;
             const plan = state.plans.get(planId);
             return [[plan && Number(plan.owner_person_id) === Number(ownerPersonId) ? plan : undefined].filter(Boolean)];
+          }
+          if (sql.includes("SELECT known_balance_units FROM account_balance_assertions")) {
+            const [ownerPersonId, accountId, balanceDate] = params;
+            if (Number(ownerPersonId) !== 7) return [[]];
+            return [state.balanceAssertions.filter((item) => Number(item.account_id) === Number(accountId)
+              && item.balance_date === balanceDate).map((item) => ({ known_balance_units: item.known_balance_units }))];
+          }
+          if (sql.includes("INSERT INTO account_balance_assertions")) {
+            const [ownerPersonId, accountId, balanceDate, knownBalanceUnits] = params;
+            if (Number(ownerPersonId) !== 7 || !state.accounts.some((item) => Number(item.account_id) === Number(accountId))) {
+              throw new Error("Invalid assertion account");
+            }
+            if (state.balanceAssertions.some((item) => Number(item.account_id) === Number(accountId)
+              && item.balance_date === balanceDate)) return [{ affectedRows: 0 }];
+            state.balanceAssertions.push({ account_balance_assertion_id: state.balanceAssertions.length + 1,
+              account_id: accountId, balance_date: balanceDate, known_balance_units: knownBalanceUnits });
+            return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO transactions")) {
             const [ownerPersonId, description, valuationCurrencyId, transactionDate, transactionAt,
@@ -552,7 +570,7 @@ test("transaction import preserves both sides of a crypto transfer and its asset
     ["coinbase:cb-91", "bitcoin:tx-abc", "bitcoin:tx-abc:fee"]);
 });
 
-test("reconciliation-bound import refuses a plan until native account movements match known balances", async () => {
+test("reconciliation differences are reported without blocking transaction import", async () => {
   const setupPool = (offlineClosingUnits) => {
     const pool = memoryPool();
     pool.state.currencies.push({ currency_id: 3, owner_person_id: 7,
@@ -595,11 +613,14 @@ test("reconciliation-bound import refuses a plan until native account movements 
   const mismatchPool = setupPool("51100000");
   const mismatch = await previewTransactionImport({ pool: mismatchPool, personId: 7,
     sourceSystem: "coinbase_wallet_reconciliation", transactions: [transaction], reconciliation });
-  assert.equal(mismatch.readyToCommit, false);
-  assert.equal(mismatch.importPlanId, null);
+  assert.equal(mismatch.readyToCommit, true);
+  assert.ok(mismatch.importPlanId);
   assert.equal(mismatch.reconciliationValidation.passed, false);
   assert.equal(mismatch.reconciliationValidation.accounts[1].residualUnits, "100000");
-  assert.equal(mismatchPool.state.plans.size, 0);
+  const mismatchedCommit = await commitTransactionImportPlan({ pool: mismatchPool, personId: 7,
+    importPlanId: mismatch.importPlanId });
+  assert.equal(mismatchedCommit.createdTransactionCount, 1);
+  assert.equal(mismatchedCommit.reconciliationValidation.passed, false);
 
   const matchingPool = setupPool("51000000");
   const matching = await previewTransactionImport({ pool: matchingPool, personId: 7,
@@ -611,7 +632,7 @@ test("reconciliation-bound import refuses a plan until native account movements 
   assert.equal(committed.reconciliationValidation.passed, true);
 });
 
-test("reconciliation-bound commit invalidates when a known balance changes after preview", async () => {
+test("a changed known balance remains advisory at transaction import commit", async () => {
   const pool = memoryPool();
   pool.state.balanceAssertions.push(
     { account_balance_assertion_id: 1, account_id: 11, balance_date: "2026-08-01",
@@ -630,10 +651,44 @@ test("reconciliation-bound commit invalidates when a known balance changes after
     transactions, reconciliation });
   assert.equal(preview.readyToCommit, true);
   pool.state.balanceAssertions.find((item) => item.account_balance_assertion_id === 2).known_balance_units = "8000";
-  await assert.rejects(commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId }),
-    (error) => error.code === "IMPORT_PLAN_NO_LONGER_RECONCILES");
-  assert.equal(pool.state.plans.get(preview.importPlanId).plan_status, "invalidated");
-  assert.equal(pool.state.transactions.length, 0);
+  const committed = await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(committed.reconciliationValidation.passed, false);
+  assert.equal(pool.state.plans.get(preview.importPlanId).plan_status, "committed");
+  assert.equal(pool.state.transactions.length, 1);
+});
+
+test("found statement balances are saved with transactions only when no assertion exists", async () => {
+  const pool = memoryPool();
+  pool.state.balanceAssertions.push({ account_balance_assertion_id: 1, account_id: 11,
+    balance_date: "2026-01-31", known_balance_units: "9000" });
+  const preview = await previewTransactionImport({ pool, personId: 7, sourceSystem: "statement",
+    transactions: [importedTransactions()[0]], knownBalanceAssertions: [
+      { accountId: 11, balanceDate: "2026-01-01", knownBalanceUnits: "10000" },
+      { accountId: 11, balanceDate: "2026-01-31", knownBalanceUnits: "8766" },
+    ] });
+  assert.equal(preview.readyToCommit, true);
+  assert.deepEqual(preview.balanceAssertions.map((item) => item.status), ["planned", "preserved"]);
+  assert.deepEqual(pool.state.balanceAssertions.map((item) => item.known_balance_units), ["9000"]);
+  const committed = await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.deepEqual(committed.balanceAssertions.map((item) => item.status), ["created", "preserved"]);
+  assert.deepEqual(pool.state.balanceAssertions.map((item) => item.known_balance_units), ["9000", "10000"]);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(pool.state.balanceAssertions.length, 2);
+});
+
+test("an assertion entered after preview is preserved when the import commits", async () => {
+  const pool = memoryPool();
+  const preview = await previewTransactionImport({ pool, personId: 7, sourceSystem: "statement",
+    transactions: [importedTransactions()[0]], knownBalanceAssertions: [
+      { accountId: 11, balanceDate: "2026-01-31", knownBalanceUnits: "8766" },
+    ] });
+  assert.equal(preview.balanceAssertions[0].status, "planned");
+  pool.state.balanceAssertions.push({ account_balance_assertion_id: 1, account_id: 11,
+    balance_date: "2026-01-31", known_balance_units: "9000" });
+  const committed = await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.equal(committed.balanceAssertions[0].status, "preserved");
+  assert.equal(committed.balanceAssertions[0].storedKnownBalanceUnits, "9000");
+  assert.equal(pool.state.balanceAssertions[0].known_balance_units, "9000");
 });
 
 test("transaction import accepts a zero-value commodity quantity adjustment", async () => {

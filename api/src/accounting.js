@@ -39,7 +39,7 @@ function optionalBoundedText(value, field, maximum) {
 function mapAccount(row) {
   return {
     id: Number(row.account_id), name: row.AccountName, description: row.description,
-    placeholder: Boolean(row.is_placeholder),
+    placeholder: Boolean(row.is_placeholder), suspense: Boolean(row.is_suspense),
     parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
     type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
     scale: Number(row.scale), balanceUnits: normalBalanceUnits(row.AccountType, row.balance_units), archivedAt: row.archived_at,
@@ -48,7 +48,7 @@ function mapAccount(row) {
 
 export async function listAccounts(pool, personId) {
   const [rows] = await pool.query(
-    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
+    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
             a.parent_account_id, a.AccountType,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale,
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
@@ -58,7 +58,7 @@ export async function listAccounts(pool, personId) {
        LEFT JOIN line_items li ON li.account_id = a.account_id
        LEFT JOIN transactions t ON t.transaction_id = li.transaction_id AND t.owner_person_id = a.owner_person_id
       WHERE a.owner_person_id = ?
-      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder,
+      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
                a.parent_account_id, a.AccountType,
                a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
       ORDER BY a.account_id`,
@@ -72,7 +72,7 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
   const cursor = afterAccountId == null ? 0 : Number(afterAccountId);
   if (!Number.isInteger(cursor) || cursor < 0) throw applicationError("Account cursor is invalid.", 400, "INVALID_CURSOR");
   const [rows] = await pool.query(
-    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder,
+    `SELECT a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
             a.parent_account_id, a.AccountType,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale,
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
@@ -82,7 +82,7 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
        LEFT JOIN line_items li ON li.account_id = a.account_id
        LEFT JOIN transactions t ON t.transaction_id = li.transaction_id AND t.owner_person_id = a.owner_person_id
       WHERE a.owner_person_id = ? AND a.account_id > ?
-      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder,
+      GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
                a.parent_account_id, a.AccountType,
                a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
       ORDER BY a.account_id
@@ -191,7 +191,20 @@ export async function listAccountLedger(pool, personId, accountId) {
   return { account, entries };
 }
 
-export async function createAccount({ personId, name, description, placeholder = false, parentAccountId, type, currencyId }) {
+async function requireAvailableSuspenseDesignation(connection, personId, currencyId, excludingAccountId = null) {
+  const [rows] = await connection.query(
+    `SELECT account_id FROM accounts
+      WHERE owner_person_id = ? AND account_currency_id = ? AND is_suspense = 1
+        AND archived_at IS NULL AND account_id <> ? LIMIT 1 FOR UPDATE`,
+    [personId, currencyId, excludingAccountId ?? 0],
+  );
+  if (rows.length) throw applicationError(
+    "This currency already has a designated suspense account. Clear that designation before choosing another.",
+    409, "SUSPENSE_ACCOUNT_ALREADY_DESIGNATED", { accountId: Number(rows[0].account_id), currencyId });
+}
+
+export async function createAccount({ personId, name, description, placeholder = false, suspense = false,
+  parentAccountId, type, currencyId }, runInTransaction = withTransaction) {
   const accountName = String(name ?? "").trim();
   const accountDescription = String(description ?? "").trim() || null;
   const isPlaceholder = placeholder === true;
@@ -200,7 +213,15 @@ export async function createAccount({ personId, name, description, placeholder =
   if (!accountName) throw applicationError("Account name is required.");
   if (!allowedTypes.has(type)) throw applicationError("Invalid account type.");
   if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) throw applicationError("Currency is required.");
-  return withTransaction(async (connection) => {
+  if (typeof suspense !== "boolean") throw applicationError("Suspense designation must be true or false.",
+    400, "INVALID_SUSPENSE_DESIGNATION");
+  if (suspense === true && isPlaceholder) throw applicationError(
+    "A suspense account must be postable.", 400, "SUSPENSE_ACCOUNT_NOT_POSTABLE");
+  return runInTransaction(async (connection) => {
+    if (suspense === true) {
+      await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE", [personId]);
+      await requireAvailableSuspenseDesignation(connection, personId, resolvedCurrencyId);
+    }
     if (parentAccountId != null) {
       const [parentRows] = await connection.query(
         "SELECT account_id FROM accounts WHERE account_id = ? AND owner_person_id = ? AND archived_at IS NULL",
@@ -211,15 +232,17 @@ export async function createAccount({ personId, name, description, placeholder =
     await requireAccessibleCurrency(connection, personId, resolvedCurrencyId);
     const [result] = await connection.query(
       `INSERT INTO accounts
-        (owner_person_id, AccountName, description, is_placeholder, parent_account_id, AccountType, account_currency_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [personId, accountName, accountDescription, isPlaceholder, parentAccountId ?? null, type, resolvedCurrencyId],
+        (owner_person_id, AccountName, description, is_placeholder, is_suspense, parent_account_id, AccountType, account_currency_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [personId, accountName, accountDescription, isPlaceholder, suspense === true,
+        parentAccountId ?? null, type, resolvedCurrencyId],
     );
     return { id: Number(result.insertId) };
   });
 }
 
-export async function updateAccount({ personId, accountId, name, description, placeholder = false, parentAccountId, type, currencyId }, runInTransaction = withTransaction) {
+export async function updateAccount({ personId, accountId, name, description, placeholder = false,
+  suspense, parentAccountId, type, currencyId }, runInTransaction = withTransaction) {
   const resolvedAccountId = Number(accountId);
   const accountName = String(name ?? "").trim();
   const accountDescription = String(description ?? "").trim() || null;
@@ -231,14 +254,17 @@ export async function updateAccount({ personId, accountId, name, description, pl
   if (!accountName) throw applicationError("Account name is required.");
   if (!allowedTypes.has(type)) throw applicationError("Invalid account type.");
   if (!Number.isInteger(resolvedCurrencyId) || resolvedCurrencyId <= 0) throw applicationError("Currency is required.");
+  if (suspense != null && typeof suspense !== "boolean") throw applicationError(
+    "Suspense designation must be true or false.", 400, "INVALID_SUSPENSE_DESIGNATION");
   if (resolvedParentId != null && (!Number.isInteger(resolvedParentId) || resolvedParentId <= 0)) {
     throw applicationError("Parent account not found.", 404, "PARENT_ACCOUNT_NOT_FOUND");
   }
   if (resolvedParentId === resolvedAccountId) throw applicationError("An account cannot be its own parent.", 409, "ACCOUNT_PARENT_CYCLE");
 
   return runInTransaction(async (connection) => {
+    await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE", [personId]);
     const [accountRows] = await connection.query(
-      `SELECT account_id, AccountName, description, is_placeholder, parent_account_id,
+      `SELECT account_id, AccountName, description, is_placeholder, is_suspense, parent_account_id,
               AccountType, account_currency_id
          FROM accounts
         WHERE account_id = ? AND owner_person_id = ?
@@ -247,6 +273,9 @@ export async function updateAccount({ personId, accountId, name, description, pl
     );
     const account = accountRows[0];
     if (!account) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+    const isSuspense = suspense == null ? Boolean(account.is_suspense) : suspense === true;
+    if (isSuspense && isPlaceholder) throw applicationError(
+      "A suspense account must be postable.", 400, "SUSPENSE_ACCOUNT_NOT_POSTABLE");
 
     if (resolvedParentId != null && Number(account.parent_account_id) !== resolvedParentId) {
       const visited = new Set([resolvedAccountId]);
@@ -293,12 +322,14 @@ export async function updateAccount({ personId, accountId, name, description, pl
     }
 
     if (currencyChanged) await requireAccessibleCurrency(connection, personId, resolvedCurrencyId);
+    if (isSuspense) await requireAvailableSuspenseDesignation(connection, personId, resolvedCurrencyId, resolvedAccountId);
     const [result] = await connection.query(
       `UPDATE accounts
-          SET AccountName = ?, description = ?, is_placeholder = ?, parent_account_id = ?,
+          SET AccountName = ?, description = ?, is_placeholder = ?, is_suspense = ?, parent_account_id = ?,
               AccountType = ?, account_currency_id = ?
         WHERE account_id = ? AND owner_person_id = ?`,
-      [accountName, accountDescription, isPlaceholder, resolvedParentId, type, resolvedCurrencyId, resolvedAccountId, personId],
+      [accountName, accountDescription, isPlaceholder, isSuspense, resolvedParentId,
+        type, resolvedCurrencyId, resolvedAccountId, personId],
     );
     if (Number(result.affectedRows) !== 1) throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
     return { updated: true, accountId: resolvedAccountId };

@@ -339,17 +339,14 @@ export async function analyzeStatementObservations({ pool, personId, observation
     ambiguousTransferObservationIds,
     proposedNewObservationIds: proposedIds,
     coverage,
-    readyForTransactionAssembly: reconciliation.grounded
-      && coverage.every((item) => item.balanced) && unresolvedDuplicateCandidates === 0
-      && ambiguousTransferObservationIds.length === 0,
+    readyForTransactionAssembly: proposedIds.length > 0,
     rules: [
       "Only exact stable source-reference matches are automatically excluded as ledger duplicates.",
       "Multiple existing exact-source matches are a ledger ambiguity and are never automatically excluded.",
       "Same date and amount without stable source identity is a candidate for review, not proof of duplication.",
-      "Every non-exact same-account ledger candidate blocks automatic assembly until reviewed.",
-      "Resolve source-reference conflicts before import.",
-      "When one observation has multiple strong transfer counterparts, resolve that ambiguity before assembly.",
-      "Assemble balanced accounting transactions only after every statement-backed account coverage residual is zero.",
+      "When importing one-sided rows, retain non-exact same-account ledger candidates as review questions on suspense lines.",
+      "Preserve source-reference conflicts and transfer ambiguity for later matching; do not guess a final counteraccount during intake.",
+      "Report known-balance coverage when available, but missing or mismatched balances do not block transaction assembly.",
     ],
   };
 }

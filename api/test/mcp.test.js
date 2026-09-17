@@ -172,7 +172,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     async listAccounts(_pool, personId) {
       seen.push(personId);
-      return [{ id: 10, name: "Wallet", description: null, placeholder: false, parentAccountId: null,
+      return [{ id: 10, name: "Wallet", description: null, placeholder: false, suspense: false, parentAccountId: null,
         type: "asset", currencyId: 1, currencyCode: "USD", scale: 2, balanceUnits: "123", archivedAt: null }];
     },
     async searchTransactionsPage(_pool, personId, options) {
@@ -269,6 +269,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     async previewSingleAccountStatementImport(input) {
       oneSidedImport = input;
+      if (input.lines[0]?.description === "NO SUSPENSE") throw Object.assign(
+        new Error("Designate a suspense account."), { code: "SUSPENSE_ACCOUNT_NOT_CONFIGURED",
+          status: 400, details: { currencyCode: "USD" } });
       return { ...transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
         importPlanId: "55555555-5555-4555-8555-555555555555", transactionCount: input.lines.length }),
         questionSummary: { openQuestionCount: input.lines.length,
@@ -284,8 +287,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     async analyzeStatementObservations(input) {
       const observations = input.observations.map((item, index) => ({ ...item, id: `observation-${index + 1}` }));
+      const ledgerCandidates = input.observations[0]?.sourceDocumentId === "candidate-overlap"
+        ? [{ observationId: observations[0].id, candidates: [{ transactionId: 42,
+          classification: "possible_duplicate" }] }] : [];
       return { observations, proposedNewObservationIds: observations.map((item) => item.id),
-        duplicateAnalysis: { unresolvedCandidateCount: 0, ledgerCandidates: [], inputCandidates: [],
+        duplicateAnalysis: { unresolvedCandidateCount: ledgerCandidates.length, ledgerCandidates, inputCandidates: [],
           exactLedgerDuplicateObservationIds: [], ambiguousExactLedgerObservationIds: [],
           exactInputDuplicateObservationIds: [] }, coverage: [] };
     },
@@ -761,7 +767,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(accountObjects.structuredContent.objects[0], {
     objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10",
     displayName: "Wallet", parentAccountId: null, accountType: "asset", currencyId: 1,
-    currencyCode: "USD", scale: 2, postable: true, archived: false,
+    currencyCode: "USD", scale: 2, postable: true, suspense: false, archived: false,
     actions: [{ id: "import_statement", label: "Import statement",
       tool: "start_single_account_statement_import" }],
   });
@@ -896,6 +902,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   });
   assert.deepEqual(statementGuide.structuredContent.orderedQuestions.map((question) => question.key),
     ["beginning_balance", "ending_balance", "line_items", "available_text"]);
+  assert.equal(statementGuide.structuredContent.suspenseAccount, null);
   assert.match(statementGuide.structuredContent.orderedQuestions[0].prompt,
     /end-of-day balance immediately before the first included date/);
   const missingStatementBalance = await client.callTool({
@@ -909,9 +916,53 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       dry_run: true,
     },
   });
-  assert.equal(missingStatementBalance.isError, true);
-  assert.equal(missingStatementBalance.structuredContent.requiredAction, "ASK_USER_FOR_MISSING_DATED_BALANCE");
+  assert.notEqual(missingStatementBalance.isError, true);
+  assert.equal(missingStatementBalance.structuredContent.readyToCommit, true);
+  assert.deepEqual(oneSidedImport.knownBalanceAssertions, [
+    { accountId: 10, balanceDate: "2026-01-31", knownBalanceUnits: "8750" },
+  ]);
   assert.deepEqual(savedStatementBalances, []);
+
+  const noStatementBalances = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "transactions-only", account_id: 10, suspense_account_id: 11,
+      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
+      ending_balance: { found: false, date: null, amount_decimal: null },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(noStatementBalances.structuredContent.readyToCommit, true);
+  assert.deepEqual(oneSidedImport.knownBalanceAssertions, []);
+
+  const possibleDuplicate = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "candidate-overlap", account_id: 10,
+      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
+      ending_balance: { found: false, date: null, amount_decimal: null },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(possibleDuplicate.structuredContent.readyToCommit, true);
+  assert.match(oneSidedImport.lines[0].questionPrompt, /possible duplicate ledger transaction 42/);
+
+  const missingDesignation = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "no-designation", account_id: 10,
+      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
+      ending_balance: { found: false, date: null, amount_decimal: null },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "NO SUSPENSE", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(missingDesignation.structuredContent.requiredAction, "MARK_SUSPENSE_ACCOUNT");
 
   const oneSidedPreview = await client.callTool({
     name: "import_single_account_statement",
@@ -927,16 +978,17 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
   });
   assert.equal(oneSidedPreview.structuredContent.import.questionSummary.openQuestionCount, 1);
-  assert.deepEqual(savedStatementBalances.map((item) => ({ date: item.balanceDate, units: item.knownBalanceUnits })), [
-    { date: "2025-12-31", units: "10000" }, { date: "2026-01-31", units: "8750" },
-  ]);
+  assert.deepEqual(savedStatementBalances, []);
   assert.deepEqual({ ...oneSidedImport, lines: oneSidedImport.lines.map((line) => ({ ...line,
     externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })) }, {
     pool: {}, personId: 7, sourceSystem: "single_account_statement", accountId: 10, suspenseAccountId: 11,
     valuationCurrencyCode: "USD", questionAudience: "human",
     lines: [{ externalId: "sha256:<digest>", transactionDate: "2026-01-05", description: "ACME",
       amountDecimal: "-12.5" }],
-    reconciliation: { openingBalanceDate: "2025-12-31", closingBalanceDate: "2026-01-31" },
+    knownBalanceAssertions: [
+      { accountId: 10, balanceDate: "2025-12-31", knownBalanceUnits: "10000" },
+      { accountId: 10, balanceDate: "2026-01-31", knownBalanceUnits: "8750" },
+    ],
   });
 
   const marked = await client.callTool({ name: "reconcile_account_through_date", arguments: {
@@ -1058,7 +1110,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.12.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.13.0");
 
   await handler.close();
 });

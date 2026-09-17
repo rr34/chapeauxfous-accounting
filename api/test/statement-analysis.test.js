@@ -84,5 +84,29 @@ test("same-account amount and date candidates remain unresolved without matching
   });
   assert.equal(result.duplicateAnalysis.ledgerCandidates[0].candidates[0].classification, "possible_duplicate");
   assert.equal(result.duplicateAnalysis.unresolvedCandidateCount, 1);
-  assert.equal(result.readyForTransactionAssembly, false);
+  assert.equal(result.readyForTransactionAssembly, true);
+});
+
+test("statement rows are ready to assemble when known balances are absent or do not match", async () => {
+  const pool = analysisPool({ remainingCoinbase: "0" });
+  const originalQuery = pool.query;
+  pool.query = async (sql, values) => {
+    const [rows] = await originalQuery(sql, values);
+    if (sql.includes("opening.known_balance_units")) return [rows.map((row) => ({
+      ...row, opening_assertion_id: null, closing_assertion_id: null,
+      opening_known_balance_units: null, closing_known_balance_units: null,
+    }))];
+    return [rows];
+  };
+  const missing = await analyzeStatementObservations({ pool, personId: 7,
+    observations: [pairedObservations[0]], openingBalanceDate: "2026-08-01",
+    closingBalanceDate: "2026-08-31" });
+  assert.equal(missing.coverage[0].balanced, false);
+  assert.equal(missing.readyForTransactionAssembly, true);
+
+  const mismatch = await analyzeStatementObservations({ pool: analysisPool({ remainingCoinbase: "0" }),
+    personId: 7, observations: [pairedObservations[0]], openingBalanceDate: "2026-08-01",
+    closingBalanceDate: "2026-08-31" });
+  assert.equal(mismatch.coverage[0].balanced, false);
+  assert.equal(mismatch.readyForTransactionAssembly, true);
 });

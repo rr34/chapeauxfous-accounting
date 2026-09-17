@@ -13,7 +13,7 @@ const { loadAccountObjectPaths, listTransactionImportJobObjectsPage,
   listTransactionObjectsPage } = await import("../src/accounting-objects.js");
 
 test("all five Accounting object read paths return the fields they advertise", async () => {
-  const account = { id: 10, name: "Coinbase Bitcoin", description: null, placeholder: false,
+  const account = { id: 10, name: "Coinbase Bitcoin", description: null, placeholder: false, suspense: false,
     parentAccountId: null, type: "asset", currencyId: 2, currencyCode: "BTC", scale: 8,
     balanceUnits: "100000000", archivedAt: null };
   const question = { lineItemId: 31, transactionId: 21, accountId: 10,

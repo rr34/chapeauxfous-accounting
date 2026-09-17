@@ -13,6 +13,7 @@ export const accountObjectDescription = Object.freeze({
       { field: "accountType", summary: "Asset, liability, equity, income, or expense classification." },
       { field: "currencyCode", summary: "Native currency or accounting unit code." },
       { field: "postable", summary: "Whether the account currently accepts postings." },
+      { field: "suspense", summary: "Whether the owner designated this account for unresolved imported counterlines." },
       { field: "archived", summary: "Whether the account is archived." },
     ],
     relationships: [{

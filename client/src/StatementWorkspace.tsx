@@ -40,15 +40,17 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const paths = useMemo(() => fullPaths(accounts), [accounts]);
   const postable = accounts.filter((account) => !account.placeholder && !account.archivedAt);
   const [accountId, setAccountId] = useState(initialAccountId == null ? "" : String(initialAccountId));
-  const [suspenseId, setSuspenseId] = useState("");
+  const [designationId, setDesignationId] = useState("");
   const [questions, setQuestions] = useState<AccountingQuestion[]>([]);
+  const [questionCursor, setQuestionCursor] = useState<string | null>(null);
   const [questionTargets, setQuestionTargets] = useState<Record<number, string>>({});
   const [questionNotes, setQuestionNotes] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const account = postable.find((candidate) => candidate.id === Number(accountId));
-  const suspense = postable.find((candidate) => candidate.id === Number(suspenseId));
+  const suspense = postable.find((candidate) => candidate.suspense
+    && candidate.currencyId === account?.currencyId && candidate.id !== account?.id);
   const sameCurrencyBuckets = postable.filter((candidate) => candidate.currencyId === account?.currencyId
     && candidate.id !== account?.id);
   const latestAssertion = assertions.filter((assertion) => assertion.accountId === account?.id)
@@ -59,14 +61,31 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   }, [initialAccountId]);
 
   useEffect(() => {
-    setSuspenseId("");
+    setDesignationId("");
   }, [accountId]);
 
-  async function loadQuestions() {
-    const result = await api<{ questions: AccountingQuestion[] }>(
-      "/accounting-questions?status=open&limit=500", {}, token,
+  async function designateSuspense() {
+    const candidate = sameCurrencyBuckets.find((item) => item.id === Number(designationId));
+    if (!candidate) return;
+    setBusy("designation"); setError("");
+    try {
+      await api(`/accounts/${candidate.id}`, { method: "PATCH", body: JSON.stringify({
+        name: candidate.name, description: candidate.description, placeholder: false,
+        suspense: true, parentAccountId: candidate.parentAccountId,
+        type: candidate.type, currencyId: candidate.currencyId,
+      }) }, token);
+      await onChanged();
+      setNotice(`${paths.get(candidate.id)} is now the suspense account for ${candidate.currencyCode}.`);
+    } catch (nextError) { setError(message(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function loadQuestions(cursor: string | null = null) {
+    const result = await api<{ questions: AccountingQuestion[]; nextCursor: string | null }>(
+      `/accounting-questions?status=open&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {}, token,
     );
-    setQuestions(result.questions);
+    setQuestions((current) => cursor ? [...current, ...result.questions] : result.questions);
+    setQuestionCursor(result.nextCursor);
   }
 
   useEffect(() => {
@@ -94,15 +113,15 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     const instructions = [
       "I am attaching one account statement.",
       `Statement account object: ${JSON.stringify(accountObject)}`,
-      `Unknown-side suspense account object: ${JSON.stringify(suspenseObject)}`,
+      `Designated suspense account object: ${JSON.stringify(suspenseObject)}`,
       "Use the Accounting MCP single-account statement workflow. First call start_single_account_statement_import for the statement account.",
       "Answer its four questions from the attached document, in this order:",
       "1. Does it contain a beginning balance and date? Extract both, and say whether that date is the first included statement date or an explicit end-of-day balance date. If it is the first included date, the balance belongs to the previous calendar day.",
       "2. Does it contain an ending balance with a date? Extract both exactly.",
       "3. What are every line item's date and signed change to the displayed statement balance (positive increases it; negative decreases it)?",
       "4. What payee, description, memo, reference, or other text is available for each line?",
-      "Ask me only if the statement does not answer one of those questions. Do not guess any counteraccount, category, transfer, fee, or price.",
-      "Submit the complete answers to import_single_account_statement using the selected suspense account. Show me its preview and ask once before commit_transaction_import. Reconcile only the statement account after the closing balance matches.",
+      "Missing opening or closing balances are fine; report them as absent and continue with the transactions. Do not guess any counteraccount, category, transfer, fee, or price.",
+      "Submit the answers to import_single_account_statement. Accounting will use the designated suspense account and leave one open question for each unresolved counterline. Show me its preview and ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
     ].join("\n");
     try {
       await navigator.clipboard.writeText(instructions);
@@ -137,7 +156,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   return <section className="statement-workspace card">
     <div className="section-heading"><div><p className="eyebrow">Agent statement workflow</p>
       <h2>One statement, one account</h2></div></div>
-    <p className="muted">Choose the two accounting objects here, then attach the CSV, PDF, or screenshot in your agent. The agent extracts four facts; Accounting validates and balances the result.</p>
+    <p className="muted">Choose the statement account and designate where unresolved entries wait, then attach the CSV, PDF, or screenshot in your agent. Accounting imports the transaction rows and keeps questions for later matching.</p>
     <div className="statement-layout">
       <section className="statement-import-panel">
         <h3>1. Select the statement account</h3>
@@ -149,14 +168,21 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         </select></label>
         {latestAssertion && <p className="statement-file">Latest known balance: {latestAssertion.date} · {unitsToDecimal(latestAssertion.knownBalanceUnits, latestAssertion.scale)} {latestAssertion.currencyCode}</p>}
 
-        <h3>2. Select where unknown sides wait</h3>
-        <label>Suspense account<select value={suspenseId} onChange={(event) => setSuspenseId(event.target.value)} disabled={!account}>
-          <option value="">Choose same-currency account</option>
-          {sameCurrencyBuckets.map((candidate) => <option key={candidate.id} value={candidate.id}>
-            {paths.get(candidate.id)}
-          </option>)}
-        </select></label>
-        {account && !sameCurrencyBuckets.length && <p className="statement-warning">Create a postable “Ask Human” or “Ask Accountant” account in {account.currencyCode}. Accounting will not create or choose one silently.</p>}
+        <h3>2. Designate where unknown sides wait</h3>
+        {suspense && <p className="statement-file">Suspense account: {paths.get(suspense.id)} · {suspense.currencyCode}</p>}
+        {account?.suspense && !suspense && <p className="statement-warning">This statement account is designated as the suspense account. Clear that designation in the chart of accounts before importing its own statement.</p>}
+        {account && !account.suspense && !suspense && <>
+          <label>Use an existing account<select value={designationId}
+            onChange={(event) => setDesignationId(event.target.value)}>
+            <option value="">Choose same-currency account</option>
+            {sameCurrencyBuckets.map((candidate) => <option key={candidate.id} value={candidate.id}>
+              {paths.get(candidate.id)}
+            </option>)}
+          </select></label>
+          <button type="button" className="secondary" disabled={!designationId || Boolean(busy)}
+            onClick={() => void designateSuspense()}>Designate suspense account</button>
+        </>}
+        {account && !account.suspense && !suspense && !sameCurrencyBuckets.length && <p className="statement-warning">Create a postable “Ask Accountant” account in {account.currencyCode}, then designate it here.</p>}
 
         <h3>3. Continue in your agent</h3>
         <ol className="statement-agent-questions">
@@ -165,14 +191,14 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
           <li>Every dated line item, signed by its effect on the displayed balance.</li>
           <li>All available text for every line item.</li>
         </ol>
-        <p className="muted">No category guessing happens during intake. Each unknown counterline remains an open question in the suspense account.</p>
+        <p className="muted">No category guessing happens during intake. Each unknown counterline remains an open question in the suspense account for later matching or classification.</p>
         <button type="button" className="primary" disabled={!account || !suspense}
           onClick={() => void copyAgentHandoff()}>Copy agent handoff</button>
       </section>
 
       <section className="statement-questions-panel">
-        <h3>Open suspense questions <span>{questions.length}</span></h3>
-        <p className="muted">Classify these later when a receipt or other evidence arrives. The reconciled statement side is not changed.</p>
+        <h3>Open suspense questions <span>{questions.length}{questionCursor ? "+" : ""}</span></h3>
+        <p className="muted">Review these after other accounts or evidence are imported. Matching entries with fees or different quantities is a later step; use final account assignment only when the evidence supports it.</p>
         {questions.map((question) => <article className="statement-question" key={question.lineItemId}>
           <div><strong>{question.transactionDescription || question.prompt}</strong>
             <small>{question.transactionDate} · {question.accountFullName} · {question.audience}</small></div>
@@ -194,6 +220,9 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
           <button type="button" className="secondary" disabled={!questionTargets[question.lineItemId] || Boolean(busy)}
             onClick={() => void assign(question)}>{busy === `question-${question.lineItemId}` ? "Assigning…" : "Assign suspense line"}</button>
         </article>)}
+        {questionCursor && <button type="button" className="secondary" disabled={Boolean(busy)}
+          onClick={() => void loadQuestions(questionCursor).catch((nextError) => setError(message(nextError)))}>
+          Load more questions</button>}
         {!questions.length && <p className="statement-empty">No open accounting questions.</p>}
       </section>
     </div>

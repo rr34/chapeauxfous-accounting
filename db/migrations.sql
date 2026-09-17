@@ -7,6 +7,19 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0018: designate-suspense-accounts
+-- writer downtime: schedule maintenance; adding an account column takes a metadata lock.
+-- deployment order: apply before deploying code that reads or writes is_suspense.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+-- Existing accounts remain ordinary until their owner explicitly marks one.
+
+ALTER TABLE `accounts`
+  ADD COLUMN `is_suspense` tinyint(1) NOT NULL DEFAULT 0
+    COMMENT 'Whether the owner designated this active, postable account as the holding account for unresolved imported counterlines in its native currency. Format: Boolean: 0 is ordinary and 1 is suspense. Rules: Application code permits at most one active suspense account per owner and currency; the user chooses the account.'
+    AFTER `is_placeholder`;
+
+-- end migration 0018
+
 -- migration 0017: store-optional-transaction-utc-timestamp
 -- writer downtime: schedule maintenance; adding a transaction column takes a metadata lock.
 -- deployment order: apply before deploying code that reads or writes TransactionAtUtc.

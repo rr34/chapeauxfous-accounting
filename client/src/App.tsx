@@ -226,7 +226,7 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
           : <span className="account-disclosure-spacer" />}
         <button type="button" className={`account-row ${selectedAccountId === node.id ? "selected" : ""}`}
           aria-label={`View ${node.name} ledger`} onClick={() => onSelect(node)}>
-          <div><strong>{node.name}</strong><span>{node.type} · {node.currencyCode}{node.placeholder ? " · placeholder" : ""}</span>
+          <div><strong>{node.name}</strong><span>{node.type} · {node.currencyCode}{node.placeholder ? " · placeholder" : ""}{node.suspense ? " · suspense" : ""}</span>
             {node.description && <small>{node.description}</small>}</div>
           <div className="account-balances">{node.subtreeBalances.map((balance) => <b key={balance.currencyId}>
             {unitsToDecimal(balance.units, balance.scale)}
@@ -298,6 +298,7 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
   const [description, setDescription] = useState(account.description ?? "");
   const [placeholder, setPlaceholder] = useState(account.placeholder);
   const [type, setType] = useState<Account["type"]>(account.type);
+  const [suspense, setSuspense] = useState(account.suspense);
   const [currencyId, setCurrencyId] = useState(account.currencyId);
   const [parentAccountId, setParentAccountId] = useState(account.parentAccountId == null ? "" : String(account.parentAccountId));
   const [error, setError] = useState("");
@@ -325,6 +326,7 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
         name,
         description,
         placeholder,
+        suspense,
         type,
         currencyId,
         parentAccountId: parentAccountId ? Number(parentAccountId) : null,
@@ -374,6 +376,8 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
         </select></label>
         <label className="checkbox-field"><input type="checkbox" checked={placeholder}
           onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
+        <label className="checkbox-field"><input type="checkbox" checked={suspense}
+          onChange={(event) => setSuspense(event.target.checked)} />Use for unresolved imported entries in {account.currencyCode}</label>
         {deletePreview && <section className="delete-confirmation-panel">
           <strong>Delete this empty account?</strong>
           <p>This permanently removes only <b>{deletePreview.summary.accountName}</b>. Accounts with children, postings, or known balances cannot be deleted.</p>
@@ -401,6 +405,7 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [placeholder, setPlaceholder] = useState(false);
+  const [suspense, setSuspense] = useState(false);
   const [type, setType] = useState<Account["type"] | "">("");
   const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
@@ -410,9 +415,9 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   async function submit(event: FormEvent) {
     event.preventDefault(); setError("");
     try {
-      await api("/accounts", { method: "POST", body: JSON.stringify({ name, description, placeholder, type, currencyId: Number(currencyId),
+      await api("/accounts", { method: "POST", body: JSON.stringify({ name, description, placeholder, suspense, type, currencyId: Number(currencyId),
         parentAccountId: parentAccountId ? Number(parentAccountId) : null }) }, token);
-      setName(""); setDescription(""); setPlaceholder(false); setShowForm(false); await onChanged();
+      setName(""); setDescription(""); setPlaceholder(false); setSuspense(false); setShowForm(false); await onChanged();
     } catch (nextError) { setError(errorMessage(nextError)); }
   }
 
@@ -434,6 +439,8 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
       </select>
       <label className="checkbox-field"><input type="checkbox" checked={placeholder}
         onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
+      <label className="checkbox-field"><input type="checkbox" checked={suspense}
+        onChange={(event) => setSuspense(event.target.checked)} />Use for unresolved imported entries in this currency</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
     <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}

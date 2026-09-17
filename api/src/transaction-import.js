@@ -163,6 +163,62 @@ function normalizeReconciliation(reconciliation) {
   };
 }
 
+function normalizeKnownBalanceAssertions(assertions) {
+  if (!Array.isArray(assertions) || assertions.length > 2) {
+    throw importError("Supply at most two dated statement balances.", "INVALID_IMPORT_BALANCE_ASSERTIONS");
+  }
+  const seen = new Set();
+  return assertions.map((assertion) => {
+    const accountId = Number(assertion.accountId);
+    const balanceDate = normalizeDate(assertion.balanceDate);
+    const knownBalanceUnits = String(assertion.knownBalanceUnits ?? "").trim();
+    if (!Number.isInteger(accountId) || accountId <= 0 || !/^-?\d+$/.test(knownBalanceUnits)) {
+      throw importError("A statement balance needs an account, date, and integer native-unit amount.",
+        "INVALID_IMPORT_BALANCE_ASSERTIONS");
+    }
+    const key = `${accountId}:${balanceDate}`;
+    if (seen.has(key)) throw importError("A statement balance date was supplied twice.",
+      "DUPLICATE_IMPORT_BALANCE_ASSERTION");
+    seen.add(key);
+    return { accountId, balanceDate, knownBalanceUnits };
+  });
+}
+
+async function inspectKnownBalanceAssertions(connection, personId, assertions, { commit = false } = {}) {
+  const results = [];
+  for (const assertion of assertions) {
+    const [existing] = await connection.query(
+      `SELECT known_balance_units FROM account_balance_assertions
+        WHERE owner_person_id = ? AND account_id = ? AND balance_date = ?${commit ? " FOR UPDATE" : ""}`,
+      [personId, assertion.accountId, assertion.balanceDate],
+    );
+    let stored = existing[0];
+    let created = false;
+    if (!stored && commit) {
+      const [insert] = await connection.query(
+        `INSERT INTO account_balance_assertions
+          (owner_person_id, account_id, balance_date, known_balance_units) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE account_balance_assertion_id = account_balance_assertion_id`,
+        [personId, assertion.accountId, assertion.balanceDate, assertion.knownBalanceUnits],
+      );
+      created = insert.affectedRows === 1;
+      const [rows] = await connection.query(
+        `SELECT known_balance_units FROM account_balance_assertions
+          WHERE owner_person_id = ? AND account_id = ? AND balance_date = ?`,
+        [personId, assertion.accountId, assertion.balanceDate],
+      );
+      stored = rows[0];
+    }
+    results.push({
+      accountId: assertion.accountId, balanceDate: assertion.balanceDate,
+      sourceKnownBalanceUnits: assertion.knownBalanceUnits,
+      storedKnownBalanceUnits: stored == null ? null : String(stored.known_balance_units),
+      status: commit ? (created ? "created" : "preserved") : (stored ? "preserved" : "planned"),
+    });
+  }
+  return results;
+}
+
 async function validateReconciliation(connection, personId, reconciliation, entries) {
   if (reconciliation == null) return null;
   const context = await getStatementReconciliationContext({
@@ -754,18 +810,19 @@ function transactionPlanIdentity(plan) {
   };
 }
 
-export async function previewTransactionImport({ pool, personId, sourceSystem, transactions, reconciliation = null }) {
+export async function previewTransactionImport({ pool, personId, sourceSystem, transactions,
+  reconciliation = null, knownBalanceAssertions = [] }) {
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
   normalized.reconciliation = normalizeReconciliation(reconciliation);
+  normalized.knownBalanceAssertions = normalizeKnownBalanceAssertions(knownBalanceAssertions);
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
     const entries = await analyzeTransactionImport(connection, personId, normalized, false);
     if (entries.some((entry) => entry.status === "rejected")) return summarize(normalized, entries);
     const reconciliationValidation = await validateReconciliation(connection, personId,
       normalized.reconciliation, entries);
-    if (reconciliationValidation && !reconciliationValidation.passed) {
-      return { ...summarize(normalized, entries), readyToCommit: false, reconciliationValidation };
-    }
+    const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
+      normalized.knownBalanceAssertions);
 
     const importPlanId = randomUUID();
     const expiresAtDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -773,6 +830,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     normalized.previewResolutionDigest = importResolutionDigest(entries);
     const payloadJson = JSON.stringify(normalized);
     const preview = { ...summarize(normalized, entries),
+      ...(balanceAssertions.length ? { balanceAssertions } : {}),
       ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
     const transactionSummary = {
       transactionsCreated: preview.wouldCreateTransactionCount,
@@ -792,6 +850,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     );
     return {
       ...summarize(normalized, entries, { importPlanId, expiresAt: expiresAtDate.toISOString() }),
+      ...(balanceAssertions.length ? { balanceAssertions } : {}),
       ...(reconciliationValidation == null ? {} : { reconciliationValidation }),
       status: "ready",
       expiresAt: expiresAtDate.toISOString(),
@@ -947,24 +1006,16 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     }
     const reconciliationValidation = await validateReconciliation(connection, personId,
       normalized.reconciliation ?? null, entries);
-    if (reconciliationValidation && !reconciliationValidation.passed) {
-      await connection.query(
-        `UPDATE accounting_import_plans
-            SET plan_status = 'invalidated', invalidated_at = UTC_TIMESTAMP(6),
-                invalidation_code = 'DATABASE_STATE_CHANGED'
-          WHERE import_plan_id = ? AND owner_person_id = ?`,
-        [resolvedPlanId, personId],
-      );
-      return { failure: importError("Known balances or posted account movement changed; review a new dry run.",
-        "IMPORT_PLAN_NO_LONGER_RECONCILES", reconciliationValidation) };
-    }
 
     for (const entry of entries) {
       if (entry.status !== "planned") continue;
       entry.transactionId = await insertImportedTransaction(connection, personId, normalized.sourceSystem, entry.resolved);
       entry.status = "created";
     }
+    const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
+      normalized.knownBalanceAssertions ?? [], { commit: true });
     const result = { ...summarize(normalized, entries, { ledgerChanged: true }),
+      ...(balanceAssertions.length ? { balanceAssertions } : {}),
       ...(reconciliationValidation == null ? {} : { reconciliationValidation }),
       ...identity, readyToCommit: false, status: "committed", committed: true, alreadyCommitted: false };
     const resultJson = JSON.stringify(result);

@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.12.0";
+export const MCP_SERVER_VERSION = "0.13.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -97,6 +97,7 @@ export const accountSchema = z.object({
   name: z.string().min(1).describe("Local account name within its parent; it may name a provider such as Coinbase."),
   description: z.string().nullable().describe("Optional user-written explanation of the account."),
   placeholder: z.boolean().describe("Whether this account organizes children and cannot receive postings."),
+  suspense: z.boolean().describe("Whether the owner designated this account to hold unresolved imported counterlines in its native currency."),
   parentAccountId: z.number().int().positive().nullable().describe("Parent account ID in this user's chart, or null for a root account."),
   type: z.enum(["asset", "liability", "equity", "income", "expense"])
     .describe("Accounting classification chosen by the user for this account."),
@@ -365,7 +366,7 @@ export const statementObservationAnalysisSchema = z.object({
     residualAfterProposedUnits: z.string().regex(/^-?\d+$/).nullable(),
     balanced: z.boolean(),
   })),
-  readyForTransactionAssembly: z.boolean(),
+  readyForTransactionAssembly: z.boolean().describe("At least one observation remains to import after exact source duplicates are excluded; review candidates remain questions."),
   rules: z.array(z.string().min(1)),
 });
 
@@ -383,7 +384,7 @@ export const accountingCapabilityManifest = Object.freeze({
     name: "chapeaux-fous-accounting",
     title: "Chapeaux Fous Accounting",
     version: MCP_SERVER_VERSION,
-    instructions: "For an uploaded account statement, use one canonical workflow. First identify and confirm exactly one accounting.account object. Call start_single_account_statement_import, then answer its four questions in order from the attachment: (1) beginning balance and date, including whether the date is the first included statement date or an explicit end-of-day balance date, (2) ending balance and date, (3) every signed line-item amount and date, and (4) all available text for each line. A beginning balance shown for the first included date is an end-of-day balance for the previous calendar day; the server derives that effective date. Ask the user only when the statement does not provide an answer. Submit the complete answers to import_single_account_statement. Do not guess counteraccounts, categories, fees, prices, or transfers during this initial workflow; Accounting puts every unknown other side into the user-selected same-currency suspense account. Present the returned preview for confirmation, commit its exact plan only after approval, and reconcile only the statement account after the known closing balance matches. Later evidence can resolve suspense questions without changing reconciled statement lines. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
+    instructions: "For an uploaded account statement, use one canonical workflow. First identify and confirm exactly one accounting.account object. Call start_single_account_statement_import, then answer its four questions in order from the attachment: (1) optional beginning balance and date, including whether the date is the first included statement date or an explicit end-of-day balance date, (2) optional ending balance and date, (3) every signed line-item amount and date, and (4) all available text for each line. A beginning balance shown for the first included date is an end-of-day balance for the previous calendar day; the server derives that effective date. Report absent balances without asking the user to supply them. Submit the answers to import_single_account_statement. Do not guess counteraccounts, categories, fees, prices, or transfers during this initial workflow; Accounting puts every unknown other side into the user-designated suspense account for that currency. If none is designated, use update_account to mark an existing postable account chosen by the user. Present the returned preview for confirmation, commit its exact plan only after approval, and check whether any known closing balance matches after commit. A mismatch does not block transaction import. Reconcile the statement account only when its known closing balance matches. Later matching or classification work uses the retained open questions; simple reclassification preserves reconciled statement lines. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
     artifactUpload: artifactUploadContract,
   },
   capabilities: [
@@ -439,7 +440,7 @@ export const accountingCapabilityManifest = Object.freeze({
         "For a transaction file tied to a named account, select the accounting.accounts.active_paths context view to resolve its full path and currency once; use list_accounts only when current posted balances are needed.",
         "Fetch the authoritative canonical line-record JSON Schema before mapping a source file.",
         "For a file-originated import, persist canonical application/x-ndjson and use the advertised resumable artifact upload; byte chunks are host-managed transport and must not enter model context.",
-        "Group all lines of each transaction under one stable transaction_external_id before staging. A one-account source row is not a complete double-entry transaction: identify its counterpart from source evidence or use an existing user-selected suspense account when classification remains unknown. Preserve source account quantities exactly; valuation values are rounded to the valuation currency scale.",
+        "Group all lines of each transaction under one stable transaction_external_id before staging. A one-account source row is not a complete double-entry transaction: identify its counterpart from source evidence or use the user-designated same-currency suspense account when classification remains unknown. Preserve source account quantities exactly; valuation values are rounded to the valuation currency scale.",
         "When opening and closing known balances are available, use get_statement_reconciliation_context and analyze_statement_observations before staging, then prove that exact source quantities cover the required remaining account movement. Map the source UTC time to transaction_at. Accounting automatically chooses the nearest owner-scoped reference rate in either currency direction and values each foreign line from its exact amount; a supplied source value is used only when no reference rate exists. Keep exact cash proceeds as their own line and supply an existing expense fee_account_full_name for a cash-conversion residual; Accounting computes that fee. A missing counterpart is not a fee.",
         `Inline JSON is reserved for direct agent-created transactions and bounded calls of at most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items.`,
         "Retry only structured exceptions; successful transaction groups remain staged or committed and must not be resubmitted.",
@@ -454,7 +455,7 @@ export const accountingCapabilityManifest = Object.freeze({
       summary: "Reconcile account statements and import timestamped exchange-rate or market-price series, including BTC/USD CSV files.",
       aliases: ["reconciliation", "balance checks", "statement import", "account statement",
         "exchange rates", "reference prices", "bitcoin prices", "BTC/USD"],
-      guidance: "For an account statement attachment, start_single_account_statement_import followed by import_single_account_statement is the canonical path. Extract only beginning balance/date and its date meaning, ending balance/date, signed line items, and available line text. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. The server stores the balance anchors, screens duplicates, builds balanced suspense counterlines, and refuses a commit plan when the statement does not ground the selected account. For a market-price file, use the separate reference-rate schema and artifact import tools.",
+      guidance: "For an account statement attachment, start_single_account_statement_import followed by import_single_account_statement is the canonical path. Try to extract beginning and ending balances with dates, signed line items, and available line text. Either balance may be absent. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. At commit, the server stores found balance assertions only where none exists, screens duplicates, and builds balanced counterlines in the designated suspense account. Missing or mismatched known balances do not block transaction import. For a market-price file, use the separate reference-rate schema and artifact import tools.",
       tools: ["list_balance_assertions", "list_balance_assertion_objects", "save_balance_assertion", "get_statement_reconciliation_context",
         "analyze_statement_observations",
         "list_reference_rates", "get_reference_rate_import_schema", "create_reference_rates",
@@ -466,12 +467,12 @@ export const accountingCapabilityManifest = Object.freeze({
         "For an uploaded price file, get the reference-rate import schema and transform the full file to canonical JSON Lines with file_table_transform; for OHLC historical bars, use close as the price unless the user or source specifies another measure. Report transform exceptions. Compare transformedRecordCount with maximum_records; if larger, use file_jsonl_partition with records_per_file no greater than maximum_records. Upload and import each part, or the whole artifact when it fits. On resumption, recover successful per-part import receipts and continue with parts lacking a successful receipt. Verify aggregate submittedCount equals transformedRecordCount and aggregate createdCount plus reusedCount equals aggregate submittedCount.",
         "For a statement, bind one CSV, PDF, image, OCR result, or screenshot to one confirmed accounting.account object.",
         "For a statement, call start_single_account_statement_import before extracting or importing the attachment.",
-        "Answer its four questions in order and preserve printed balances, dates, signed amounts, and text exactly.",
+        "Answer its four questions in order; mark missing balances absent and preserve printed balances, dates, signed amounts, and text exactly.",
         "Do not infer transfers, prices, fees, or final categories during initial statement intake.",
         "Use statement balances as native-unit anchors; never alter a source quantity to manufacture a match.",
-        "Ask Accountant and Ask Human are user-created ordinary postable suspense accounts, usually one per currency; do not create them silently and do not make them placeholders.",
-        "When a later receipt is uploaded, list open accounting questions before creating another transaction. Compare currency, exact amount, date, merchant text, and source identity; resolve only a unique supported match and ask the user when candidates remain ambiguous.",
-        "import_single_account_statement preserves each statement line, marks that side cleared, and creates the opposite posting in one selected same-currency suspense bucket.",
+        "The owner marks one existing postable account per currency as the suspense account; Ask Accountant is a possible name, never an automatic choice. Import uses that designation and retains open accounting questions for later matching or classification.",
+        "When later evidence is uploaded, list open accounting questions before creating another transaction. Compare currency, quantity, date, merchant text, and source identity. Near matches and fees need a separate matching and consolidation workflow; keep the question open until that work is supported. Use resolve_accounting_question only for a supported same-currency reclassification.",
+        "import_single_account_statement preserves each statement line, marks that side cleared, and creates the opposite posting in the user-designated suspense account for the native currency.",
         "Mark an account reconciled through a closing date only with reconcile_account_through_date; it requires the exact known balance to match first and never marks the suspense counterlines reconciled.",
       ],
       contextViews: [],
