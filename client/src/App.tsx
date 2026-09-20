@@ -164,6 +164,80 @@ function accountFullNames(accounts: Account[]) {
   return names;
 }
 
+function ParentAccountPicker({ accounts, value, onChange, unavailableIds = new Set<number>() }: {
+  accounts: Account[]; value: string; onChange: (value: string) => void; unavailableIds?: Set<number>;
+}) {
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const names = useMemo(() => accountFullNames(accounts), [accounts]);
+  const rows = useMemo(() => {
+    const ordered: Array<{ account: Account; depth: number }> = [];
+    const visit = (nodes: AccountTreeNode[], depth: number) => {
+      for (const node of [...nodes].sort((left, right) => left.name.localeCompare(right.name))) {
+        ordered.push({ account: node, depth });
+        visit(node.children, depth + 1);
+      }
+    };
+    visit(buildAccountTree(accounts), 0);
+    return ordered;
+  }, [accounts]);
+  const selected = accounts.find((account) => String(account.id) === value);
+  const normalizedQuery = query.trim().toLocaleLowerCase("en-US");
+  const visibleRows = rows.filter(({ account }) => !unavailableIds.has(account.id)
+    && (!normalizedQuery || (!account.archivedAt &&
+      `${names.get(account.id)} ${names.get(account.id)?.replaceAll(":", " ")} ${account.currencyCode}`
+        .toLocaleLowerCase("en-US").includes(normalizedQuery))));
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!fieldRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  function choose(nextValue: string) {
+    onChange(nextValue);
+    setOpen(false);
+    setQuery("");
+    triggerRef.current?.focus();
+  }
+
+  return <div className="parent-account-field" ref={fieldRef} onKeyDown={(event) => {
+    if (event.key === "Escape" && open) {
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+  }}>
+    <span>Parent account</span>
+    <button type="button" className="parent-account-trigger" ref={triggerRef}
+      aria-label={`Parent account: ${selected ? names.get(selected.id) : "No parent"}`}
+      aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+      <span>{selected ? names.get(selected.id)?.replaceAll(":", " › ") : "No parent"}</span><span aria-hidden="true">▾</span>
+    </button>
+    {open && <div className="parent-account-menu">
+      <input autoFocus aria-label="Find parent account" autoComplete="off" placeholder="Search account or path…"
+        value={query} onChange={(event) => setQuery(event.target.value)} />
+      <div className="parent-account-options">
+        <button type="button" className={value === "" ? "selected" : ""}
+          onClick={() => choose("")}>No parent <small>Top-level account</small></button>
+        {visibleRows.map(({ account, depth }) => <button type="button" key={account.id}
+          className={`${value === String(account.id) ? "selected" : ""} ${depth === 0 ? "root" : ""}`}
+          style={normalizedQuery ? undefined : { paddingInlineStart: `${0.7 + depth * 1.1}rem` }}
+          disabled={Boolean(account.archivedAt)} onClick={() => choose(String(account.id))}>
+          <span>{normalizedQuery ? names.get(account.id)?.replaceAll(":", " › ") : account.name}</span>
+          <small>{account.archivedAt ? "Archived" : account.currencyCode}</small>
+        </button>)}
+        {normalizedQuery && visibleRows.length === 0 && <p>No accounts match “{query}”.</p>}
+      </div>
+    </div>}
+  </div>;
+}
+
 type AccountChoice = { value: string; label: string; currencyCode: string };
 
 function AccountCombobox({ value, choices, onChange, label, placeholder = "Type to find an account…" }: {
@@ -369,11 +443,8 @@ function AccountEditDialog({ account, accounts, currencies, token, onClose, onCh
         </select></label><label>Currency<select value={currencyId} onChange={(event) => setCurrencyId(Number(event.target.value))}>
           <CurrencyOptions currencies={currencies} accounts={accounts} />
         </select></label></div>
-        <label>Parent<select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
-          <option value="">No parent</option>
-          {accounts.filter((candidate) => !candidate.archivedAt && !unavailableParentIds.has(candidate.id)).map((candidate) =>
-            <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
-        </select></label>
+        <ParentAccountPicker accounts={accounts} value={parentAccountId} onChange={setParentAccountId}
+          unavailableIds={unavailableParentIds} />
         <label className="checkbox-field"><input type="checkbox" checked={placeholder}
           onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
         <label className="checkbox-field"><input type="checkbox" checked={suspense}
@@ -434,9 +505,7 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
         <option value="">Choose currency…</option>
         <CurrencyOptions currencies={currencies} accounts={accounts} />
       </select></div>
-      <select value={parentAccountId} onChange={(event) => setParentAccountId(event.target.value)}>
-        <option value="">No parent</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
-      </select>
+      <ParentAccountPicker accounts={accounts} value={parentAccountId} onChange={setParentAccountId} />
       <label className="checkbox-field"><input type="checkbox" checked={placeholder}
         onChange={(event) => setPlaceholder(event.target.checked)} />Placeholder (cannot receive transactions)</label>
       <label className="checkbox-field"><input type="checkbox" checked={suspense}
@@ -2070,7 +2139,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr><th>Date</th><th>Description</th><th>This account</th>
-          <th>Running balance</th><th>Known balance</th><th>Account</th>
+          <th>Running balance</th><th>Known balance</th><th>Split account(s)</th>
           <th>Other accounts amounts</th></tr></thead>
         <tbody>{sortOrder === "recent" && newTransactionRows}{registerRows.map((row) => {
           if (row.kind === "assertion") {
