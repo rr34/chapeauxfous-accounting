@@ -17,6 +17,13 @@ export function unitsToDecimal(value: string, scale: number): string {
   return `${sign}${whole}.${decimals}`;
 }
 
+export function unitsToGroupedDecimal(value: string, scale: number): string {
+  const decimal = unitsToDecimal(value, scale);
+  const [whole, fractional] = decimal.split(".");
+  const groupedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fractional === undefined ? groupedWhole : `${groupedWhole}.${fractional}`;
+}
+
 export function parseTags(value: string): Array<{ key: string; value: string }> {
   if (!value.trim()) return [];
   return value.split(",").map((part) => {

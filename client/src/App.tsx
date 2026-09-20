@@ -1,6 +1,6 @@
 import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, mcpEndpointUrl } from "./api";
-import { decimalToUnits, unitsToDecimal } from "./money";
+import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
@@ -72,6 +72,12 @@ type AccountDeletionPreview = {
   deletionPlanId: string;
   previewDigest: string;
   summary: { accountId: number; accountName: string };
+};
+type AccountReconciliationResult = {
+  balanceDate: string;
+  totalLineCount: number;
+  newlyReconciledLineCount: number;
+  alreadyReconciledLineCount: number;
 };
 type ImportRestartPreview = {
   restartPlanId: string;
@@ -303,7 +309,7 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
           <div><strong>{node.name}</strong><span>{node.type} · {node.currencyCode}{node.placeholder ? " · placeholder" : ""}{node.suspense ? " · suspense" : ""}</span>
             {node.description && <small>{node.description}</small>}</div>
           <div className="account-balances">{node.subtreeBalances.map((balance) => <b key={balance.currencyId}>
-            {unitsToDecimal(balance.units, balance.scale)}
+            {unitsToGroupedDecimal(balance.units, balance.scale)}
             {node.subtreeBalances.length > 1 && <em>{balance.currencyCode}</em>}
           </b>)}</div>
         </button>
@@ -1964,11 +1970,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [selectingTransactionId, setSelectingTransactionId] = useState<number | null>(null);
   const [selectionError, setSelectionError] = useState("");
   const selectionRequest = useRef(0);
-  const [knownBalanceFormMode, setKnownBalanceFormMode] = useState<"row" | "manual" | null>(null);
+  const [knownBalanceFormMode, setKnownBalanceFormMode] = useState<"add-row" | "edit-row" | "manual" | null>(null);
+  const [knownBalanceAnchorDate, setKnownBalanceAnchorDate] = useState<string | null>(null);
   const [knownBalanceDate, setKnownBalanceDate] = useState(today());
   const [knownBalance, setKnownBalance] = useState("");
   const [knownBalanceError, setKnownBalanceError] = useState("");
   const [knownBalanceBusy, setKnownBalanceBusy] = useState(false);
+  const [reconcilingAssertionId, setReconcilingAssertionId] = useState<number | null>(null);
+  const [reconciliationMessage, setReconciliationMessage] = useState("");
+  const [reconciliationError, setReconciliationError] = useState("");
   const [showAccountEditor, setShowAccountEditor] = useState(false);
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
   const accountAssertions = useMemo(() => assertions.filter((assertion) => assertion.accountId === account.id), [account.id, assertions]);
@@ -2001,8 +2011,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   useEffect(() => {
     selectionRequest.current += 1;
     setSelectedTransaction(null); setSelectedLineItemId(null); setSelectingTransactionId(null); setSelectionError("");
-    setKnownBalanceFormMode(null); setKnownBalanceDate(today());
+    setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null); setKnownBalanceDate(today());
     setKnownBalance(""); setKnownBalanceError(""); setShowNewTransaction(false);
+    setReconcilingAssertionId(null); setReconciliationMessage(""); setReconciliationError("");
     setShowAccountEditor(false);
   }, [account.id]);
 
@@ -2060,18 +2071,21 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   }
 
   function editKnownBalance(assertion: BalanceAssertion) {
+    setKnownBalanceAnchorDate(assertion.date);
     setKnownBalanceDate(assertion.date);
     setKnownBalance(unitsToDecimal(assertion.knownBalanceUnits, assertion.scale));
-    setKnownBalanceError(""); setKnownBalanceFormMode("row");
+    setKnownBalanceError(""); setKnownBalanceFormMode("edit-row");
   }
 
   function addKnownBalance(date: string) {
+    setKnownBalanceAnchorDate(date);
     setKnownBalanceDate(date);
     setKnownBalance("");
-    setKnownBalanceError(""); setKnownBalanceFormMode("row");
+    setKnownBalanceError(""); setKnownBalanceFormMode("add-row");
   }
 
   function addKnownBalanceForAnotherDate() {
+    setKnownBalanceAnchorDate(null);
     setKnownBalanceDate(today());
     setKnownBalance("");
     setKnownBalanceError(""); setKnownBalanceFormMode("manual");
@@ -2085,19 +2099,50 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         balanceDate: knownBalanceDate,
         knownBalanceUnits: decimalToUnits(knownBalance, account.scale),
       }) }, token);
-      await onChanged(); setKnownBalanceFormMode(null); setKnownBalance("");
+      await onChanged(); setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null); setKnownBalance("");
     } catch (nextError) { setKnownBalanceError(errorMessage(nextError)); }
     finally { setKnownBalanceBusy(false); }
   }
 
+  async function reconcileThroughKnownBalance(assertion: BalanceAssertion) {
+    if (!assertion.matches) {
+      editKnownBalance(assertion);
+      return;
+    }
+    if (selectedTransaction) {
+      setReconciliationError("Save or cancel the selected transaction before reconciling this account.");
+      return;
+    }
+    const dateLabel = formatRegisterDate(assertion.date);
+    if (!window.confirm(`Reconcile ${account.name} through ${dateLabel}? This marks every posted line in this account on or before that date as reconciled.`)) return;
+    setReconcilingAssertionId(assertion.id); setReconciliationMessage(""); setReconciliationError("");
+    try {
+      const result = await api<AccountReconciliationResult>(`/accounts/${account.id}/reconcile`, {
+        method: "POST", body: JSON.stringify({ balanceDate: assertion.date }),
+      }, token);
+      await onChanged();
+      const newlyLabel = `${result.newlyReconciledLineCount} line${result.newlyReconciledLineCount === 1 ? "" : "s"}`;
+      const alreadyLabel = result.alreadyReconciledLineCount > 0
+        ? ` ${result.alreadyReconciledLineCount} ${result.alreadyReconciledLineCount === 1 ? "was" : "were"} already reconciled.`
+        : "";
+      setReconciliationMessage(`Reconciled through ${formatRegisterDate(result.balanceDate)}: ${newlyLabel} updated.${alreadyLabel}`);
+    } catch (nextError) {
+      setReconciliationError(errorMessage(nextError));
+    } finally {
+      setReconcilingAssertionId(null);
+    }
+  }
+
   const knownBalanceForm = knownBalanceFormMode && <form id="known-balance-form" className="known-balance-form" onSubmit={saveKnownBalance}>
-    <label>End of date<input type="date" required readOnly={knownBalanceFormMode === "row"} value={knownBalanceDate}
+    <label>End of date<input type="date" required readOnly={knownBalanceFormMode === "edit-row"} value={knownBalanceDate}
       onChange={(event) => setKnownBalanceDate(event.target.value)} /></label>
     <label>Known ending balance ({account.currencyCode})<input required placeholder="Known balance" value={knownBalance}
       onChange={(event) => setKnownBalance(event.target.value)} /></label>
     <div className="known-balance-form-actions"><button className="secondary" disabled={knownBalanceBusy}>
       {knownBalanceBusy ? "Saving…" : "Save balance"}</button>
-      <button type="button" className="link-button" onClick={() => setKnownBalanceFormMode(null)}>Cancel</button></div>
+      <button type="button" className="link-button" onClick={() => {
+        setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null);
+      }}>Cancel</button></div>
     {knownBalanceError && <p className="error">{knownBalanceError}</p>}
   </form>;
 
@@ -2134,6 +2179,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     </div>
     {error && <p className="error">{error}</p>}
     {selectionError && <p className="error">{selectionError}</p>}
+    {reconciliationMessage && <p className="register-reconciliation-message" aria-live="polite">{reconciliationMessage}</p>}
+    {reconciliationError && <p className="error" aria-live="assertive">{reconciliationError}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
       : !error && registerRows.length === 0 && !showNewTransaction
       ? <p className="register-message">No posted transactions or known balances in this account.</p>
@@ -2151,12 +2198,21 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small></td>
               <td></td>
               <td className="amount balance">{unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</td>
-              <td className="amount known-balance"><button type="button" className="known-balance-edit"
-                aria-label={`Edit known balance for ${assertion.date}`} onClick={() => editKnownBalance(assertion)}>
-                {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)} <span aria-hidden="true">✎</span></button></td>
+              <td className="amount known-balance"><div className="known-balance-controls">
+                <button type="button" className={assertion.matches ? "known-balance-reconcile" : "known-balance-edit"}
+                  aria-label={assertion.matches ? `Reconcile ${account.name} through ${assertion.date}` : `Edit known balance for ${assertion.date}`}
+                  disabled={reconcilingAssertionId != null}
+                  onClick={() => void reconcileThroughKnownBalance(assertion)}>
+                  {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)}
+                  {assertion.matches && <small>{reconcilingAssertionId === assertion.id ? "Reconciling…" : "Reconcile"}</small>}
+                </button>
+                {assertion.matches && <button type="button" className="known-balance-edit-icon"
+                  aria-label={`Edit known balance for ${assertion.date}`} title="Edit known balance"
+                  disabled={reconcilingAssertionId != null} onClick={() => editKnownBalance(assertion)}>✎</button>}
+              </div></td>
               <td>—</td><td></td>
             </tr>
-              {knownBalanceFormMode === "row" && knownBalanceDate === assertion.date
+              {knownBalanceFormMode === "edit-row" && knownBalanceAnchorDate === assertion.date
                 && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>}
             </Fragment>;
           }
@@ -2172,11 +2228,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             && !account.placeholder && !account.archivedAt;
           const knownBalanceAction = showAddKnownBalance && <button type="button"
             className="known-balance-add" aria-label={`Add known balance for ${entry.date}`}
-            aria-expanded={knownBalanceFormMode === "row" && knownBalanceDate === entry.date}
+            aria-expanded={knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date}
             aria-controls="known-balance-form" title={`Add known balance for ${formatRegisterDate(entry.date)}`}
             onClick={(event) => { event.stopPropagation(); addKnownBalance(entry.date); }}
             onKeyDown={(event) => event.stopPropagation()}>+</button>;
-          const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "row" && knownBalanceDate === entry.date
+          const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
           if (selectedTransaction?.id === entry.transactionId) {
             return <Fragment key={entry.lineItemId}>
