@@ -20,6 +20,24 @@ export function transactionObject(transaction) {
   };
 }
 
+function lineItemObject(row, accountFullName) {
+  const description = compact(row.memo ?? row.transaction_description) || `Line item #${row.line_item_id}`;
+  return {
+    objectType: "accounting.line_item",
+    id: Number(row.line_item_id),
+    sourceRef: `accounting://line-items/${row.line_item_id}`,
+    displayName: `${row.TransactionDate} · ${accountFullName} · ${description}`,
+    transactionId: Number(row.transaction_id),
+    accountId: Number(row.account_id),
+    accountFullName,
+    transactionDate: row.TransactionDate,
+    amountUnits: String(row.amount_units),
+    currencyCode: String(row.CurrencyAbbreviation).trim(),
+    memo: row.memo == null ? null : String(row.memo),
+    reconciliationState: String(row.reconciliation_state),
+  };
+}
+
 function objectReadError(message, code) {
   return Object.assign(new Error(message), { code, status: 400 });
 }
@@ -146,6 +164,79 @@ export async function listTransactionObjectsPage(pool, personId, {
     });
   });
   return { objects: transactions, nextCursor: rows.length > resolvedLimit ? String(transactions.at(-1).id) : null };
+}
+
+export async function listLineItemObjectsPage(pool, personId, {
+  limit = 100, cursor = null, lineItemId = null, transactionId = null,
+  accountId = null, text = null,
+} = {}) {
+  const resolvedLimit = Number(limit);
+  if (!Number.isInteger(resolvedLimit) || resolvedLimit < 1 || resolvedLimit > 500) {
+    throw objectReadError("Line-item object limit must be from 1 through 500.", "INVALID_LINE_ITEM_OBJECT_LIMIT");
+  }
+  if (lineItemId != null && [cursor, transactionId, accountId, text].some((value) => value != null)) {
+    throw objectReadError("An exact line-item ID cannot be combined with other filters.", "INVALID_LINE_ITEM_OBJECT_FILTER");
+  }
+  const clauses = ["t.owner_person_id = ?", "a.owner_person_id = t.owner_person_id"];
+  const params = [personId];
+  if (lineItemId != null) {
+    clauses.push("li.line_item_id = ?");
+    params.push(lineItemId);
+  } else {
+    if (cursor != null) {
+      clauses.push("li.line_item_id < ?");
+      params.push(cursor);
+    }
+    if (transactionId != null) {
+      clauses.push("li.transaction_id = ?");
+      params.push(transactionId);
+    }
+    if (accountId != null) {
+      clauses.push("li.account_id = ?");
+      params.push(accountId);
+    }
+    if (text != null) {
+      const term = String(text).trim().toLocaleLowerCase("en-US");
+      clauses.push("(INSTR(LOWER(COALESCE(li.memo, '')), ?) > 0 OR INSTR(LOWER(COALESCE(t.description, '')), ?) > 0 OR INSTR(LOWER(a.AccountName), ?) > 0)");
+      params.push(term, term, term);
+    }
+  }
+  const [rows] = await pool.query(
+    `SELECT li.line_item_id, li.transaction_id, li.account_id, li.amount_units, li.memo,
+            li.reconciliation_state, t.TransactionDate, t.description AS transaction_description,
+            a.AccountName, a.parent_account_id, c.CurrencyAbbreviation
+       FROM line_items li
+       JOIN transactions t ON t.transaction_id = li.transaction_id
+       JOIN accounts a ON a.account_id = li.account_id
+       JOIN currencies c ON c.currency_id = a.account_currency_id
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY li.line_item_id DESC LIMIT ?`,
+    [...params, resolvedLimit + 1],
+  );
+  const pageRows = rows.slice(0, resolvedLimit);
+  const pathAccounts = await loadAccountObjectPaths(pool, personId, pageRows.map((row) => ({
+    id: Number(row.account_id), name: row.AccountName,
+    parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
+  })));
+  const paths = new Map();
+  const byId = new Map(pathAccounts.map((account) => [account.id, account]));
+  const fullName = (id, seen = new Set()) => {
+    if (paths.has(id)) return paths.get(id);
+    if (seen.has(id)) return byId.get(id)?.name ?? `Account #${id}`;
+    const account = byId.get(id);
+    if (!account) return `Account #${id}`;
+    const nextSeen = new Set(seen).add(id);
+    const value = account.parentAccountId == null
+      ? account.name
+      : `${fullName(account.parentAccountId, nextSeen)}:${account.name}`;
+    paths.set(id, value);
+    return value;
+  };
+  const objects = pageRows.map((row) => lineItemObject(row, fullName(Number(row.account_id))));
+  return {
+    objects,
+    nextCursor: rows.length > resolvedLimit ? String(objects.at(-1).id) : null,
+  };
 }
 
 export function accountingQuestionObject(question) {

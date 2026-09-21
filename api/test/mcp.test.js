@@ -381,13 +381,14 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(validateDiscoveredMcpTools(tools.tools, {
     serverName: "Accounting",
     serverInfo: { name: "chapeaux-fous-accounting" },
-  }), { owned: true, objectTypeCount: 5 });
+  }), { owned: true, objectTypeCount: 7 });
   for (const tool of tools.tools) {
     assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
   }
   const objectTools = tools.tools.filter((tool) => tool._meta?.["agent-slayer/objects"]);
   assert.deepEqual(objectTools.map(({ name }) => name), [
-    "list_account_objects", "list_transaction_objects", "list_accounting_question_objects",
+    "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
+    "list_accounting_question_objects",
     "list_transaction_import_job_objects", "list_balance_assertion_objects",
   ]);
   const describedTypes = new Map();
@@ -403,9 +404,82 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     }
   }
   assert.deepEqual([...describedTypes.keys()], [
-    "accounting.account", "accounting.transaction", "accounting.question",
+    "accounting.currency", "accounting.account", "accounting.transaction", "accounting.line_item",
+    "accounting.question",
     "accounting.transaction_import_job", "accounting.balance_assertion",
   ]);
+  const objectInputContracts = Object.fromEntries(tools.tools.flatMap((tool) => {
+    const contract = tool._meta?.["agent-slayer/object-input-bindings"];
+    return contract == null ? [] : [[tool.name, contract.bindings]];
+  }));
+  assert.deepEqual(Object.keys(objectInputContracts).sort(), [
+    "analyze_statement_observations", "commit_transaction_import_job", "create_account",
+    "create_reference_rates", "create_transaction", "exclude_transaction_import_exception",
+    "get_statement_reconciliation_context", "get_transaction", "get_transaction_import_job",
+    "import_single_account_statement", "import_transactions", "list_account_objects",
+    "list_accounting_question_objects", "list_accounting_questions", "list_balance_assertion_objects",
+    "list_currency_objects", "list_line_item_objects", "list_reference_rates",
+    "list_transaction_import_exceptions", "list_transaction_import_job_objects",
+    "list_transaction_objects", "open_accounting_question", "preview_delete_account",
+    "preview_delete_transactions", "preview_transaction_import_job", "reconcile_account_through_date",
+    "resolve_accounting_question", "retry_transaction_import_exception", "save_balance_assertion",
+    "search_transactions", "stage_transaction_import_artifact", "stage_transaction_import_chunk",
+    "start_single_account_statement_import", "update_account",
+  ]);
+  assert.deepEqual(objectInputContracts.list_currency_objects, [
+    { path: "/currency_id", objectType: "accounting.currency", value: "id", allowUnbound: true },
+  ]);
+  assert.deepEqual(objectInputContracts.list_account_objects, [
+    { path: "/account_id", objectType: "accounting.account", value: "id", allowUnbound: true },
+  ]);
+  assert.deepEqual(objectInputContracts.list_transaction_objects, [
+    { path: "/account_id", objectType: "accounting.account", value: "id" },
+    { path: "/transaction_id", objectType: "accounting.transaction", value: "id", allowUnbound: true },
+  ]);
+  assert.deepEqual(objectInputContracts.list_line_item_objects, [
+    { path: "/line_item_id", objectType: "accounting.line_item", value: "id", allowUnbound: true },
+    { path: "/account_id", objectType: "accounting.account", value: "id" },
+    { path: "/transaction_id", objectType: "accounting.transaction", value: "id" },
+  ]);
+  assert.deepEqual(objectInputContracts.list_accounting_question_objects, [
+    { path: "/line_item_id", objectType: "accounting.question", value: "id", allowUnbound: true },
+    { path: "/account_id", objectType: "accounting.account", value: "id" },
+  ]);
+  assert.deepEqual(objectInputContracts.list_transaction_import_job_objects, [
+    { path: "/import_job_id", objectType: "accounting.transaction_import_job", value: "id", allowUnbound: true },
+  ]);
+  assert.deepEqual(objectInputContracts.list_balance_assertion_objects, [
+    { path: "/assertion_id", objectType: "accounting.balance_assertion", value: "id", allowUnbound: true },
+  ]);
+  const identifyingReadTools = new Set([
+    "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
+    "list_accounting_question_objects", "list_transaction_import_job_objects", "list_balance_assertion_objects",
+  ]);
+  for (const [toolName, bindings] of Object.entries(objectInputContracts)) {
+    for (const binding of bindings) {
+      if (binding.allowUnbound === true) assert.equal(identifyingReadTools.has(toolName), true, toolName);
+    }
+  }
+  assert.deepEqual(objectInputContracts.import_single_account_statement, [
+    { path: "/account_id", objectType: "accounting.account", value: "id" },
+    { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
+  ]);
+  assert.deepEqual(objectInputContracts.preview_delete_transactions, [
+    { path: "/transaction_ids/*", objectType: "accounting.transaction", value: "id" },
+  ]);
+  assert.deepEqual(objectInputContracts.open_accounting_question, [
+    { path: "/line_item_id", objectType: "accounting.line_item", value: "id" },
+  ]);
+  for (const toolName of [
+    "stage_transaction_import_artifact", "stage_transaction_import_chunk",
+    "retry_transaction_import_exception", "exclude_transaction_import_exception",
+    "get_transaction_import_job", "list_transaction_import_exceptions",
+    "preview_transaction_import_job", "commit_transaction_import_job",
+  ]) {
+    assert.deepEqual(objectInputContracts[toolName], [
+      { path: "/import_job_id", objectType: "accounting.transaction_import_job", value: "id" },
+    ], toolName);
+  }
   const schemaDescription = await client.callTool({
     name: "describe_accounting_schema", arguments: { request: "accounts" },
   });
@@ -414,7 +488,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(catalogToolDescription({
     ...tools.tools.find(({ name }) => name === "list_accounts"),
     metadata: tools.tools.find(({ name }) => name === "list_accounts")._meta,
-  }).summary, /Coinbase Bitcoin account/);
+  }).summary, /use list_account_objects/);
+  assert.match(catalogToolDescription({
+    ...tools.tools.find(({ name }) => name === "list_account_objects"),
+    metadata: tools.tools.find(({ name }) => name === "list_account_objects")._meta,
+  }).summary, /Canonical tool to identify and bind an account/);
   assert.equal(tools.tools.some((tool) => tool.name === "describe_accounting_schema"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "create_transaction"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "commit_account_tree_import"), true);
@@ -534,7 +612,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "commit_delete_transactions").description,
     /verifies absence and account-tree identity/);
   const deletionPreviewInput = tools.tools.find((tool) => tool.name === "preview_delete_transactions").inputSchema;
-  assert.match(JSON.stringify(deletionPreviewInput), /anyOf|oneOf/);
+  assert.deepEqual(deletionPreviewInput.properties.scope.enum, ["all", "selected"]);
+  assert.equal(deletionPreviewInput.properties.transaction_ids.items.type, "integer");
   const invalidAllDeletionPreview = await client.callTool({ name: "preview_delete_transactions",
     arguments: { scope: "all", transaction_ids: [1] } });
   assert.equal(invalidAllDeletionPreview.isError, true);

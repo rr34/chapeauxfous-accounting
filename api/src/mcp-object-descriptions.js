@@ -1,4 +1,24 @@
-// Each type is published on exactly one owner-scoped, read-only object tool.
+// Each type is published on exactly one access-scoped, read-only object tool.
+export const currencyObjectDescription = Object.freeze({
+  protocol: "agent-slayer.object-description",
+  version: 1,
+  types: [{
+    id: "accounting.currency",
+    title: "Accounting currency or unit",
+    summary: "One accessible currency, crypto asset, security, commodity, or custom accounting unit.",
+    aliases: ["currency", "accounting unit", "crypto asset", "security", "commodity"],
+    identity: { field: "id", summary: "Stable accessible accounting-unit ID." },
+    reference: { field: "sourceRef", summary: "Stable accounting://currencies/{id} reference." },
+    display: { field: "displayName", summary: "Unit code and human-facing name." },
+    qualifiers: [
+      { field: "code", summary: "Short code or ticker used in accounting records." },
+      { field: "currencyType", summary: "ISO currency, crypto, security, commodity, or custom unit classification." },
+      { field: "scale", summary: "Decimal places retained for native-unit amounts." },
+      { field: "userDefined", summary: "Whether the unit belongs to the authenticated user's private catalog." },
+    ],
+  }],
+});
+
 export const accountObjectDescription = Object.freeze({
   protocol: "agent-slayer.object-description",
   version: 1,
@@ -17,11 +37,45 @@ export const accountObjectDescription = Object.freeze({
       { field: "suspense", summary: "Whether the owner designated this account for unresolved imported counterlines." },
       { field: "archived", summary: "Whether the account is archived." },
     ],
-    relationships: [{
-      name: "parent",
-      targetType: "accounting.account",
-      summary: "parentAccountId identifies this account's parent in the same owner-scoped chart.",
-    }],
+    relationships: [
+      {
+        name: "parent",
+        targetType: "accounting.account",
+        summary: "parentAccountId identifies this account's parent in the same owner-scoped chart.",
+      },
+      {
+        name: "currency",
+        targetType: "accounting.currency",
+        summary: "currencyId identifies this account's native accounting unit.",
+      },
+    ],
+  }],
+});
+
+export const lineItemObjectDescription = Object.freeze({
+  protocol: "agent-slayer.object-description",
+  version: 1,
+  types: [{
+    id: "accounting.line_item",
+    title: "Accounting line item",
+    summary: "One owner-scoped posting within a ledger transaction.",
+    aliases: ["posting", "split", "transaction line", "ledger line"],
+    identity: { field: "id", summary: "Stable owner-scoped line-item ID." },
+    reference: { field: "sourceRef", summary: "Stable accounting://line-items/{id} reference." },
+    display: { field: "displayName", summary: "Transaction date, account path, and compact line description." },
+    qualifiers: [
+      { field: "transactionDate", summary: "Accounting calendar date of the containing transaction." },
+      { field: "accountFullName", summary: "Full current path of the posting account." },
+      { field: "amountUnits", summary: "Signed amount in the account's native integer units." },
+      { field: "currencyCode", summary: "Native accounting-unit code of the posting account." },
+      { field: "reconciliationState", summary: "Unreconciled, cleared, or reconciled state." },
+    ],
+    relationships: [
+      { name: "transaction", targetType: "accounting.transaction",
+        summary: "transactionId identifies the transaction containing this line item." },
+      { name: "account", targetType: "accounting.account",
+        summary: "accountId identifies the account receiving this posting." },
+    ],
   }],
 });
 

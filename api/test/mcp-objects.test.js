@@ -9,10 +9,18 @@ process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
 const { createAccountingMcpServer } = await import("../src/mcp.js");
-const { loadAccountObjectPaths, listTransactionImportJobObjectsPage,
+const { loadAccountObjectPaths, listLineItemObjectsPage, listTransactionImportJobObjectsPage,
   listTransactionObjectsPage } = await import("../src/accounting-objects.js");
+const { objectInputBindingProblem } = await import(
+  "../../../agent-chapeaux-fous/src/object-input-bindings.mjs"
+);
+const { objectReferenceGroupsFromToolResult } = await import(
+  "../../../agent-chapeaux-fous/src/object-references.mjs"
+);
 
-test("all five Accounting object read paths return the fields they advertise", async () => {
+test("all seven Accounting object read paths return the fields they advertise", async () => {
+  const currency = { id: 2, code: "BTC", displayName: "Bitcoin", type: "crypto", scale: 8,
+    ownerPersonId: 7, userDefined: true };
   const account = { id: 10, name: "Coinbase Bitcoin", description: null, placeholder: false, suspense: false,
     parentAccountId: null, type: "asset", currencyId: 2, currencyCode: "BTC", scale: 8,
     balanceUnits: "100000000", archivedAt: null };
@@ -22,6 +30,10 @@ test("all five Accounting object read paths return the fields they advertise", a
     prompt: "What was this charge?" };
   const assertion = { id: 41, accountId: 10, accountName: "Coinbase Bitcoin", date: "2026-09-15",
     knownBalanceUnits: "12345", currencyCode: "USD", scale: 2, matches: true };
+  const lineItem = { objectType: "accounting.line_item", id: 32, sourceRef: "accounting://line-items/32",
+    displayName: "2026-09-15 · Coinbase Bitcoin · Coin purchase", transactionId: 21, accountId: 10,
+    accountFullName: "Coinbase Bitcoin", transactionDate: "2026-09-15", amountUnits: "100000",
+    currencyCode: "BTC", memo: null, reconciliationState: "cleared" };
   const importJobId = "0ed8cb57-efb5-419e-b4e5-59b73724f224";
   const objectQueries = [];
   const pool = { async query(sql, params) {
@@ -42,11 +54,13 @@ test("all five Accounting object read paths return the fields they advertise", a
     assert.fail(`Unexpected object query: ${sql}`);
   } };
   const services = {
+    async listCurrenciesPage() { return { currencies: [currency], nextCursor: null }; },
     async listAccountsPage() { return { accounts: [account], nextCursor: null }; },
     async listAccounts() { return [account]; },
     async getAccount() { return account; },
     async listAccountingQuestionsPage() { return { questions: [question], nextCursor: null }; },
     async listBalanceAssertionsPage() { return { assertions: [assertion], nextCursor: null }; },
+    async listLineItemObjectsPage() { return { objects: [lineItem], nextCursor: null }; },
   };
   const server = createAccountingMcpServer({ personId: 7, pool, services });
   const client = new Client({ name: "accounting-object-contract-test", version: "1.0.0" });
@@ -56,8 +70,10 @@ test("all five Accounting object read paths return the fields they advertise", a
   try {
     const discovered = await client.listTools();
     const cases = [
+      ["list_currency_objects", {}, "accounting.currency", "accounting://currencies/2"],
       ["list_account_objects", {}, "accounting.account", "accounting://accounts/10"],
       ["list_transaction_objects", { text: "Coinbase" }, "accounting.transaction", "accounting://transactions/21"],
+      ["list_line_item_objects", { text: "Coin" }, "accounting.line_item", "accounting://line-items/32"],
       ["list_accounting_question_objects", {}, "accounting.question", "accounting://questions/31"],
       ["list_transaction_import_job_objects", { text: "coinbase" }, "accounting.transaction_import_job",
         `accounting://transaction-import-jobs/${importJobId}`],
@@ -135,6 +151,62 @@ test("an unknown exact account object is an empty search result rather than a pr
   }
 });
 
+test("the authoritative account read bootstraps the exact binding required by statement import", async () => {
+  const account = { id: 178, name: "Fifth Third Main x5999", description: null, placeholder: false,
+    suspense: false, parentAccountId: null, type: "asset", currencyId: 1, currencyCode: "USD",
+    scale: 2, balanceUnits: "333182", archivedAt: null };
+  const server = createAccountingMcpServer({
+    personId: 7,
+    pool: {},
+    services: {
+      async getAccount() { return account; },
+      async loadAccountObjectPaths(_pool, _personId, accounts) { return accounts; },
+    },
+  });
+  const client = new Client({ name: "accounting-object-binding-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const discovered = await client.listTools();
+    const definitions = discovered.tools.map((tool) => ({
+      ...tool,
+      name: `remote_accounting_${tool.name}`,
+      source: "mcp:accounting",
+      metadata: tool._meta,
+    }));
+    const accountRead = definitions.find((tool) => tool.name === "remote_accounting_list_account_objects");
+    const statementStart = definitions.find((tool) => tool.name === "remote_accounting_start_single_account_statement_import");
+    assert.equal(objectInputBindingProblem({
+      toolDefinition: accountRead, argumentsObject: { account_id: 178 },
+    }), null, "the owning identifying read accepts an exact unbound ID");
+
+    const result = await client.callTool({ name: "list_account_objects", arguments: { account_id: 178 } });
+    const observed = objectReferenceGroupsFromToolResult({
+      toolDefinition: accountRead,
+      toolDefinitions: definitions,
+      result: result.structuredContent,
+      sourceEventSeq: 1,
+    });
+    assert.deepEqual(observed[0].objects, [{
+      id: 178, ref: "accounting://accounts/178", display: "Fifth Third Main x5999",
+    }]);
+    assert.equal(objectInputBindingProblem({
+      toolDefinition: statementStart,
+      argumentsObject: { account_id: 178 },
+      observedGroups: observed,
+    }), null);
+    assert.match(objectInputBindingProblem({
+      toolDefinition: statementStart,
+      argumentsObject: { account_id: 1 },
+      observedGroups: observed,
+    }), /must use the exact id.*178/);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("import-job object reads are owner-scoped and expose a stable continuation", async () => {
   const jobs = ["a", "b", "c"].map((part) => ({
     import_job_id: `${part.repeat(8)}-${part.repeat(4)}-${part.repeat(4)}-${part.repeat(4)}-${part.repeat(12)}`,
@@ -186,6 +258,30 @@ test("transaction object search pages selected rows and loads postings only for 
   await assert.rejects(listTransactionObjectsPage(pool, 7, { transactionId: 30, cursor: "20" }), {
     code: "INVALID_TRANSACTION_OBJECT_FILTER",
   });
+});
+
+test("line-item object search is owner scoped and returns stable posting identity", async () => {
+  let query;
+  const pool = { async query(sql, params) {
+    query = { sql, params };
+    return [[{
+      line_item_id: 32, transaction_id: 21, account_id: 10, amount_units: "100000",
+      memo: "Coin purchase", reconciliation_state: "cleared", TransactionDate: "2026-09-15",
+      transaction_description: "Buy BTC", AccountName: "Coinbase Bitcoin", parent_account_id: null,
+      CurrencyAbbreviation: "BTC",
+    }]];
+  } };
+  const page = await listLineItemObjectsPage(pool, 7, { lineItemId: 32, limit: 1 });
+  assert.equal(page.nextCursor, null);
+  assert.deepEqual(page.objects[0], {
+    objectType: "accounting.line_item", id: 32, sourceRef: "accounting://line-items/32",
+    displayName: "2026-09-15 · Coinbase Bitcoin · Coin purchase", transactionId: 21,
+    accountId: 10, accountFullName: "Coinbase Bitcoin", transactionDate: "2026-09-15",
+    amountUnits: "100000", currencyCode: "BTC", memo: "Coin purchase", reconciliationState: "cleared",
+  });
+  assert.match(query.sql, /t\.owner_person_id = \?/);
+  assert.match(query.sql, /li\.line_item_id = \?/);
+  assert.deepEqual(query.params, [7, 32, 2]);
 });
 
 test("account object paths read only the page's owner-scoped ancestors", async () => {

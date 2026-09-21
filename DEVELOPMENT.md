@@ -178,17 +178,27 @@ schemas. Keep the routing summary specific to the domain outcome; an exchange
 name in a ledger account does not require an exchange integration to read that
 account through `list_accounts`.
 
-Five owner-scoped read tools publish `_meta["agent-slayer/objects"]` using the
-Remote Object Description version-1 contract: `list_account_objects`,
-`list_transaction_objects`, `list_accounting_question_objects`,
-`list_transaction_import_job_objects`, and `list_balance_assertion_objects`.
+Seven owner-scoped or owner-authorized read tools publish
+`_meta["agent-slayer/objects"]` using the Remote Object Description version-1
+contract: `list_currency_objects`, `list_account_objects`,
+`list_transaction_objects`, `list_line_item_objects`,
+`list_accounting_question_objects`, `list_transaction_import_job_objects`, and
+`list_balance_assertion_objects`.
 Each item has a stable `sourceRef`, compact `displayName`, and selected
-qualifiers. The account, transaction, question, import-job, and balance-assertion
-types are separate user-referable objects; line items, tags, rates, and commit
-plans remain parts or references of those objects. Each described read tool
-enforces owner scope and returns bounded pages or one exact known ID. Object
-metadata describes a type; only an owner-scoped read result proves that a
+qualifiers. Currency, account, transaction, line-item, question, import-job,
+and balance-assertion types are separate user-referable objects; tags, rates,
+and commit plans remain parts or workflow references. Each described read tool
+enforces access scope and returns bounded pages or one exact known ID. Object
+metadata describes a type; only an authorized read result proves that a
 particular record exists.
+
+Every tool input that consumes one of those first-class identities publishes
+`_meta["agent-slayer/object-input-bindings"]`. Agent Slayer therefore accepts
+only IDs preserved in the selected TurnBrief binding or observed from the
+owning object read during the same execution. The exact-ID filter on each
+authoritative object read is explicitly `allowUnbound` so that it can verify a
+user- or application-supplied ID and create the initial binding; downstream
+tools never inherit that exception.
 
 `create_currency` creates private currencies, crypto assets, securities,
 commodities, and custom units. Global catalog rows have no owner; authenticated
