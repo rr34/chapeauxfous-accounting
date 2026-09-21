@@ -468,9 +468,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "get_statement_reconciliation_context").description,
     /separate explicit fees from inferred spread or margin/);
   assert.match(tools.tools.find((tool) => tool.name === "analyze_statement_observations").description,
-    /CSV, PDF, OCR, or a screenshot/);
+    /matching known-balance checkpoint/);
   assert.match(tools.tools.find((tool) => tool.name === "analyze_statement_observations").description,
-    /Same date and amount without stable identity remains a review candidate/);
+    /exact amounts within two days/);
   assert.match(tools.tools.find((tool) => tool.name === "list_reference_rates").description,
     /Never let a price replace an account's actual statement quantity/);
   assert.match(tools.tools.find((tool) => tool.name === "import_account_tree").description, /even when new currency details or scales are unknown/);
@@ -998,7 +998,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(oneSidedPreview.structuredContent.import.questionSummary.openQuestionCount, 1);
   assert.deepEqual(savedStatementBalances, []);
   assert.deepEqual({ ...oneSidedImport, lines: oneSidedImport.lines.map((line) => ({ ...line,
-    externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })) }, {
+    externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })),
+    importReview: { ...oneSidedImport.importReview, decisions: oneSidedImport.importReview.decisions.map((decision) => ({
+      ...decision, externalId: decision.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>"),
+    })) } }, {
     pool: {}, personId: 7, sourceSystem: "single_account_statement", accountId: 10, suspenseAccountId: 11,
     valuationCurrencyCode: "USD", questionAudience: "human",
     lines: [{ externalId: "sha256:<digest>", transactionDate: "2026-01-05", description: "ACME",
@@ -1007,6 +1010,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       { accountId: 10, balanceDate: "2025-12-31", knownBalanceUnits: "10000" },
       { accountId: 10, balanceDate: "2026-01-31", knownBalanceUnits: "8750" },
     ],
+    importReview: { accountId: 10, statementId: "bank-statement-2026-01", decisions: [{
+      externalId: "sha256:<digest>", decision: "include", confidence: "tentative",
+      reason: "No conclusive duplicate evidence was found.", sourceRecordId: "row-1",
+      matchedTransactionIds: [],
+    }] },
   });
 
   const marked = await client.callTool({ name: "reconcile_account_through_date", arguments: {

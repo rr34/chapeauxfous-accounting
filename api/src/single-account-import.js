@@ -140,7 +140,7 @@ export function compileSingleAccountStatementImport({
 
 export async function previewSingleAccountStatementImport({
   pool, personId, accountId, suspenseAccountId = null, sourceSystem, valuationCurrencyCode,
-  lines, questionAudience = "human", reconciliation = null, knownBalanceAssertions = [],
+  lines, questionAudience = "human", reconciliation = null, knownBalanceAssertions = [], importReview = null,
 }) {
   const accounts = await listAccounts(pool, personId);
   const compiled = compileSingleAccountStatementImport({
@@ -149,6 +149,7 @@ export async function previewSingleAccountStatementImport({
   return previewTransactionImport({
     pool, personId, sourceSystem, transactions: compiled.transactions,
     knownBalanceAssertions,
+    importReview,
     reconciliation: reconciliation == null ? null : {
       accountIds: [compiled.statementAccount.id],
       openingBalanceDate: reconciliation.openingBalanceDate,

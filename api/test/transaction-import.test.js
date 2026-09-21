@@ -9,8 +9,10 @@ process.env.MYSQL_DATABASE = "accounting_test";
 const {
   commitTransactionImportPlan,
   getTransactionImportPlan,
+  listAccountTransactionImportReviews,
   normalizeTransactionImport,
   previewTransactionImport,
+  updateTransactionImportReviewDecision,
 } = await import("../src/transaction-import.js");
 const {
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
@@ -143,6 +145,11 @@ function memoryPool() {
               committed_at: null, result_json: null, is_expired: 0 });
             return [{ insertId: 0 }];
           }
+          if (sql.includes("FROM accounting_import_plans") && sql.includes("plan_status = 'ready'")) {
+            const [ownerPersonId] = params;
+            return [[...state.plans.values()].filter((plan) => Number(plan.owner_person_id) === Number(ownerPersonId)
+              && plan.plan_status === "ready")];
+          }
           if (sql.includes("FROM accounting_import_plans")) {
             const [planId, ownerPersonId] = params;
             const plan = state.plans.get(planId);
@@ -240,6 +247,15 @@ function memoryPool() {
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("UPDATE accounting_import_plans")) {
+            if (sql.includes("SET payload_json = ?")) {
+              const [payloadJson, payloadSha256, previewSha256, summaryJson, planId, ownerPersonId] = params;
+              const plan = state.plans.get(planId);
+              if (plan && Number(plan.owner_person_id) === Number(ownerPersonId)) {
+                Object.assign(plan, { payload_json: payloadJson, payload_sha256: payloadSha256,
+                  preview_sha256: previewSha256, summary_json: summaryJson });
+              }
+              return [{ affectedRows: plan ? 1 : 0 }];
+            }
             const committing = sql.includes("plan_status = 'committed'");
             const [resultJson, planId, ownerPersonId] = committing ? params : [null, ...params];
             const plan = state.plans.get(planId);
@@ -405,6 +421,61 @@ test("transaction preview plans complete nested transactions and commit is repea
   });
   assert.equal(retryPreview.wouldCreateTransactionCount, 0);
   assert.equal(retryPreview.wouldReuseTransactionCount, 2);
+});
+
+test("reviewed imports keep excluded rows in the plan but only commit included rows", async () => {
+  const pool = memoryPool();
+  const transactions = importedTransactions();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_statement", transactions,
+    importReview: {
+      accountId: 11,
+      statementId: "statement-august",
+      decisions: [
+        { externalId: "source-tx-1", decision: "exclude", confidence: "probable",
+          reason: "Matches a nearby ledger entry.", sourceRecordId: "row-1", matchedTransactionIds: [44] },
+        { externalId: "source-tx-2", decision: "include", confidence: "tentative",
+          reason: "No duplicate found.", sourceRecordId: "row-2" },
+      ],
+    },
+  });
+  assert.equal(preview.wouldCreateTransactionCount, 1);
+  assert.equal(preview.excludedTransactionCount, 1);
+  assert.deepEqual(preview.transactionSummary.byStatus,
+    { planned: 1, existing: 0, excluded: 1, created: 0, rejected: 0 });
+  assert.equal(preview.transactions[0].importDecision.decision, "exclude");
+
+  const committed = await commitTransactionImportPlan({
+    pool, personId: 7, importPlanId: preview.importPlanId,
+  });
+  assert.equal(committed.createdTransactionCount, 1);
+  assert.equal(pool.state.transactions.length, 1);
+  assert.equal(pool.state.transactions[0].source_id, "source-tx-2");
+});
+
+test("account review lists plan rows and a user toggle changes the atomic commit", async () => {
+  const pool = memoryPool();
+  const transactions = importedTransactions();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_statement", transactions,
+    importReview: { accountId: 11, statementId: "statement-toggle", decisions: transactions.map((transaction) => ({
+      externalId: transaction.externalId, decision: "include", sourceRecordId: transaction.externalId,
+    })) },
+  });
+  const listed = await listAccountTransactionImportReviews({ pool, personId: 7, accountId: 11 });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].includedCount, 2);
+
+  const changed = await updateTransactionImportReviewDecision({
+    pool, personId: 7, accountId: 11, importPlanId: preview.importPlanId,
+    externalId: "source-tx-1", decision: "exclude",
+  });
+  assert.equal(changed.includedCount, 1);
+  assert.equal(changed.excludedCount, 1);
+  assert.notEqual(changed.previewDigest, preview.previewDigest);
+
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.deepEqual(pool.state.transactions.map((transaction) => transaction.source_id), ["source-tx-2"]);
 });
 
 test("transaction import preserves distinct per-line exchange rates", async () => {

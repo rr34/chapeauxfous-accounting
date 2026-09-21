@@ -73,6 +73,27 @@ export async function listBalanceAssertions(pool, personId) {
   return rows.map(mapAssertion);
 }
 
+export async function listMatchingBalanceCheckpoints(pool, personId, accountIds, throughDate) {
+  const ids = [...new Set(accountIds.map(Number))];
+  if (!ids.length || ids.some((id) => !Number.isInteger(id) || id <= 0)) return [];
+  const closingDate = endOfDayDate(throughDate);
+  const placeholders = ids.map(() => "?").join(", ");
+  const [rows] = await pool.query(
+    `${assertionSelect}
+      WHERE aba.owner_person_id = ? AND aba.account_id IN (${placeholders})
+        AND aba.balance_date <= ?
+      ORDER BY aba.account_id, aba.balance_date DESC, aba.account_balance_assertion_id DESC`,
+    [personId, ...ids, closingDate],
+  );
+  const latestByAccount = new Map();
+  for (const assertion of rows.map(mapAssertion)) {
+    if (assertion.matches && !latestByAccount.has(assertion.accountId)) {
+      latestByAccount.set(assertion.accountId, assertion);
+    }
+  }
+  return [...latestByAccount.values()];
+}
+
 export async function listBalanceAssertionsPage(pool, personId, { limit = 100, beforeAssertionId = null } = {}) {
   const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const cursor = beforeAssertionId == null ? null : Number(beforeAssertionId);

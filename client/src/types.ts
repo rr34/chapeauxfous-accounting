@@ -68,6 +68,31 @@ export type AccountLedgerEntry = {
   runningBalanceUnits: string;
 };
 
+export type TransactionImportReview = {
+  importPlanId: string;
+  previewDigest: string;
+  expiresAt: string;
+  accountId: number;
+  statementId: string;
+  sourceSystem: string;
+  includedCount: number;
+  excludedCount: number;
+  rows: Array<{
+    externalId: string;
+    sourceRecordId: string | null;
+    transactionDate: string;
+    transactionAt: string | null;
+    description: string | null;
+    amountDecimal: string;
+    memo: string | null;
+    decision: "include" | "exclude";
+    confidence: string | null;
+    reason: string | null;
+    matchedTransactionIds: number[];
+    otherLines: Array<{ accountFullName: string; amountDecimal: string; memo: string | null }>;
+  }>;
+};
+
 export type BalanceAssertion = {
   id: number;
   accountId: number;

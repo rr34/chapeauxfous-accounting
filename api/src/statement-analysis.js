@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { decimalToUnits } from "./money.js";
+import { normalBalanceSign } from "./account-balances.js";
+import { listMatchingBalanceCheckpoints } from "./balance-assertions.js";
 import { getStatementReconciliationContext } from "./statement-reconciliation.js";
 
 const maximumObservations = 500;
@@ -99,6 +101,10 @@ function candidateFor(observation, row) {
   } else if (amountMatches && dateDistanceDays === 0 && descriptionSimilarity >= 0.35) {
     classification = "strong_duplicate_candidate";
     recommendation = "review_candidate";
+  } else if (amountMatches && dateDistanceDays <= 2) {
+    classification = "probable_duplicate";
+    recommendation = "exclude_when_balance_or_text_corroborates";
+    reasons.push("exact_amount_within_two_days");
   }
   return {
     transactionId: Number(row.transaction_id),
@@ -118,6 +124,113 @@ function candidateFor(observation, row) {
       lineSourceId: row.line_source_id ?? null,
     },
   };
+}
+
+function combinationsThatSum(items, target, maximumSize = 3, maximumResults = 200) {
+  const amounts = items.map((item) => BigInt(item.amountUnits));
+  const singles = items.flatMap((item, index) => amounts[index] === target ? [[item]] : []);
+  if (singles.length || maximumSize === 1) return singles.slice(0, maximumResults);
+
+  const pairs = [];
+  for (let left = 0; left < items.length - 1 && pairs.length < maximumResults; left += 1) {
+    for (let right = left + 1; right < items.length && pairs.length < maximumResults; right += 1) {
+      if (amounts[left] + amounts[right] === target) pairs.push([items[left], items[right]]);
+    }
+  }
+  if (pairs.length || maximumSize === 2) return pairs;
+
+  const indicesByAmount = new Map();
+  for (let index = 0; index < amounts.length; index += 1) {
+    const key = amounts[index].toString();
+    if (!indicesByAmount.has(key)) indicesByAmount.set(key, []);
+    indicesByAmount.get(key).push(index);
+  }
+  const triples = [];
+  const firstIndexAfter = (indices, minimum) => {
+    let low = 0;
+    let high = indices.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (indices[middle] <= minimum) low = middle + 1;
+      else high = middle;
+    }
+    return indices[low];
+  };
+  for (let first = 0; first < items.length - 2 && triples.length < maximumResults; first += 1) {
+    for (let second = first + 1; second < items.length - 1 && triples.length < maximumResults; second += 1) {
+      const candidates = indicesByAmount.get((target - amounts[first] - amounts[second]).toString()) ?? [];
+      const third = firstIndexAfter(candidates, second);
+      if (third != null) triples.push([items[first], items[second], items[third]]);
+    }
+  }
+  return triples;
+}
+
+function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, reconciliation, balanceCheckpoints) {
+  const candidatesByObservation = new Map(ledgerCandidates.map((item) => [item.observationId, item.candidates]));
+  const checkpointByAccount = new Map(balanceCheckpoints.map((checkpoint) => [checkpoint.accountId, checkpoint]));
+  const decisions = new Map(observations.map((observation) => {
+    const checkpoint = checkpointByAccount.get(observation.accountId);
+    const coveredByCheckpoint = checkpoint != null && observation.transactionDate <= checkpoint.date;
+    const exactDuplicate = exactExcludedIds.has(observation.id);
+    return [observation.id, {
+      observationId: observation.id,
+      decision: coveredByCheckpoint || exactDuplicate ? "exclude" : "include",
+      confidence: coveredByCheckpoint ? "verified_checkpoint" : exactDuplicate ? "certain" : "tentative",
+      reason: coveredByCheckpoint
+        ? `The recorded balance already matches the known balance through ${checkpoint.date}; rows on or before that date are presumed already recorded.`
+        : exactDuplicate
+          ? "A stable source identity already exists in the ledger or elsewhere in this statement batch."
+          : "No conclusive duplicate evidence was found.",
+      matchedTransactionIds: [...new Set((candidatesByObservation.get(observation.id) ?? [])
+        .map((candidate) => candidate.transactionId))],
+      balanceCheckpointDate: coveredByCheckpoint ? checkpoint.date : null,
+    }];
+  }));
+
+  for (const account of reconciliation.accounts) {
+    if (account.remainingLineItemMovementUnits == null) continue;
+    const included = observations.filter((item) => item.accountId === account.accountId
+      && decisions.get(item.id).decision === "include");
+    const proposed = included.reduce((sum, item) => sum + BigInt(item.amountUnits), 0n);
+    const targetExclusion = proposed - BigInt(account.remainingLineItemMovementUnits);
+    if (targetExclusion === 0n) continue;
+    const solutions = combinationsThatSum(included, targetExclusion).map((rows) => {
+      const evidenceScore = rows.reduce((sum, row) => {
+        const best = (candidatesByObservation.get(row.id) ?? [])[0];
+        return sum + (best?.score ?? 0);
+      }, 0);
+      const matchedCount = rows.filter((row) => (candidatesByObservation.get(row.id) ?? []).length > 0).length;
+      return { rows, evidenceScore, matchedCount };
+    }).sort((left, right) => left.rows.length - right.rows.length
+      || right.matchedCount - left.matchedCount || right.evidenceScore - left.evidenceScore
+      || left.rows.map((row) => row.id).join("\u0000").localeCompare(right.rows.map((row) => row.id).join("\u0000")));
+    if (!solutions.length) continue;
+    const best = solutions[0];
+    const next = solutions[1];
+    const uniquelySupported = next == null || best.rows.length < next.rows.length
+      || best.matchedCount > next.matchedCount || best.evidenceScore > next.evidenceScore;
+    if (!uniquelySupported) {
+      const implicated = new Set(solutions.filter((solution) => solution.rows.length === best.rows.length
+        && solution.matchedCount === best.matchedCount && solution.evidenceScore === best.evidenceScore)
+        .flatMap((solution) => solution.rows.map((row) => row.id)));
+      for (const id of implicated) {
+        const decision = decisions.get(id);
+        decision.reason = "This row is one of several equally plausible exclusions that would reach the known balance.";
+        decision.confidence = "ambiguous";
+      }
+      continue;
+    }
+    for (const row of best.rows) {
+      const decision = decisions.get(row.id);
+      decision.decision = "exclude";
+      decision.confidence = best.matchedCount > 0 ? "probable" : "balance_supported";
+      decision.reason = best.matchedCount > 0
+        ? "An existing same-account amount near this date and the known balance both support treating this row as already recorded."
+        : "Excluding this row is the unique smallest combination that reaches the known balance.";
+    }
+  }
+  return [...decisions.values()];
 }
 
 function inputDuplicateCandidates(observations) {
@@ -199,15 +312,41 @@ function transferCandidates(observations) {
 }
 
 export async function analyzeStatementObservations({ pool, personId, observations: inputObservations,
-  openingBalanceDate, closingBalanceDate }) {
+  openingBalanceDate, closingBalanceDate, knownBalanceAssertions = [] }) {
   if (!Array.isArray(inputObservations) || inputObservations.length === 0
       || inputObservations.length > maximumObservations) {
     throw applicationError(`Supply between 1 and ${maximumObservations} extracted statement observations.`);
   }
   const accountIds = [...new Set(inputObservations.map((item) => Number(item?.accountId)))];
-  const reconciliation = await getStatementReconciliationContext({
+  const storedReconciliation = await getStatementReconciliationContext({
     pool, personId, accountIds, openingBalanceDate, closingBalanceDate,
   });
+  const prospectiveBalances = new Map(knownBalanceAssertions.map((assertion) => [
+    `${Number(assertion.accountId)}:${String(assertion.balanceDate)}`, String(assertion.knownBalanceUnits),
+  ]));
+  const reconciliationAccounts = storedReconciliation.accounts.map((account) => {
+    const openingKnown = account.opening.knownBalanceUnits
+      ?? prospectiveBalances.get(`${account.accountId}:${storedReconciliation.interval.openingBalanceDate}`) ?? null;
+    const closingKnown = account.closing.knownBalanceUnits
+      ?? prospectiveBalances.get(`${account.accountId}:${storedReconciliation.interval.closingBalanceDate}`) ?? null;
+    if (openingKnown == null || closingKnown == null) return account;
+    const targetLineItemMovement = (BigInt(closingKnown) - BigInt(openingKnown))
+      * normalBalanceSign(account.accountType);
+    return {
+      ...account,
+      opening: { ...account.opening, knownBalanceUnits: openingKnown },
+      closing: { ...account.closing, knownBalanceUnits: closingKnown },
+      requiredNormalMovementUnits: (BigInt(closingKnown) - BigInt(openingKnown)).toString(),
+      remainingLineItemMovementUnits:
+        (targetLineItemMovement - BigInt(account.postedLineItemMovementUnits)).toString(),
+      grounded: true,
+    };
+  });
+  const missingAssertions = reconciliationAccounts.flatMap((account) => [account.opening, account.closing]
+    .filter((anchor) => anchor.knownBalanceUnits == null)
+    .map((anchor) => ({ accountId: account.accountId, balanceDate: anchor.date })));
+  const reconciliation = { ...storedReconciliation, accounts: reconciliationAccounts,
+    grounded: missingAssertions.length === 0, missingAssertions };
   const accountById = new Map(reconciliation.accounts.map((account) => [account.accountId, account]));
   const seenKeys = new Set();
   const observations = inputObservations.map((item, index) => {
@@ -255,6 +394,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
   });
   const minimumDate = observations.map((item) => item.transactionDate).sort()[0];
   const maximumDate = observations.map((item) => item.transactionDate).sort().at(-1);
+  const balanceCheckpoints = await listMatchingBalanceCheckpoints(pool, personId, accountIds, maximumDate);
   const placeholders = accountIds.map(() => "?").join(", ");
   const [existingRows] = await pool.query(
     `SELECT t.transaction_id, t.TransactionDate, t.TransactionState,
@@ -289,8 +429,10 @@ export async function analyzeStatementObservations({ pool, personId, observation
     const sorted = [...candidate.observationIds].sort();
     exactInputDuplicateIds.add(sorted[1]);
   }
-  const proposedIds = observations.filter((item) => !exactLedgerDuplicateIds.has(item.id)
-    && !exactInputDuplicateIds.has(item.id)).map((item) => item.id);
+  const exactExcludedIds = new Set([...exactLedgerDuplicateIds, ...exactInputDuplicateIds]);
+  const importDecisions = decideStatementRows(observations, ledgerCandidates, exactExcludedIds,
+    reconciliation, balanceCheckpoints);
+  const proposedIds = importDecisions.filter((item) => item.decision === "include").map((item) => item.observationId);
   const proposedIdSet = new Set(proposedIds);
   const coverage = reconciliation.accounts.map((account) => {
     const accountObservations = observations.filter((item) => item.accountId === account.accountId);
@@ -337,11 +479,16 @@ export async function analyzeStatementObservations({ pool, personId, observation
     },
     transferCandidates: compiledTransferCandidates,
     ambiguousTransferObservationIds,
+    balanceCheckpoints,
+    importDecisions,
     proposedNewObservationIds: proposedIds,
     coverage,
-    readyForTransactionAssembly: proposedIds.length > 0,
+    readyForTransactionAssembly: observations.length > 0,
     rules: [
-      "Only exact stable source-reference matches are automatically excluded as ledger duplicates.",
+      "Stable source-reference matches are excluded as ledger duplicates.",
+      "A matching recorded and known balance is a verified checkpoint; statement rows on or before its date default to excluded before duplicate matching and balance solving.",
+      "An exact same-account amount within two days is ranked as a probable duplicate; known-balance subset solving can select the uniquely supported exclusion.",
+      "Known-balance solving tests the smallest combinations of up to three rows and leaves equally supported solutions for user review.",
       "Multiple existing exact-source matches are a ledger ambiguity and are never automatically excluded.",
       "Same date and amount without stable source identity is a candidate for review, not proof of duplication.",
       "When importing one-sided rows, retain non-exact same-account ledger candidates as review questions on suspense lines.",

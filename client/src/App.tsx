@@ -5,7 +5,7 @@ import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CanonicalImportRecord, CurrencyType, TransactionDetail, TransactionImportException,
-  TransactionImportJob, TransactionSummary, User,
+  TransactionImportJob, TransactionImportReview, TransactionSummary, User,
 } from "./types";
 
 const tokenKey = "cf-accounting-token";
@@ -1942,7 +1942,9 @@ function Ledger({ transactions, selected, onSelect, onOpenInRegister, onVerify, 
 
 type AccountRegisterRow =
   | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry;
-      totalAmountUnits: string; currentAccountLineCount: number }
+      totalAmountUnits: string; currentAccountLineCount: number; projectedBalanceUnits: string }
+  | { kind: "import"; date: string; order: number; importPlanId: string;
+      row: TransactionImportReview["rows"][number]; amountUnits: string; projectedBalanceUnits: string }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
 
 function formatRegisterDate(value: string) {
@@ -1980,8 +1982,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [reconciliationMessage, setReconciliationMessage] = useState("");
   const [reconciliationError, setReconciliationError] = useState("");
   const [showAccountEditor, setShowAccountEditor] = useState(false);
+  const [importReviews, setImportReviews] = useState<TransactionImportReview[]>([]);
+  const [importReviewError, setImportReviewError] = useState("");
+  const [importReviewBusy, setImportReviewBusy] = useState("");
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
+  const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const accountByFullName = useMemo(() => new Map(accounts.map((candidate) =>
+    [fullAccountNames.get(candidate.id) ?? candidate.name, candidate])), [accounts, fullAccountNames]);
   const accountAssertions = useMemo(() => assertions.filter((assertion) => assertion.accountId === account.id), [account.id, assertions]);
+  const projectedImportBalanceUnits = useMemo(() => (BigInt(account.balanceUnits)
+    + importReviews.flatMap((review) => review.rows).filter((row) => row.decision === "include")
+      .reduce((sum, row) => sum + BigInt(decimalToUnits(row.amountDecimal, account.scale))
+        * (debitIncreasesAccount(account.type) ? 1n : -1n), 0n)).toString(),
+  [account.balanceUnits, account.scale, account.type, importReviews]);
   const assertionDates = useMemo(() => new Set(accountAssertions.map((assertion) => assertion.date)), [accountAssertions]);
   const lastEntryByDate = useMemo(() => {
     const lastEntries = new Map<string, number>();
@@ -1989,7 +2002,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     return lastEntries;
   }, [entries]);
   const registerRows = useMemo<AccountRegisterRow[]>(() => {
-    const groupedEntries = new Map<number, Extract<AccountRegisterRow, { kind: "entry" }>>();
+    const groupedEntries = new Map<number, Omit<Extract<AccountRegisterRow, { kind: "entry" }>, "projectedBalanceUnits">>();
     entries.forEach((entry, order) => {
       const previous = groupedEntries.get(entry.transactionId);
       const amountUnits = BigInt(entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`));
@@ -1997,16 +2010,26 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         totalAmountUnits: (BigInt(previous?.totalAmountUnits ?? "0") + amountUnits).toString(),
         currentAccountLineCount: (previous?.currentAccountLineCount ?? 0) + 1 });
     });
-    return [
+    const imported = importReviews.flatMap((review) => review.rows.map((row, index) => ({
+      kind: "import" as const, date: row.transactionDate, order: entries.length + index,
+      importPlanId: review.importPlanId, row, amountUnits: decimalToUnits(row.amountDecimal, account.scale),
+    })));
+    const chronological = [
       ...groupedEntries.values(),
+      ...imported,
       ...accountAssertions.map((assertion) => ({ kind: "assertion" as const,
         date: assertion.date, order: assertion.id, assertion })),
-    ].sort((left, right) => {
-      const chronologicalOrder = left.date.localeCompare(right.date)
-        || (left.kind === right.kind ? left.order - right.order : left.kind === "entry" ? -1 : 1);
-      return sortOrder === "recent" ? -chronologicalOrder : chronologicalOrder;
-    });
-  }, [accountAssertions, entries, sortOrder]);
+    ].sort((left, right) => left.date.localeCompare(right.date) || left.order - right.order);
+    let projectedBalance = 0n;
+    const withBalances = chronological.map((row) => {
+      if (row.kind === "assertion") return row;
+      const amount = row.kind === "entry" ? BigInt(row.totalAmountUnits)
+        : row.row.decision === "include" ? BigInt(row.amountUnits) : 0n;
+      projectedBalance += amount * (debitIncreasesAccount(account.type) ? 1n : -1n);
+      return { ...row, projectedBalanceUnits: projectedBalance.toString() };
+    }) as AccountRegisterRow[];
+    return sortOrder === "recent" ? withBalances.reverse() : withBalances;
+  }, [account.type, account.scale, accountAssertions, entries, importReviews, sortOrder]);
 
   useEffect(() => {
     selectionRequest.current += 1;
@@ -2015,7 +2038,52 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     setKnownBalance(""); setKnownBalanceError(""); setShowNewTransaction(false);
     setReconcilingAssertionId(null); setReconciliationMessage(""); setReconciliationError("");
     setShowAccountEditor(false);
+    setImportReviews([]); setImportReviewError(""); setImportReviewBusy("");
   }, [account.id]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadImportReviews() {
+      try {
+        const result = await api<{ reviews: TransactionImportReview[] }>(
+          `/accounts/${account.id}/import-reviews`, {}, token);
+        if (active) { setImportReviews(result.reviews); setImportReviewError(""); }
+      } catch (nextError) {
+        if (active) setImportReviewError(errorMessage(nextError));
+      }
+    }
+    void loadImportReviews();
+    const interval = window.setInterval(() => { if (!document.hidden) void loadImportReviews(); }, 5000);
+    const onFocus = () => void loadImportReviews();
+    window.addEventListener("focus", onFocus);
+    return () => { active = false; window.clearInterval(interval); window.removeEventListener("focus", onFocus); };
+  }, [account.id, token]);
+
+  async function setImportDecision(review: TransactionImportReview, row: TransactionImportReview["rows"][number],
+    decision: "include" | "exclude") {
+    const busyKey = `${review.importPlanId}:${row.externalId}`;
+    setImportReviewBusy(busyKey); setImportReviewError("");
+    try {
+      const result = await api<{ review: TransactionImportReview }>(
+        `/accounts/${account.id}/import-reviews/${review.importPlanId}/rows/${encodeURIComponent(row.externalId)}`,
+        { method: "PATCH", body: JSON.stringify({ decision }) }, token);
+      setImportReviews((current) => current.map((item) =>
+        item.importPlanId === review.importPlanId ? result.review : item));
+    } catch (nextError) { setImportReviewError(errorMessage(nextError)); }
+    finally { setImportReviewBusy(""); }
+  }
+
+  async function acceptImportReview(review: TransactionImportReview) {
+    if (!window.confirm(`Accept these import settings? ${review.includedCount} transaction${review.includedCount === 1 ? "" : "s"} will be added and ${review.excludedCount} will remain excluded.`)) return;
+    setImportReviewBusy(review.importPlanId); setImportReviewError("");
+    try {
+      await api(`/accounts/${account.id}/import-reviews/${review.importPlanId}/accept`,
+        { method: "POST", body: "{}" }, token);
+      setImportReviews((current) => current.filter((item) => item.importPlanId !== review.importPlanId));
+      await onTransactionCreated();
+    } catch (nextError) { setImportReviewError(errorMessage(nextError)); }
+    finally { setImportReviewBusy(""); }
+  }
 
   useEffect(() => {
     if (!openTransaction || loading) return;
@@ -2156,10 +2224,18 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         <div className="register-current-balance">
           <span>Current balance</span>
           <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong>
+          {importReviews.length > 0 && <small>Projected {unitsToDecimal(projectedImportBalanceUnits, account.scale)} {account.currencyCode}</small>}
         </div>
         <button className="secondary" onClick={onImportStatement}>Import statement</button>
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
+    {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
+      <div><strong>Statement import ready for review</strong>
+        <small>{review.includedCount} included · {review.excludedCount} excluded. Toggle rows below, then accept.</small></div>
+      <button type="button" className="primary" disabled={importReviewBusy !== ""}
+        onClick={() => void acceptImportReview(review)}>
+        {importReviewBusy === review.importPlanId ? "Accepting…" : "Accept import settings"}</button>
+    </div>)}
     {!account.placeholder && !account.archivedAt && <div className="register-known-balance-actions">
       <button type="button" className="link-button" onClick={addKnownBalanceForAnotherDate}>
         Add known balance for another date</button>
@@ -2178,6 +2254,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         {sortOrder === "recent" ? "Recent first ↓" : "Oldest first ↑"}</button>
     </div>
     {error && <p className="error">{error}</p>}
+    {importReviewError && <p className="error" aria-live="assertive">{importReviewError}</p>}
     {selectionError && <p className="error">{selectionError}</p>}
     {reconciliationMessage && <p className="register-reconciliation-message" aria-live="polite">{reconciliationMessage}</p>}
     {reconciliationError && <p className="error" aria-live="assertive">{reconciliationError}</p>}
@@ -2216,6 +2293,61 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>}
             </Fragment>;
           }
+          if (row.kind === "import") {
+            const review = importReviews.find((item) => item.importPlanId === row.importPlanId);
+            if (!review) return null;
+            const busyKey = `${review.importPlanId}:${row.row.externalId}`;
+            const otherAccounts = row.row.otherLines.map((line) => line.accountFullName);
+            return <Fragment key={`import-${row.importPlanId}-${row.row.externalId}`}>
+              <tr className={`register-import-row ${row.row.decision === "exclude" ? "excluded" : "included"} ${view === "journal" ? "register-journal-header" : ""}`}>
+                <td>{formatRegisterDate(row.date)}</td>
+                <td className="register-description"><strong title={row.row.description ?? "Imported transaction"}>
+                  {row.row.description || "Imported transaction"}</strong>
+                  <small>{row.row.reason}</small>
+                  {row.row.matchedTransactionIds.length > 0 && <small>
+                    Possible duplicate of transaction {row.row.matchedTransactionIds.join(", ")}</small>}
+                  <button type="button" className={`import-decision ${row.row.decision}`}
+                    disabled={importReviewBusy !== ""}
+                    aria-label={`${row.row.decision === "include" ? "Exclude" : "Include"} imported transaction ${row.row.sourceRecordId ?? row.row.externalId}`}
+                    onClick={() => void setImportDecision(review, row.row,
+                      row.row.decision === "include" ? "exclude" : "include")}>
+                    {importReviewBusy === busyKey ? "Updating…"
+                      : `Imported · ${row.row.decision}`}</button></td>
+                <td className={`amount ${movementEffectClass(row.amountUnits, account.type)}`}>
+                  {signedAccountMovement(row.amountUnits, account)}</td>
+                <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
+                <td></td>
+                <td>{otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
+                <td className="amount">{row.row.otherLines.map((line, index) => {
+                  const splitAccount = accountByFullName.get(line.accountFullName);
+                  return <span className="import-other-amount" key={`${line.accountFullName}-${index}`}>
+                    <small>{otherAccounts.length > 1 ? line.accountFullName : ""}</small>
+                    {splitAccount ? signedAccountMovement(decimalToUnits(line.amountDecimal, splitAccount.scale), splitAccount)
+                      : `${line.amountDecimal} ${account.currencyCode}`}</span>;
+                })}</td>
+              </tr>
+              {view !== "basic" && [
+                ...(view === "journal" ? [{ accountFullName: fullAccountNames.get(account.id) ?? account.name,
+                  amountDecimal: row.row.amountDecimal, memo: row.row.memo, thisAccount: true }] : []),
+                ...row.row.otherLines.map((line) => ({ ...line, thisAccount: false })),
+              ].map((line, index) => {
+                const splitAccount = line.thisAccount ? account : accountByFullName.get(line.accountFullName);
+                const amountUnits = splitAccount ? decimalToUnits(line.amountDecimal, splitAccount.scale) : null;
+                return <tr className={`register-line-item-row register-import-line ${row.row.decision === "exclude" ? "excluded" : ""}`}
+                  key={`import-line-${row.importPlanId}-${row.row.externalId}-${index}`}>
+                  <td></td><td>{line.memo && <small>{line.memo}</small>}</td>
+                  <td className={`amount ${line.thisAccount && amountUnits
+                    ? movementEffectClass(amountUnits, account.type) : ""}`}>
+                    {line.thisAccount && amountUnits ? signedAccountMovement(amountUnits, account) : ""}</td>
+                  <td></td><td></td><td><strong>{line.accountFullName}</strong></td>
+                  <td className={`amount ${!line.thisAccount && splitAccount && amountUnits
+                    ? movementEffectClass(amountUnits, splitAccount.type) : ""}`}>
+                    {!line.thisAccount && splitAccount && amountUnits
+                      ? signedAccountMovement(amountUnits, splitAccount) : !line.thisAccount ? line.amountDecimal : ""}</td>
+                </tr>;
+              })}
+            </Fragment>;
+          }
           const { entry } = row;
           const counterpartNames = [...new Map(entry.splits
             .filter((split) => split.accountId !== account.id)
@@ -2242,7 +2374,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
                 initialTransaction={selectedTransaction}
                 journalHeader={view === "journal" || row.currentAccountLineCount > 1}
-                initialDateEditorOpen={dateEditorOpen} runningBalanceUnits={entry.runningBalanceUnits}
+                initialDateEditorOpen={dateEditorOpen} runningBalanceUnits={row.projectedBalanceUnits}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
                 onCancel={closeSelectedTransaction} onSaved={async () => {
                   await onTransactionCreated(); closeSelectedTransaction();
@@ -2269,7 +2401,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
                 {signedAccountMovement(row.totalAmountUnits, account)}</td>
-              <td className="amount balance">{unitsToDecimal(entry.runningBalanceUnits, account.scale)}</td>
+              <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
               <td className="amount known-balance">{knownBalanceAction}</td>
               <td className={view === "journal" ? undefined : "register-other-account-summary"}>
                 {view === "journal" ? <span className="register-transaction-label">Transaction</span>

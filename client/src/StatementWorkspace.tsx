@@ -121,7 +121,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
       "3. What are every line item's date and signed change to the displayed statement balance (positive increases it; negative decreases it)?",
       "4. What payee, description, memo, reference, or other text is available for each line?",
       "Missing opening or closing balances are fine; report them as absent and continue with the transactions. Do not guess any counteraccount, category, transfer, fee, or price.",
-      "Submit the answers to import_single_account_statement. Accounting will use the designated suspense account and leave one open question for each unresolved counterline. Show me its preview and ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
+      "Submit the answers once to import_single_account_statement. Accounting will first exclude rows on or before an existing matching known-balance checkpoint, then perform duplicate and remaining-balance analysis, use the designated suspense account, and show every proposed row in the account register as Imported include or Imported exclude. Do not run another LLM deduplication pass. Ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
     ].join("\n");
     try {
       await navigator.clipboard.writeText(instructions);

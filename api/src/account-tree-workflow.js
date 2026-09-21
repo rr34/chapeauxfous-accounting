@@ -91,7 +91,7 @@ export function transactionPreviewWorkflow(result) {
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Commit this transaction import now? It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
+        instruction: `Commit these import settings now? Review the proposed rows shown in the account register, including ${result.excludedTransactionCount ?? 0} temporarily excluded transaction${(result.excludedTransactionCount ?? 0) === 1 ? "" : "s"}. It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
           ? `; ${result.balanceAssertions.filter((item) => item.status === "planned").length} known balances will be saved`
           : ""}${result.balanceAssertions?.some((item) => item.status === "preserved"
             && item.storedKnownBalanceUnits !== item.sourceKnownBalanceUnits)

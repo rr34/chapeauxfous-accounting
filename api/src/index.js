@@ -29,6 +29,11 @@ import {
   previewTransactionImportJob,
   retryTransactionImportException,
 } from "./transaction-import-job.js";
+import {
+  commitTransactionImportPlan,
+  listAccountTransactionImportReviews,
+  updateTransactionImportReviewDecision,
+} from "./transaction-import.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 5004);
@@ -111,6 +116,32 @@ app.get("/api/accounts", requireAuth, async (req, res, next) => {
 
 app.get("/api/accounts/:accountId/ledger", requireAuth, async (req, res, next) => {
   try { res.json(await listAccountLedger(pool, req.auth.personId, req.params.accountId)); } catch (error) { next(error); }
+});
+
+app.get("/api/accounts/:accountId/import-reviews", requireAuth, async (req, res, next) => {
+  try { res.json({ reviews: await listAccountTransactionImportReviews({ pool, personId: req.auth.personId,
+    accountId: req.params.accountId }) }); } catch (error) { next(error); }
+});
+
+app.patch("/api/accounts/:accountId/import-reviews/:importPlanId/rows/:externalId", requireAuth,
+  async (req, res, next) => {
+    try {
+      res.json({ review: await updateTransactionImportReviewDecision({ pool, personId: req.auth.personId,
+        accountId: req.params.accountId, importPlanId: req.params.importPlanId,
+        externalId: req.params.externalId, decision: req.body?.decision }) });
+    } catch (error) { next(error); }
+  });
+
+app.post("/api/accounts/:accountId/import-reviews/:importPlanId/accept", requireAuth, async (req, res, next) => {
+  try {
+    const visible = await listAccountTransactionImportReviews({ pool, personId: req.auth.personId,
+      accountId: req.params.accountId });
+    if (!visible.some((review) => review.importPlanId === req.params.importPlanId)) {
+      return res.status(404).json({ error: "IMPORT_REVIEW_NOT_FOUND", message: "Import review not found for this account." });
+    }
+    return res.json({ result: await commitTransactionImportPlan({ pool, personId: req.auth.personId,
+      importPlanId: req.params.importPlanId }) });
+  } catch (error) { return next(error); }
 });
 
 app.post("/api/accounts", requireAuth, async (req, res, next) => {

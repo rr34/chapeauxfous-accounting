@@ -874,6 +874,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   const importIssueSchema = z.object({ code: z.string().min(1), message: z.string().min(1), details: z.json().optional() });
   const transactionImportSummarySchema = z.object({
     transactionsCreated: z.number().int().nonnegative(), transactionsReused: z.number().int().nonnegative(),
+    transactionsExcluded: z.number().int().nonnegative().optional(),
     lineItemsCreated: z.number().int().nonnegative(), lineItemsReused: z.number().int().nonnegative(),
     rejectedTransactions: z.number().int().nonnegative(),
   });
@@ -901,11 +902,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     wouldReuseLineItemCount: z.number().int().nonnegative(), createdTransactionCount: z.number().int().nonnegative(),
     reusedTransactionCount: z.number().int().nonnegative(), createdLineItemCount: z.number().int().nonnegative(),
     reusedLineItemCount: z.number().int().nonnegative(), rejectedTransactionCount: z.number().int().nonnegative(),
+    excludedTransactionCount: z.number().int().nonnegative().optional(),
     rejectedLineItemCount: z.number().int().nonnegative(), unknownAccountPaths: z.array(z.string()),
     ambiguousAccountPaths: z.array(z.string()),
     transactionSummary: z.object({
       byStatus: z.object({ planned: z.number().int().nonnegative(), existing: z.number().int().nonnegative(),
-        created: z.number().int().nonnegative(), rejected: z.number().int().nonnegative() }),
+        excluded: z.number().int().nonnegative().optional(), created: z.number().int().nonnegative(),
+        rejected: z.number().int().nonnegative() }),
       byValuationCurrency: countMapSchema, byYear: countMapSchema,
     }),
     lineItemSummary: z.object({ byAccountCurrency: countMapSchema, byTopLevelBranch: countMapSchema }),
@@ -918,8 +921,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       externalId: z.string().min(1), transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       transactionAt: z.string().datetime().nullable(),
       description: z.string().nullable(), valuationCurrencyCode: z.string().min(1),
-      lineItemCount: z.number().int().min(1), status: z.enum(["planned", "existing", "created", "rejected"]),
+      lineItemCount: z.number().int().min(1), status: z.enum(["planned", "existing", "excluded", "created", "rejected"]),
       transactionId: z.number().int().positive().nullable(), errors: z.array(importIssueSchema),
+      importDecision: z.object({
+        externalId: z.string().min(1), decision: z.enum(["include", "exclude"]),
+        confidence: z.string().nullable(), reason: z.string().nullable(), sourceRecordId: z.string().nullable(),
+        matchedTransactionIds: z.array(z.number().int().positive()),
+      }).optional(),
     })),
     expiresAt: z.string().datetime().optional(), previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
     summary: transactionImportSummarySchema.optional(), committed: z.boolean().optional(), alreadyCommitted: z.boolean().optional(),
@@ -1959,6 +1967,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         "Preserve every printed amount and all useful transaction text.",
         "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day. Use explicit_end_of_day_balance_date only when the document clearly gives the balance's end-of-day effective date.",
         "Opening and closing balances are optional. Record a dated balance when the source supplies one, then continue importing the transaction rows when either or both are absent.",
+        "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
         "Accounting selects the one user-designated suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
         "The statement account and suspense account must be different accounts.",
       ],
@@ -1987,7 +1996,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   }).strict();
   registerTool("import_single_account_statement", {
     title: "Answer and preview single-account statement",
-    description: `Canonical attachment workflow for one statement and one account, including a CSV of transactions or a request to reach a known balance. Call start_single_account_statement_import first, answer its four ordered questions from the document, and submit those answers here. Dated opening and closing balances are optional. Accounting includes any found balances in the import plan only when the ledger has no assertion for that account and date. It screens the extracted rows for duplicates, preserves each statement amount and available text, and automatically creates the balancing line in the user-designated same-currency suspense account. It never guesses categories. Balance differences are diagnostic and do not block transaction import. Use this workflow directly instead of creating a generic job whose one-sided rows would need exception repair.`,
+    description: "Submit four answers from start_single_account_statement_import. Accounting first marks rows through a matching known-balance checkpoint Imported exclude, then ranks exact amounts and tests small exclusions. It automatically creates the balancing line in the designated suspense account and shows every row in the register. Balances are optional. Ask once; do not run an LLM deduplication pass.",
     inputSchema: {
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
@@ -2033,34 +2042,52 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     }));
     const analysis = await accounting.analyzeStatementObservations({
       pool, personId,
-      openingBalanceDate: previousCalendarDate(rows.map((line) => line.transactionDate).sort()[0]),
-      closingBalanceDate: rows.map((line) => line.transactionDate).sort().at(-1),
+      openingBalanceDate: openingBalanceDate
+        ?? previousCalendarDate(rows.map((line) => line.transactionDate).sort()[0]),
+      closingBalanceDate: closingBalanceDate ?? rows.map((line) => line.transactionDate).sort().at(-1),
+      knownBalanceAssertions,
       observations: rows.map((line, index) => ({
         sourceDocumentId: statement_id, sourceRecordId: line_items[index].source_record_id,
         accountId: account_id, transactionDate: line.transactionDate, amountDecimal: line.amountDecimal,
         description: line.description, reference: line.externalId,
       })),
     });
-    const proposed = new Set(analysis.proposedNewObservationIds);
+    const decisionsByObservation = new Map((analysis.importDecisions ?? analysis.observations.map((observation) => ({
+      observationId: observation.id, decision: "include", confidence: "tentative",
+      reason: "No conclusive duplicate evidence was found.", matchedTransactionIds: [],
+    })))
+      .map((decision) => [decision.observationId, decision]));
     const candidatesByObservation = new Map(analysis.duplicateAnalysis.ledgerCandidates
       .map((item) => [item.observationId, item.candidates]));
-    const acceptedRows = rows.flatMap((line, index) => {
+    const reviewedRows = rows.map((line, index) => {
       const observationId = analysis.observations[index].id;
-      if (!proposed.has(observationId)) return [];
+      const decision = decisionsByObservation.get(observationId);
       const possible = candidatesByObservation.get(observationId) ?? [];
       const possibleTransactionIds = [...new Set(possible.map((candidate) => candidate.transactionId))];
-      return [{ ...line, ...(possibleTransactionIds.length ? {
+      return { ...line, ...(decision?.decision === "include" && possibleTransactionIds.length ? {
         questionPrompt: `Review possible duplicate ledger transaction${possibleTransactionIds.length === 1 ? "" : "s"} ${possibleTransactionIds.join(", ")} for source row ${JSON.stringify(line_items[index].source_record_id)}. Confirm whether this is a distinct entry, then identify or match its other side.`,
-      } : {}) }];
-    });
-    if (!acceptedRows.length) throw Object.assign(new Error("Every extracted statement row already exists in the ledger."), {
-      status: 409, code: "STATEMENT_ALREADY_IMPORTED",
+      } : {}) };
     });
     const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
       pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
       suspenseAccountId: suspense_account_id, valuationCurrencyCode: account.currencyCode,
-      questionAudience: "human", lines: acceptedRows,
+      questionAudience: "human", lines: reviewedRows,
       knownBalanceAssertions,
+      importReview: {
+        accountId: account_id,
+        statementId: statement_id,
+        decisions: rows.map((line, index) => {
+          const decision = decisionsByObservation.get(analysis.observations[index].id);
+          return {
+            externalId: line.externalId,
+            decision: decision?.decision ?? "include",
+            confidence: decision?.confidence ?? "tentative",
+            reason: decision?.reason ?? "No conclusive duplicate evidence was found.",
+            sourceRecordId: line_items[index].source_record_id,
+            matchedTransactionIds: decision?.matchedTransactionIds ?? [],
+          };
+        }),
+      },
     }));
     return { ...imported, import: imported };
   }, { retryTool: "import_single_account_statement", preserveEntireBatch: true,
@@ -2631,7 +2658,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("analyze_statement_observations", {
     title: "Analyze extracted statement observations",
-    description: "Use for statement imports, regardless of whether the source was CSV, PDF, OCR, or a screenshot. First extract visible source facts into format-neutral observations. This analyzer resolves native units from account scales, compares rows with existing ledger postings, identifies overlapping input documents, ranks cross-account transfer counterparts, and reports known-balance coverage when available. Missing or mismatched balance assertions do not block assembly. Only stable source-reference matches are automatically excluded as duplicates. Same date and amount without stable identity remains a review candidate. Carry possible duplicates and transfer ambiguity into open review questions when importing one-sided rows; do not guess their final matches.",
+    description: "Analyze format-neutral statement rows. The latest matching known-balance checkpoint makes rows on or before it default to exclude. Then Accounting ranks stable references, exact amounts within two days, transfer candidates, and small exclusion combinations against known balances. It returns reviewable include/exclude decisions; missing or mismatched balances do not block import.",
     inputSchema: {
       opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
         .describe("End-of-day date immediately before the first included transaction; an assertion need not exist."),

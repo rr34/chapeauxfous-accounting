@@ -148,6 +148,47 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
   };
 }
 
+function normalizeImportReview(review, transactions) {
+  if (review == null) return null;
+  const accountId = Number(review.accountId);
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    throw importError("An import review requires a positive account ID.", "INVALID_IMPORT_REVIEW");
+  }
+  const statementId = limitedRequiredText(review.statementId, "statement ID", 128);
+  const externalIds = new Set(transactions.map((transaction) => transaction.externalId));
+  const supplied = Array.isArray(review.decisions) ? review.decisions : [];
+  const byExternalId = new Map();
+  for (const item of supplied) {
+    const externalId = limitedRequiredText(item?.externalId, "review external transaction ID", 128);
+    if (!externalIds.has(externalId) || byExternalId.has(externalId)) {
+      throw importError("Every import-review decision must identify one transaction in this plan.",
+        "INVALID_IMPORT_REVIEW", { externalId });
+    }
+    const decision = String(item?.decision ?? "").trim();
+    if (decision !== "include" && decision !== "exclude") {
+      throw importError("An import-review decision must be include or exclude.", "INVALID_IMPORT_REVIEW",
+        { externalId });
+    }
+    byExternalId.set(externalId, {
+      externalId,
+      decision,
+      confidence: optionalLimitedText(item?.confidence, "review confidence", 40),
+      reason: optionalLimitedText(item?.reason, "review reason", 2000),
+      sourceRecordId: optionalLimitedText(item?.sourceRecordId, "source record ID", 128),
+      matchedTransactionIds: [...new Set((Array.isArray(item?.matchedTransactionIds)
+        ? item.matchedTransactionIds : []).map(Number))]
+        .filter((id) => Number.isInteger(id) && id > 0).slice(0, 20),
+    });
+  }
+  for (const transaction of transactions) {
+    if (!byExternalId.has(transaction.externalId)) byExternalId.set(transaction.externalId, {
+      externalId: transaction.externalId, decision: "include", confidence: "tentative",
+      reason: "No conclusive duplicate evidence was found.", sourceRecordId: null, matchedTransactionIds: [],
+    });
+  }
+  return { accountId, statementId, decisions: [...byExternalId.values()] };
+}
+
 function normalizeReconciliation(reconciliation) {
   if (reconciliation == null) return null;
   const ids = Array.isArray(reconciliation.accountIds)
@@ -602,6 +643,7 @@ function transactionSummary(entry) {
     valuationCurrencyCode: transaction.valuationCurrencyCode,
     lineItemCount: transaction.lineItems.length,
     status: entry.status,
+    ...(entry.reviewDecision == null ? {} : { importDecision: entry.reviewDecision }),
     transactionId: entry.transactionId ?? null,
     errors: entry.errors ?? [],
   };
@@ -620,6 +662,7 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
   const existing = entries.filter((entry) => entry.status === "existing");
   const created = entries.filter((entry) => entry.status === "created");
   const rejected = entries.filter((entry) => entry.status === "rejected");
+  const excluded = entries.filter((entry) => entry.status === "excluded");
   const resolved = entries.filter((entry) => entry.resolved);
   const questionLines = resolved.flatMap((entry) => entry.resolved.lineItems)
     .filter((line) => line.question != null);
@@ -646,11 +689,13 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
     reusedLineItemCount: ledgerChanged
       ? existing.reduce((sum, entry) => sum + entry.existingLineItemCount, 0) : 0,
     rejectedTransactionCount: rejected.length,
+    excludedTransactionCount: excluded.length,
     rejectedLineItemCount: rejected.reduce((sum, entry) => sum + entry.input.lineItems.length, 0),
     unknownAccountPaths: [...unknownAccountPaths].sort(),
     ambiguousAccountPaths: [...ambiguousAccountPaths].sort(),
     transactionSummary: {
-      byStatus: { planned: planned.length, existing: existing.length, created: created.length, rejected: rejected.length },
+      byStatus: { planned: planned.length, existing: existing.length, excluded: excluded.length,
+        created: created.length, rejected: rejected.length },
       byValuationCurrency: countBy(resolved, (entry) => entry.resolved.valuationCurrencyCode),
       byYear: countBy(resolved, (entry) => entry.resolved.transactionDate.slice(0, 4)),
     },
@@ -750,24 +795,29 @@ export async function analyzeTransactionImport(connection, personId, normalized,
   const existingByExternalId = await loadExistingTransactions(connection, personId, normalized.sourceSystem,
     normalized.transactions.map((transaction) => transaction.externalId), lock);
   const conflictingExternalIds = new Set(normalized.conflictingExternalIds);
+  const reviewByExternalId = new Map((normalized.importReview?.decisions ?? [])
+    .map((decision) => [decision.externalId, decision]));
   const entries = [];
   for (const input of normalized.transactions) {
     const entry = resolveTransaction(input, context, conflictingExternalIds);
     if (entry.errors.length) {
-      entries.push({ ...entry, status: "rejected" });
+      entries.push({ ...entry, status: "rejected", reviewDecision: reviewByExternalId.get(input.externalId) ?? null });
       continue;
     }
     const existing = existingByExternalId.get(input.externalId);
     if (!existing) {
-      entries.push({ ...entry, status: "planned" });
+      const reviewDecision = reviewByExternalId.get(input.externalId) ?? null;
+      entries.push({ ...entry, status: reviewDecision?.decision === "exclude" ? "excluded" : "planned",
+        reviewDecision });
     } else if (existing.fingerprint && String(existing.fingerprint).toLocaleLowerCase("en-US") === entry.resolved.fingerprint) {
       entries.push({ ...entry, status: "existing", transactionId: existing.transactionId,
-        existingLineItemCount: existing.lineItemCount });
+        existingLineItemCount: existing.lineItemCount,
+        reviewDecision: reviewByExternalId.get(input.externalId) ?? null });
     } else {
       entries.push({ ...entry, status: "rejected", errors: [issue("SOURCE_TRANSACTION_CONFLICT",
         `External transaction ID "${input.externalId}" already exists with different or unverifiable content.`, {
           externalId: input.externalId, transactionId: existing.transactionId,
-        })] });
+        })], reviewDecision: reviewByExternalId.get(input.externalId) ?? null });
     }
   }
   return entries;
@@ -811,10 +861,11 @@ function transactionPlanIdentity(plan) {
 }
 
 export async function previewTransactionImport({ pool, personId, sourceSystem, transactions,
-  reconciliation = null, knownBalanceAssertions = [] }) {
+  reconciliation = null, knownBalanceAssertions = [], importReview = null }) {
   const normalized = normalizeTransactionImport({ sourceSystem, transactions });
   normalized.reconciliation = normalizeReconciliation(reconciliation);
   normalized.knownBalanceAssertions = normalizeKnownBalanceAssertions(knownBalanceAssertions);
+  normalized.importReview = normalizeImportReview(importReview, normalized.transactions);
   return withPoolTransaction(pool, async (connection) => {
     await pruneOwnerAccountingImportPlans(connection, personId);
     const entries = await analyzeTransactionImport(connection, personId, normalized, false);
@@ -835,6 +886,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
     const transactionSummary = {
       transactionsCreated: preview.wouldCreateTransactionCount,
       transactionsReused: preview.wouldReuseTransactionCount,
+      transactionsExcluded: preview.excludedTransactionCount,
       lineItemsCreated: preview.wouldCreateLineItemCount,
       lineItemsReused: preview.wouldReuseLineItemCount,
       rejectedTransactions: preview.rejectedTransactionCount,
@@ -892,6 +944,146 @@ export async function getTransactionImportPlan({ pool, personId, importPlanId })
     }
     if (Boolean(plan.is_expired)) return { readyToCommit: false, status: "expired", ...identity };
     return { readyToCommit: true, status: "ready", ...identity };
+  });
+}
+
+function importReviewView(normalized, plan) {
+  const review = normalized.importReview;
+  if (review == null) return null;
+  const decisions = new Map(review.decisions.map((decision) => [decision.externalId, decision]));
+  const rows = normalized.transactions.map((transaction) => {
+    const decision = decisions.get(transaction.externalId);
+    const statementLine = transaction.lineItems[0];
+    return {
+      externalId: transaction.externalId,
+      sourceRecordId: decision?.sourceRecordId ?? null,
+      transactionDate: transaction.transactionDate,
+      transactionAt: transaction.transactionAt ?? null,
+      description: transaction.description,
+      amountDecimal: statementLine.amountDecimal,
+      memo: statementLine.memo,
+      decision: decision?.decision ?? "include",
+      confidence: decision?.confidence ?? null,
+      reason: decision?.reason ?? null,
+      matchedTransactionIds: decision?.matchedTransactionIds ?? [],
+      otherLines: transaction.lineItems.slice(1).map((line) => ({
+        accountFullName: line.accountFullName, amountDecimal: line.amountDecimal, memo: line.memo,
+      })),
+    };
+  });
+  return {
+    importPlanId: String(plan.import_plan_id),
+    previewDigest: `sha256:${String(plan.preview_sha256)}`,
+    expiresAt: planIsoTimestamp(plan.expires_at),
+    accountId: review.accountId,
+    statementId: review.statementId,
+    sourceSystem: normalized.sourceSystem,
+    rows,
+    includedCount: rows.filter((row) => row.decision === "include").length,
+    excludedCount: rows.filter((row) => row.decision === "exclude").length,
+  };
+}
+
+export async function listAccountTransactionImportReviews({ pool, personId, accountId }) {
+  const resolvedAccountId = Number(accountId);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw importError("Account not found.", "ACCOUNT_NOT_FOUND", undefined, 404);
+  }
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT import_plan_id, source_system, payload_sha256, preview_sha256, payload_json, expires_at
+         FROM accounting_import_plans
+        WHERE owner_person_id = ? AND import_kind = 'transactions' AND plan_status = 'ready'
+          AND expires_at > UTC_TIMESTAMP(6)
+        ORDER BY created_at DESC, import_plan_id DESC`,
+      [personId],
+    );
+    const seenStatements = new Set();
+    const reviews = [];
+    for (const plan of rows) {
+      if (payloadHash(plan.payload_json) !== String(plan.payload_sha256)) continue;
+      const normalized = parsePlanJson(plan.payload_json, "payload");
+      if (Number(normalized.importReview?.accountId) !== resolvedAccountId) continue;
+      const key = String(normalized.importReview.statementId);
+      if (seenStatements.has(key)) continue;
+      seenStatements.add(key);
+      reviews.push(importReviewView(normalized, plan));
+    }
+    return reviews;
+  });
+}
+
+export async function updateTransactionImportReviewDecision({ pool, personId, importPlanId, accountId,
+  externalId, decision }) {
+  const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
+  const resolvedExternalId = limitedRequiredText(externalId, "external transaction ID", 128);
+  if (decision !== "include" && decision !== "exclude") {
+    throw importError("Import decision must be include or exclude.", "INVALID_IMPORT_DECISION");
+  }
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT import_plan_id, source_system, plan_status, payload_sha256, preview_sha256,
+              payload_json, summary_json, expires_at, expires_at <= UTC_TIMESTAMP(6) AS is_expired
+         FROM accounting_import_plans
+        WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'transactions'
+        FOR UPDATE`,
+      [resolvedPlanId, personId],
+    );
+    const plan = rows[0];
+    if (!plan) throw importError("Transaction import plan not found.", "IMPORT_PLAN_NOT_FOUND", undefined, 404);
+    if (plan.plan_status !== "ready" || Boolean(plan.is_expired)) {
+      throw importError("This transaction import can no longer be changed.", "IMPORT_PLAN_STATE_CONFLICT", undefined, 409);
+    }
+    if (payloadHash(plan.payload_json) !== String(plan.payload_sha256)) {
+      throw importError("Stored transaction import plan failed its integrity check.",
+        "IMPORT_PLAN_INTEGRITY_FAILURE", undefined, 500);
+    }
+    const normalized = parsePlanJson(plan.payload_json, "payload");
+    if (Number(normalized.importReview?.accountId) !== Number(accountId)) {
+      throw importError("Transaction import review not found for this account.",
+        "IMPORT_REVIEW_NOT_FOUND", undefined, 404);
+    }
+    const selected = normalized.importReview.decisions.find((item) => item.externalId === resolvedExternalId);
+    if (!selected) throw importError("Imported transaction was not found in this review.",
+      "IMPORT_REVIEW_ROW_NOT_FOUND", undefined, 404);
+    selected.decision = decision;
+    selected.confidence = "user_selected";
+    selected.reason = decision === "include"
+      ? "The user selected this statement row for import."
+      : "The user excluded this statement row from import.";
+
+    const entries = await analyzeTransactionImport(connection, personId, normalized, false);
+    if (entries.some((entry) => entry.status === "rejected")) {
+      throw importError("The import changed while it was being reviewed. Create a new preview.",
+        "IMPORT_PLAN_NO_LONGER_VALID", summarize(normalized, entries), 409);
+    }
+    normalized.previewResolutionDigest = importResolutionDigest(entries);
+    const reconciliationValidation = await validateReconciliation(connection, personId,
+      normalized.reconciliation ?? null, entries);
+    const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
+      normalized.knownBalanceAssertions ?? []);
+    const preview = { ...summarize(normalized, entries),
+      ...(balanceAssertions.length ? { balanceAssertions } : {}),
+      ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
+    const transactionSummaryValue = {
+      transactionsCreated: preview.wouldCreateTransactionCount,
+      transactionsReused: preview.wouldReuseTransactionCount,
+      transactionsExcluded: preview.excludedTransactionCount,
+      lineItemsCreated: preview.wouldCreateLineItemCount,
+      lineItemsReused: preview.wouldReuseLineItemCount,
+      rejectedTransactions: preview.rejectedTransactionCount,
+    };
+    const payloadJson = JSON.stringify(normalized);
+    const previewHash = payloadHash(JSON.stringify(preview));
+    await connection.query(
+      `UPDATE accounting_import_plans
+          SET payload_json = ?, payload_sha256 = ?, preview_sha256 = ?, summary_json = ?
+        WHERE import_plan_id = ? AND owner_person_id = ?`,
+      [payloadJson, payloadHash(payloadJson), previewHash, JSON.stringify(transactionSummaryValue),
+        resolvedPlanId, personId],
+    );
+    return importReviewView(normalized, { ...plan, payload_json: payloadJson,
+      payload_sha256: payloadHash(payloadJson), preview_sha256: previewHash });
   });
 }
 

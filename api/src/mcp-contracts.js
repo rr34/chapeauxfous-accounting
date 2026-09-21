@@ -320,9 +320,9 @@ export const statementObservationAnalysisSchema = z.object({
         transactionId: z.number().int().positive(),
         lineItemId: z.number().int().positive(),
         classification: z.enum(["exact_source_duplicate", "strong_duplicate_candidate",
-          "possible_duplicate", "source_reference_conflict"]),
+          "probable_duplicate", "possible_duplicate", "source_reference_conflict"]),
         recommendation: z.enum(["exclude_from_new_import", "review_candidate",
-          "do_not_import_until_resolved"]),
+          "exclude_when_balance_or_text_corroborates", "do_not_import_until_resolved"]),
         score: z.number().int().nonnegative(),
         reasons: z.array(z.string().min(1)),
         existing: z.object({
@@ -356,6 +356,15 @@ export const statementObservationAnalysisSchema = z.object({
     possibleFeeUnits: z.string().regex(/^\d+$/).nullable(),
   })),
   ambiguousTransferObservationIds: z.array(statementObservationIdSchema),
+  balanceCheckpoints: z.array(balanceAssertionSchema),
+  importDecisions: z.array(z.object({
+    observationId: statementObservationIdSchema,
+    decision: z.enum(["include", "exclude"]),
+    confidence: z.enum(["verified_checkpoint", "certain", "probable", "balance_supported", "tentative", "ambiguous"]),
+    reason: z.string().min(1),
+    matchedTransactionIds: z.array(z.number().int().positive()),
+    balanceCheckpointDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  })),
   proposedNewObservationIds: z.array(statementObservationIdSchema),
   coverage: z.array(z.object({
     accountId: z.number().int().positive(), accountFullName: z.string().min(1),
@@ -366,7 +375,7 @@ export const statementObservationAnalysisSchema = z.object({
     residualAfterProposedUnits: z.string().regex(/^-?\d+$/).nullable(),
     balanced: z.boolean(),
   })),
-  readyForTransactionAssembly: z.boolean().describe("At least one observation remains to import after exact source duplicates are excluded; review candidates remain questions."),
+  readyForTransactionAssembly: z.boolean().describe("The observations can be assembled into an account import review; the current included count may be zero."),
   rules: z.array(z.string().min(1)),
 });
 
