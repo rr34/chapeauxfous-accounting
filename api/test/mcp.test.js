@@ -583,13 +583,31 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     assert.match(guidance, /aggregate createdCount plus reusedCount equals aggregate submittedCount/);
   }
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
+  assert.match(manifest.server.instructions,
+    /CSV that lists transactions into and out of one.*account is an account statement.*Never send those one-account rows/s);
+  assert.match(transactionCapability.guidance,
+    /Route every file listing movements for one named account through accounting\.reconciliation/);
+  assert.match(transactionCapability.attachmentHints.join(" "),
+    /transaction CSV.*start_single_account_statement_import.*do not create a generic transaction import job/);
   assert.match(transactionCapability.attachmentHints.join(" "), /accounting\.accounts\.active_paths.*resolve its full path and currency once/);
-  assert.match(transactionCapability.attachmentHints.join(" "), /one-account source row is not a complete double-entry transaction/);
-  assert.match(transactionCapability.attachmentHints.join(" "), /known balances.*get_statement_reconciliation_context.*analyze_statement_observations/);
+  assert.match(transactionCapability.attachmentHints.join(" "),
+    /source provides only movements in one account.*leave this workflow.*start_single_account_statement_import/);
+  assert.match(transactionCapability.attachmentHints.join(" "),
+    /multi-account transaction assembly.*known balances.*get_statement_reconciliation_context.*analyze_statement_observations/);
   assert.match(transactionCapability.attachmentHints.join(" "), /Accounting automatically chooses the nearest owner-scoped reference rate in either currency direction/);
   assert.match(transactionCapability.attachmentHints.join(" "), /A missing counterpart is not a fee/);
   assert.match(tools.tools.find((tool) => tool.name === "get_transaction_import_schema").description,
     /Preserve account quantities exactly.*Accounting selects the nearest owner-scoped reference rate in either direction/);
+  assert.match(tools.tools.find((tool) => tool.name === "get_transaction_import_schema").description,
+    /Do not use it for a bank, card, exchange, wallet, brokerage.*use start_single_account_statement_import/s);
+  assert.match(tools.tools.find((tool) => tool.name === "start_single_account_statement_import").description,
+    /CSV transaction list.*known balance.*instead of get_transaction_import_schema/s);
+  assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
+    /automatically creates the balancing line.*suspense account/s);
+  assert.match(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").description,
+    /every row of a one-account statement failed.*stop repairing that generic job row by row/s);
+  assert.match(accountingToolDescriptions.get_transaction_import_schema.summary,
+    /For a statement listing movements in one account, use start_single_account_statement_import instead/);
   assert.match(tools.tools.find((tool) => tool.name === "stage_transaction_import_artifact").description,
     /one-account source row alone cannot balance/);
   assert.match(tools.tools.find((tool) => tool.name === "list_reference_rates").description,
