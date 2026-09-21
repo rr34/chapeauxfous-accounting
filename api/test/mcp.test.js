@@ -278,6 +278,18 @@ test("the MCP exposes scoped tool and object contracts", async () => {
           byAudience: { [input.questionAudience]: input.lines.length },
           bySuspenseAccount: { "Assets:Ask Human": input.lines.length } } };
     },
+    async readCompleteArtifact() {
+      return {
+        artifact: { media_type: "application/x-ndjson" },
+        bytes: Buffer.from([
+          JSON.stringify({ source_record_id: "artifact-row-1", transaction_date: "2026-01-05",
+            amount_decimal: "-12.50", available_text: "ACME" }),
+          JSON.stringify({ source_record_id: "artifact-row-2", transaction_date: "2026-01-06",
+            amount_decimal: "25.00", available_text: "DEPOSIT" }),
+          "",
+        ].join("\n")),
+      };
+    },
     async saveBalanceAssertion(input) {
       savedStatementBalances.push(input);
       return { id: savedStatementBalances.length, accountId: input.accountId, accountName: "Wallet",
@@ -416,7 +428,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "analyze_statement_observations", "commit_transaction_import_job", "create_account",
     "create_reference_rates", "create_transaction", "exclude_transaction_import_exception",
     "get_statement_reconciliation_context", "get_transaction", "get_transaction_import_job",
-    "import_single_account_statement", "import_transactions", "list_account_objects",
+    "import_single_account_statement", "import_single_account_statement_artifact",
+    "import_transactions", "list_account_objects",
     "list_accounting_question_objects", "list_accounting_questions", "list_balance_assertion_objects",
     "list_currency_objects", "list_line_item_objects", "list_reference_rates",
     "list_transaction_import_exceptions", "list_transaction_import_job_objects",
@@ -461,6 +474,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     }
   }
   assert.deepEqual(objectInputContracts.import_single_account_statement, [
+    { path: "/account_id", objectType: "accounting.account", value: "id" },
+    { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
+  ]);
+  assert.deepEqual(objectInputContracts.import_single_account_statement_artifact, [
     { path: "/account_id", objectType: "accounting.account", value: "id" },
     { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
   ]);
@@ -522,6 +539,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     ._meta["agent-slayer/artifactUpload"].transportId, "reference_rate_import");
   assert.equal(tools.tools.some((tool) => tool.name === "start_single_account_statement_import"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement_artifact"), true);
+  assert.equal(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact")
+    ._meta["agent-slayer/artifactUpload"].transportId, "single_account_statement_import");
   assert.equal(tools.tools.some((tool) => tool.name === "reconcile_account_through_date"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "search_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_transactions"), true);
@@ -682,7 +702,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "start_single_account_statement_import").description,
     /CSV transaction list.*known balance.*instead of get_transaction_import_schema/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
-    /automatically creates the balancing line.*suspense account/s);
+    /compact counts.*do not enumerate every row/s);
+  assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact").description,
+    /without copying every row into model context.*compact counts/s);
   assert.match(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").description,
     /every row of a one-account statement failed.*stop repairing that generic job row by row/s);
   assert.match(accountingToolDescriptions.get_transaction_import_schema.summary,
@@ -997,6 +1019,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   const statementGuide = await client.callTool({
     name: "start_single_account_statement_import", arguments: { account_id: 10 },
   });
+  assert.equal(statementGuide.structuredContent.workflowState, "instructions_only");
+  assert.match(statementGuide.structuredContent.completionNote, /No import workflow or preview has been saved/);
+  assert.equal(statementGuide.structuredContent.nextTool, "import_single_account_statement_artifact");
+  assert.equal(statementGuide.structuredContent.inlineNextTool, "import_single_account_statement");
+  assert.equal(statementGuide.structuredContent.canonicalArtifactSchema.$id,
+    "accounting://schemas/single-account-statement-import-record/v1");
   assert.deepEqual(statementGuide.structuredContent.orderedQuestions.map((question) => question.key),
     ["beginning_balance", "ending_balance", "line_items", "available_text"]);
   assert.equal(statementGuide.structuredContent.suspenseAccount, null);
@@ -1095,6 +1123,29 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       matchedTransactionIds: [],
     }] },
   });
+
+  const artifactStatementPreview = await client.callTool({
+    name: "import_single_account_statement_artifact",
+    arguments: {
+      artifact_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      statement_id: `sha256:${"6".repeat(64)}`,
+      account_id: 10,
+      suspense_account_id: 11,
+      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
+      ending_balance: { found: false, date: null, amount_decimal: null },
+      dry_run: true,
+    },
+  });
+  assert.notEqual(artifactStatementPreview.isError, true);
+  assert.equal(artifactStatementPreview.structuredContent.import.submittedTransactionCount, 2);
+  assert.equal(Object.hasOwn(artifactStatementPreview.structuredContent, "transactions"), false);
+  assert.equal(Object.hasOwn(artifactStatementPreview.structuredContent.import, "transactions"), false);
+  assert.deepEqual(oneSidedImport.lines.map(({ transactionDate, description, amountDecimal }) => ({
+    transactionDate, description, amountDecimal,
+  })), [
+    { transactionDate: "2026-01-05", description: "ACME", amountDecimal: "-12.5" },
+    { transactionDate: "2026-01-06", description: "DEPOSIT", amountDecimal: "25" },
+  ]);
 
   const marked = await client.callTool({ name: "reconcile_account_through_date", arguments: {
     account_id: 10, balance_date: "2026-01-31",

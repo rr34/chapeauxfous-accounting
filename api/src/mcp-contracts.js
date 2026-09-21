@@ -382,9 +382,31 @@ export const statementObservationAnalysisSchema = z.object({
 export const CAPABILITY_MANIFEST_URI = "accounting://manifest/capabilities/v1";
 
 export const transactionImportArtifactUpload = artifactUploadContract;
+export const singleAccountStatementArtifactUpload = Object.freeze({
+  ...artifactUploadContract,
+  transportId: "single_account_statement_import",
+});
 export const referenceRateArtifactUpload = Object.freeze({
   ...artifactUploadContract,
   transportId: "reference_rate_import",
+});
+
+export const SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI =
+  "accounting://schemas/single-account-statement-import-record/v1";
+export const singleAccountStatementImportCanonicalJsonSchema = Object.freeze({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI,
+  title: "Canonical single-account statement line record",
+  description: "One dated signed movement from a statement for one already-selected account.",
+  type: "object",
+  additionalProperties: false,
+  required: ["source_record_id", "transaction_date", "amount_decimal", "available_text"],
+  properties: {
+    source_record_id: { type: "string", minLength: 1, maxLength: 96 },
+    transaction_date: { type: "string", format: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+    amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128 },
+    available_text: { type: ["string", "null"], maxLength: 16000 },
+  },
 });
 
 export const accountingCapabilityManifest = Object.freeze({
@@ -393,7 +415,7 @@ export const accountingCapabilityManifest = Object.freeze({
     name: "chapeaux-fous-accounting",
     title: "Chapeaux Fous Accounting",
     version: MCP_SERVER_VERSION,
-    instructions: "For an uploaded account statement, use one canonical workflow. A CSV that lists transactions into and out of one bank, card, exchange, wallet, brokerage, or other account is an account statement for routing purposes, including when the user says its rows should reach a known balance. Never send those one-account rows through get_transaction_import_schema, create_transaction_import_job, or exception-by-exception repair. First identify and confirm exactly one accounting.account object. Call start_single_account_statement_import, then answer its four questions in order from the attachment: (1) optional beginning balance and date, including whether the date is the first included statement date or an explicit end-of-day balance date, (2) optional ending balance and date, (3) every signed line-item amount and date, and (4) all available text for each line. A beginning balance shown for the first included date is an end-of-day balance for the previous calendar day; the server derives that effective date. Report absent balances without asking the user to supply them. Submit the answers to import_single_account_statement. Do not guess counteraccounts, categories, fees, prices, or transfers during this initial workflow; Accounting puts every unknown other side into the user-designated suspense account for that currency. If none is designated, use update_account to mark an existing postable account chosen by the user. Present the returned preview for confirmation, commit its exact plan only after approval, and check whether any known closing balance matches after commit. A mismatch does not block transaction import. Reconcile the statement account only when its known closing balance matches. Later matching or classification work uses the retained open questions; simple reclassification preserves reconciled statement lines. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
+    instructions: "For an uploaded account statement, use one canonical workflow. A CSV that lists transactions into and out of one bank, card, exchange, wallet, brokerage, or other account is an account statement for routing purposes, including when the user says its rows should reach a known balance. Never send those one-account rows through get_transaction_import_schema, create_transaction_import_job, or exception-by-exception repair. First identify and confirm exactly one accounting.account object. Call start_single_account_statement_import to read the extraction and artifact requirements; that read-only call does not start or save an import and is not completion. In the same request, answer its optional balance questions, transform every source row to its canonical single-account JSON Lines schema, upload that complete generated artifact, and call import_single_account_statement_artifact to create the fresh preview. Use inline import_single_account_statement only for bounded records already present directly in the interaction. A beginning balance shown for the first included date is an end-of-day balance for the previous calendar day; the server derives that effective date. Report absent balances without asking the user to supply them. Do not guess counteraccounts, categories, fees, prices, or transfers during this initial workflow; Accounting puts every unknown other side into the user-designated suspense account for that currency. If none is designated, use update_account to mark an existing postable account chosen by the user. Present a compact preview summary and the returned confirmation question; do not enumerate every statement row in chat unless the user asks. Row-level review remains available in the account register. Commit the exact plan only after approval, and check whether any known closing balance matches after commit. A mismatch does not block transaction import. Reconcile the statement account only when its known closing balance matches. Later matching or classification work uses the retained open questions; simple reclassification preserves reconciled statement lines. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
     artifactUpload: artifactUploadContract,
   },
   capabilities: [
@@ -466,18 +488,21 @@ export const accountingCapabilityManifest = Object.freeze({
       aliases: ["reconciliation", "balance checks", "statement import", "account statement", "bank transaction CSV",
         "card statement", "exchange statement", "wallet statement", "brokerage statement",
         "exchange rates", "reference prices", "bitcoin prices", "BTC/USD"],
-      guidance: "For an account statement attachment, start_single_account_statement_import followed by import_single_account_statement is the canonical path. Try to extract beginning and ending balances with dates, signed line items, and available line text. Either balance may be absent. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. At commit, the server stores found balance assertions only where none exists, screens duplicates, and builds balanced counterlines in the designated suspense account. Missing or mismatched known balances do not block transaction import. For a market-price file, use the separate reference-rate schema and artifact import tools.",
+      guidance: "For an account statement attachment, start_single_account_statement_import describes the work but does not start or save it. Continue in the same request by transforming and uploading the complete canonical artifact and calling import_single_account_statement_artifact; use import_single_account_statement only for bounded records already present directly in the interaction. Try to extract beginning and ending balances with dates, signed line items, and available line text. Either balance may be absent. When the beginning date is the statement's first included date, the server records that balance on the previous calendar day; an explicit end-of-day balance date is used directly. Do not classify the unknown sides during intake. At commit, the server stores found balance assertions only where none exists, screens duplicates, and builds balanced counterlines in the designated suspense account. Missing or mismatched known balances do not block transaction import. Present the preview as compact counts, balance findings, exclusions, and open questions; do not list every row unless asked. For a market-price file, use the separate reference-rate schema and artifact import tools.",
       tools: ["list_balance_assertions", "list_balance_assertion_objects", "save_balance_assertion", "get_statement_reconciliation_context",
         "analyze_statement_observations",
         "list_reference_rates", "get_reference_rate_import_schema", "create_reference_rates",
         "import_reference_rates_artifact", "list_accounting_questions", "list_accounting_question_objects",
         "open_accounting_question", "resolve_accounting_question",
-        "start_single_account_statement_import", "import_single_account_statement", "reconcile_account_through_date"],
+        "start_single_account_statement_import", "import_single_account_statement_artifact",
+        "import_single_account_statement", "reconcile_account_through_date"],
       dependencies: ["accounting.accounts", "accounting.currencies", "accounting.transactions"],
       attachmentHints: [
         "For an uploaded price file, get the reference-rate import schema and transform the full file to canonical JSON Lines with file_table_transform; for OHLC historical bars, use close as the price unless the user or source specifies another measure. Report transform exceptions. Compare transformedRecordCount with maximum_records; if larger, use file_jsonl_partition with records_per_file no greater than maximum_records. Upload and import each part, or the whole artifact when it fits. On resumption, recover successful per-part import receipts and continue with parts lacking a successful receipt. Verify aggregate submittedCount equals transformedRecordCount and aggregate createdCount plus reusedCount equals aggregate submittedCount.",
         "For a statement, bind one CSV, PDF, image, OCR result, or screenshot to one confirmed accounting.account object.",
         "For a statement, call start_single_account_statement_import before extracting or importing the attachment.",
+        "Calling start_single_account_statement_import only reads requirements. It does not persist a workflow or create a preview; continue through the artifact preview in the same request.",
+        "Transform every source row to the returned single-account schema and upload the complete JSON Lines artifact. Complete ingestion does not mean displaying every row to the user; summarize the preview and keep row details in the account register unless the user asks for them.",
         "Treat a CSV of dated amounts for one account as a statement. Do not use the generic transaction artifact job, which expects complete balanced transactions rather than one-sided statement movements.",
         "Answer its four questions in order; mark missing balances absent and preserve printed balances, dates, signed amounts, and text exactly.",
         "Do not infer transfers, prices, fees, or final categories during initial statement intake.",

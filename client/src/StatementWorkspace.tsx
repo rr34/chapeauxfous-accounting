@@ -114,14 +114,14 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
       "I am attaching one account statement.",
       `Statement account object: ${JSON.stringify(accountObject)}`,
       `Designated suspense account object: ${JSON.stringify(suspenseObject)}`,
-      "Use the Accounting MCP single-account statement workflow. First call start_single_account_statement_import for the statement account.",
+      "Use the Accounting MCP single-account statement workflow. First call start_single_account_statement_import for the statement account. That read-only call only returns requirements; it does not start or save an import and is not a completed response.",
       "Answer its four questions from the attached document, in this order:",
       "1. Does it contain a beginning balance and date? Extract both, and say whether that date is the first included statement date or an explicit end-of-day balance date. If it is the first included date, the balance belongs to the previous calendar day.",
       "2. Does it contain an ending balance with a date? Extract both exactly.",
       "3. What are every line item's date and signed change to the displayed statement balance (positive increases it; negative decreases it)?",
       "4. What payee, description, memo, reference, or other text is available for each line?",
       "Missing opening or closing balances are fine; report them as absent and continue with the transactions. Do not guess any counteraccount, category, transfer, fee, or price.",
-      "Submit the answers once to import_single_account_statement. Accounting will first exclude rows on or before an existing matching known-balance checkpoint, then perform duplicate and remaining-balance analysis, use the designated suspense account, and show every proposed row in the account register as Imported include or Imported exclude. Do not run another LLM deduplication pass. Ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
+      "For an attached file, transform every source row to the returned canonical schema, upload the complete generated JSON Lines artifact, and submit the answers once to import_single_account_statement_artifact. Use import_single_account_statement only when the bounded rows are already present directly in the interaction. Accounting will first exclude rows on or before an existing matching known-balance checkpoint, then perform duplicate and remaining-balance analysis, use the designated suspense account, and keep every proposed row available in the account register as Imported include or Imported exclude. In chat, present a compact summary and the exact confirmation question; do not list every row unless asked. Do not run another LLM deduplication pass. Ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
     ].join("\n");
     try {
       await navigator.clipboard.writeText(instructions);

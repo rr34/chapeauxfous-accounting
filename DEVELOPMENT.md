@@ -396,17 +396,29 @@ movement is not disturbed. Resolved question metadata remains attached for
 audit and exact retries are idempotent. Older suspense lines can be enrolled
 with `open_accounting_question`.
 
-For a statement that authoritatively describes only one account, use
-`import_single_account_statement` instead of asking the caller to construct the
-unknown half of every journal entry. Select the statement account and one
-ordinary, active, same-currency suspense account. Each source line becomes its
-own balanced transaction: the source amount and value are copied unchanged to
-the statement account and marked `cleared`; the exact opposite amount and value
-go to the selected suspense account, remain `unreconciled`, and carry an open
-accounting question. All unknown counterlines therefore collect in one bucket
-without contaminating the authoritative account. Stable source IDs retain the
-ordinary import idempotency guarantees, and screenshot or overlapping-file
-imports still run through statement-observation duplicate analysis first.
+For a statement that authoritatively describes only one account, first call
+`start_single_account_statement_import` to read the extraction requirements and
+canonical line-record schema. That tool is read-only: it does not persist a
+workflow or create a preview. For an uploaded file, transform the complete
+source to canonical JSON Lines, upload the generated artifact through the
+statement tool's advertised `single_account_statement_import` transport, and
+call `import_single_account_statement_artifact`. The artifact path keeps the
+complete source outside model context. `import_single_account_statement`
+remains the inline alternative for bounded records already present directly in
+the interaction.
+
+Both preview tools avoid asking the caller to construct the unknown half of
+every journal entry. Select the statement account and one ordinary, active,
+same-currency suspense account. Each source line becomes its own balanced
+transaction: the source amount and value are copied unchanged to the statement
+account and marked `cleared`; the exact opposite amount and value go to the
+selected suspense account, remain `unreconciled`, and carry an open accounting
+question. All unknown counterlines therefore collect in one bucket without
+contaminating the authoritative account. Stable source IDs retain the ordinary
+import idempotency guarantees, and screenshot or overlapping-file imports
+still run through statement-observation duplicate analysis first. User-facing
+chat should summarize preview counts, balance findings, exclusions, and open
+questions; row-level review stays in the account register unless requested.
 
 After saving the closing balance assertion and committing the statement import,
 `reconcile_account_through_date` compares that assertion with the posted normal

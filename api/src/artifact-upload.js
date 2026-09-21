@@ -378,11 +378,11 @@ export async function bindArtifactToImportJob({ artifactRoot, personId, artifact
   });
 }
 
-export function parseCanonicalTransactionArtifact(bytes, artifactMediaType) {
+function parseCanonicalJsonLinesArtifact(bytes, artifactMediaType, label, unsupportedCode) {
   const normalizedMediaType = mediaType(artifactMediaType);
   if (!TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES.includes(normalizedMediaType)) throw artifactError(
-    "This import tool accepts canonical UTF-8 JSON Lines as application/x-ndjson.",
-    "UNSUPPORTED_TRANSACTION_IMPORT_ARTIFACT", { accepted_media_types: TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES }, 415,
+    `This ${label} accepts canonical UTF-8 JSON Lines as application/x-ndjson.`,
+    unsupportedCode, { accepted_media_types: TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES }, 415,
   );
   let text;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(bytes)); } catch {
@@ -398,6 +398,16 @@ export function parseCanonicalTransactionArtifact(bytes, artifactMediaType) {
     }
   }
   return records;
+}
+
+export function parseCanonicalTransactionArtifact(bytes, artifactMediaType) {
+  return parseCanonicalJsonLinesArtifact(bytes, artifactMediaType, "transaction import tool",
+    "UNSUPPORTED_TRANSACTION_IMPORT_ARTIFACT");
+}
+
+export function parseCanonicalStatementArtifact(bytes, artifactMediaType) {
+  return parseCanonicalJsonLinesArtifact(bytes, artifactMediaType, "statement import tool",
+    "UNSUPPORTED_STATEMENT_IMPORT_ARTIFACT");
 }
 
 export function artifactUploadHttpResponse(upload) {

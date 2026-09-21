@@ -3,7 +3,11 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
-import { mountArtifactUploadRoutes } from "./artifact-upload.js";
+import {
+  mountArtifactUploadRoutes,
+  parseCanonicalStatementArtifact,
+  readCompleteArtifact,
+} from "./artifact-upload.js";
 import {
   getBalanceAssertion,
   listBalanceAssertions,
@@ -68,6 +72,9 @@ import {
   referenceRateSchema,
   retryDescriptorSchema,
   resultMetadataSchema,
+  SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI,
+  singleAccountStatementArtifactUpload,
+  singleAccountStatementImportCanonicalJsonSchema,
   statementObservationAnalysisSchema,
   statementReconciliationContextSchema,
   structuredErrorSchema,
@@ -411,6 +418,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     resolveAccountingQuestion: services.resolveAccountingQuestion ?? resolveAccountingQuestion,
     previewSingleAccountStatementImport: services.previewSingleAccountStatementImport
       ?? previewSingleAccountStatementImport,
+    readCompleteArtifact: services.readCompleteArtifact ?? readCompleteArtifact,
     reconcileAccountThroughDate: services.reconcileAccountThroughDate ?? reconcileAccountThroughDate,
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
     getTransactionImportPlan: services.getTransactionImportPlan ?? getTransactionImportPlan,
@@ -475,6 +483,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     mimeType: "application/schema+json",
   }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
     text: JSON.stringify(transactionImportCanonicalJsonSchema) }] }));
+
+  server.registerResource("accounting-single-account-statement-import-canonical-schema",
+    SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI, {
+      title: "Canonical single-account statement line-record JSON Schema",
+      description: "The exact JSON Schema for each row in a complete single-account statement JSON Lines artifact.",
+      mimeType: "application/schema+json",
+    }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
+      text: JSON.stringify(singleAccountStatementImportCanonicalJsonSchema) }] }));
 
   server.registerResource("accounting-currencies-active", "accounting://context/currencies/active", {
     title: "Accessible accounting units",
@@ -896,6 +912,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   });
   const singleAccountStatementGuideOutput = successOutputSchema({
     workflow: z.literal("single_account_statement"),
+    workflowState: z.literal("instructions_only"),
+    completionNote: z.string().min(1),
     account: z.object({
       objectType: z.literal("accounting.account"), id: z.number().int().positive(),
       sourceRef: z.string().min(1), displayName: z.string().min(1), currencyCode: z.string().min(1),
@@ -907,7 +925,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       order: z.number().int().min(1).max(4), key: z.string().min(1), prompt: z.string().min(1),
       answerShape: z.json(),
     })).length(4),
-    nextTool: z.literal("import_single_account_statement"),
+    canonicalArtifactSchema: z.json(),
+    artifactUpload: z.json(),
+    nextTool: z.literal("import_single_account_statement_artifact"),
+    inlineNextTool: z.literal("import_single_account_statement"),
     rules: z.array(z.string().min(1)),
   });
   const referenceRateListOutput = successOutputSchema({
@@ -1020,6 +1041,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       previewDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), summary: transactionImportSummarySchema,
       invalidationCode: z.string().min(1).optional(), alreadyCommitted: z.boolean().optional(),
       commitResult: transactionImportSchema.optional(),
+    }),
+    structuredErrorSchema,
+  ]);
+  const statementArtifactImportSchema = transactionImportSchema.omit({ transactions: true }).extend({
+    transactions: transactionImportSchema.shape.transactions.optional(),
+  });
+  const statementArtifactWorkflowOutput = z.union([
+    statementArtifactImportSchema.extend({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), import: statementArtifactImportSchema,
+      effectReceipt: effectReceiptSchema.optional(),
     }),
     structuredErrorSchema,
   ]);
@@ -2112,8 +2143,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   }));
 
   registerTool("start_single_account_statement_import", {
-    title: "Start single-account statement import",
-    description: "Canonical first call whenever an attachment lists dated movements for one bank, card, exchange, wallet, brokerage, or other account. A CSV transaction list and a request to bring one account to a known balance both qualify as a statement. Use this instead of get_transaction_import_schema or create_transaction_import_job. It returns four document-extraction questions, in order. Answer them from the attachment; mark missing balances absent and continue with transaction rows. Do not guess counteraccounts during this workflow.",
+    title: "Read single-account statement requirements",
+    description: "Canonical first call whenever an attachment lists dated movements for one bank, card, exchange, wallet, brokerage, or other account. A CSV transaction list and a request to bring one account to a known balance both qualify as a statement. Use this instead of get_transaction_import_schema or create_transaction_import_job. This read-only call returns the extraction requirements and canonical artifact schema; it does not start, save, or preview an import and must not be reported as completion. For an attachment, continue in the same request: transform every source row, upload the complete generated JSON Lines artifact, and call import_single_account_statement_artifact. Mark missing balances absent. Complete ingestion is internal; present a compact preview summary rather than every row unless the user asks. Do not guess counteraccounts.",
     inputSchema: {
       account_id: positiveInteger("The accounting.account object linked to the uploaded statement."),
     },
@@ -2136,6 +2167,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       && !candidate.placeholder && candidate.archivedAt == null);
     return {
       workflow: "single_account_statement",
+      workflowState: "instructions_only",
+      completionNote: "No import workflow or preview has been saved by this read-only call. Continue to the preview tool in the same request.",
       account: {
         objectType: "accounting.account", id: account.id, sourceRef: `accounting://accounts/${account.id}`,
         displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode, scale: account.scale,
@@ -2160,7 +2193,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text from the document without inventing a category.",
           answerShape: [{ source_record_id: "same row id as question 3", available_text: "string or null" }] },
       ],
-      nextTool: "import_single_account_statement",
+      canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
+      artifactUpload: singleAccountStatementArtifactUpload,
+      nextTool: "import_single_account_statement_artifact",
+      inlineNextTool: "import_single_account_statement",
       rules: [
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
@@ -2194,31 +2230,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     available_text: z.string().trim().max(16000).nullable()
       .describe("All useful transaction text copied from the document, or null when the row has none."),
   }).strict();
-  registerTool("import_single_account_statement", {
-    title: "Answer and preview single-account statement",
-    description: "Submit four answers from start_single_account_statement_import. Accounting first marks rows through a matching known-balance checkpoint Imported exclude, then ranks exact amounts and tests small exclusions. It automatically creates the balancing line in the designated suspense account and shows every row in the register. Balances are optional. Ask once; do not run an LLM deduplication pass.",
-    inputSchema: {
-      statement_id: z.string().trim().min(1).max(128)
-        .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
-      account_id: positiveInteger("The single authoritative statement account."),
-      suspense_account_id: positiveInteger("Optional compatibility check; when supplied it must be the designated suspense account for this currency.").optional(),
-      beginning_balance: beginningBalanceAnswerSchema,
-      ending_balance: endingBalanceAnswerSchema,
-      line_items: z.array(oneSidedStatementLineSchema).min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS),
-      dry_run: z.literal(true).default(true),
-    },
-    outputSchema: transactionWorkflowOutput,
-    annotations: writesData,
-    _meta: toolMetadata("accounting.reconciliation", {
-      dependencies: ["start_single_account_statement_import", "list_account_objects"],
-      attachmentHints: ["Submit the complete four-answer extraction for exactly one account and one statement."],
-      objectInputs: [
-        { path: "/account_id", objectType: "accounting.account", value: "id" },
-        { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
-      ],
-    }),
-  }, async ({ statement_id, account_id, suspense_account_id, beginning_balance,
-    ending_balance, line_items }) => safeWorkflowResult(async () => {
+  const oneSidedStatementLinesSchema = z.array(oneSidedStatementLineSchema)
+    .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
+  const previewSingleAccountStatement = async ({ statement_id, account_id, suspense_account_id,
+    beginning_balance, ending_balance, line_items }) => {
     const openingBalanceDate = beginning_balance.found && beginning_balance.date != null
       && beginning_balance.amount_decimal != null && beginning_balance.date_meaning != null
       ? (beginning_balance.date_meaning === "first_included_transaction_date"
@@ -2294,9 +2309,82 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
       },
     }));
     return { ...imported, import: imported };
-  }, { retryTool: "import_single_account_statement", preserveEntireBatch: true,
+  };
+  const statementImportFailureOptions = (retryTool) => ({ retryTool, preserveEntireBatch: true,
     failureMapper: (error) => error?.code === "SUSPENSE_ACCOUNT_NOT_CONFIGURED"
-      ? { requiredAction: "MARK_SUSPENSE_ACCOUNT" } : null }));
+      ? { requiredAction: "MARK_SUSPENSE_ACCOUNT" } : null });
+
+  registerTool("import_single_account_statement", {
+    title: "Preview inline single-account statement",
+    description: "Submit the four answers from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting first marks rows through a matching known-balance checkpoint Imported exclude, then ranks exact amounts and tests small exclusions. It creates the balancing line in the designated suspense account. Balances are optional. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    inputSchema: {
+      statement_id: z.string().trim().min(1).max(128)
+        .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
+      account_id: positiveInteger("The single authoritative statement account."),
+      suspense_account_id: positiveInteger("Optional compatibility check; when supplied it must be the designated suspense account for this currency.").optional(),
+      beginning_balance: beginningBalanceAnswerSchema,
+      ending_balance: endingBalanceAnswerSchema,
+      line_items: oneSidedStatementLinesSchema,
+      dry_run: z.literal(true).default(true),
+    },
+    outputSchema: transactionWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["start_single_account_statement_import", "list_account_objects"],
+      attachmentHints: ["Use this inline path only for bounded records already present directly in the interaction."],
+      objectInputs: [
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
+        { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
+      ],
+    }),
+  }, async (answers) => safeWorkflowResult(
+    () => previewSingleAccountStatement(answers), statementImportFailureOptions("import_single_account_statement"),
+  ));
+
+  registerTool("import_single_account_statement_artifact", {
+    title: "Preview uploaded single-account statement",
+    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit optional printed balances separately. Accounting performs known-balance checkpoint, duplicate, and small-exclusion analysis and creates designated suspense counterlines. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Row details remain available in the account register. Do not run an LLM deduplication pass.",
+    inputSchema: {
+      artifact_id: z.string().trim().uuid(),
+      statement_id: z.string().trim().min(1).max(128)
+        .describe("Stable original attachment identifier or SHA-256; reuse it for the same source statement."),
+      account_id: positiveInteger("The single authoritative statement account."),
+      suspense_account_id: positiveInteger("Optional compatibility check; when supplied it must be the designated suspense account for this currency.").optional(),
+      beginning_balance: beginningBalanceAnswerSchema,
+      ending_balance: endingBalanceAnswerSchema,
+      include_row_details: z.boolean().default(false)
+        .describe("Return row-level preview details only when the user explicitly asked to see them; otherwise return the compact summary."),
+      dry_run: z.literal(true).default(true),
+    },
+    outputSchema: statementArtifactWorkflowOutput,
+    annotations: writesData,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["start_single_account_statement_import", "list_account_objects"],
+      attachmentHints: [
+        "Transform the complete source to the canonical schema returned by start_single_account_statement_import, then upload that generated JSON Lines file.",
+        "The artifact contains every source row for validation; the user-facing response should summarize the preview unless row details are requested.",
+      ],
+      artifactUpload: singleAccountStatementArtifactUpload,
+      objectInputs: [
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
+        { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
+      ],
+    }),
+  }, async ({ artifact_id, include_row_details, ...answers }) => safeWorkflowResult(async () => {
+    const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
+    const parsed = oneSidedStatementLinesSchema.safeParse(
+      parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type),
+    );
+    if (!parsed.success) throw Object.assign(new Error("The statement artifact does not match the canonical line schema."), {
+      code: "INVALID_SINGLE_ACCOUNT_STATEMENT_ARTIFACT",
+      details: parsed.error.issues,
+    });
+    const preview = await previewSingleAccountStatement({ ...answers, line_items: parsed.data });
+    if (include_row_details) return preview;
+    const { transactions: _transactions, import: fullImport, ...compactPreview } = preview;
+    const { transactions: _importTransactions, ...compactImport } = fullImport;
+    return { ...compactPreview, import: compactImport };
+  }, statementImportFailureOptions("import_single_account_statement_artifact")));
 
   registerTool("reconcile_account_through_date", {
     title: "Reconcile account through known balance",
