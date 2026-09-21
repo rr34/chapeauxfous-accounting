@@ -1133,9 +1133,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("list_account_objects", {
     title: "List account objects",
-    description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. account_id reads one exact object; otherwise follow nextCursor until complete. Use IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import.",
+    description: "Return stable owner-scoped accounting.account objects for an agent's first-class object picker. Omit account_id to search the returned page with result_filter. Supply account_id only when an exact accounting://accounts/{id} reference was supplied or returned; never infer it from a user, currency, or other ID. A missing exact account returns an empty object list. Follow nextCursor until complete. Use returned IDs and sourceRefs to bind an uploaded statement to a candidate account; confirm the account with the user before committing an import.",
     inputSchema: {
-      account_id: positiveInteger("Read one exact owner-scoped account object when known.").optional(),
+      account_id: positiveInteger("Read one exact owner-scoped account object only when its accounting://accounts/{id} reference is already known. Omit this field when searching by name.").optional(),
       limit: z.number().int().min(1).max(500).default(100),
       cursor: z.string().regex(/^\d+$/).nullable().optional(),
     },
@@ -1144,13 +1144,23 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     _meta: {
       ...toolMetadata("accounting.accounts", { attachmentHints: [
         "A statement attachment should carry a confirmed accounting.account sourceRef before import.",
+      ], objectInputs: [
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
       ] }),
       "agent-slayer/objects": accountObjectDescription,
     },
   }, async ({ account_id, limit, cursor }) => safeToolResult(async () => {
-    const page = account_id == null
-      ? await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor })
-      : { accounts: [await accounting.getAccount(pool, personId, account_id)], nextCursor: null };
+    let page;
+    if (account_id == null) {
+      page = await accounting.listAccountsPage(pool, personId, { limit, afterAccountId: cursor });
+    } else {
+      try {
+        page = { accounts: [await accounting.getAccount(pool, personId, account_id)], nextCursor: null };
+      } catch (error) {
+        if (error?.code !== "ACCOUNT_NOT_FOUND") throw error;
+        page = { accounts: [], nextCursor: null };
+      }
+    }
     const pathAccounts = await accounting.loadAccountObjectPaths(pool, personId, page.accounts);
     const objects = accountObjectContext(page.accounts, pathAccounts);
     return {
@@ -1208,7 +1218,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: accountUpdateOutput,
     annotations: idempotentWrite,
-    _meta: toolMetadata("accounting.accounts", { dependencies: ["list_accounts", "list_currencies"] }),
+    _meta: toolMetadata("accounting.accounts", {
+      dependencies: ["list_accounts", "list_currencies"],
+      objectInputs: [
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
+        { path: "/parent_account_id", objectType: "accounting.account", value: "id" },
+      ],
+    }),
   }, async (input) => safeToolResult(async () => {
     const updated = await accounting.updateAccount({
       personId,
@@ -1462,7 +1478,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     inputSchema: { account_id: positiveInteger("Owner-scoped account id to verify for permanent deletion.") },
     outputSchema: accountDeletionWorkflowOutput,
     annotations: writesData,
-    _meta: toolMetadata("accounting.accounts", { dependencies: ["list_accounts"] }),
+    _meta: toolMetadata("accounting.accounts", {
+      dependencies: ["list_accounts"],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
+    }),
   }, async ({ account_id }) => safeWorkflowResult(async () => {
     const result = await accounting.previewAccountDeletion({ pool, personId, accountId: account_id });
     return {
@@ -1627,7 +1646,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: transactionSearchOutput,
     annotations: readOnly,
-    _meta: toolMetadata("accounting.transactions"),
+    _meta: toolMetadata("accounting.transactions", { objectInputs: [
+      { path: "/account_id", objectType: "accounting.account", value: "id" },
+      { path: "/counter_account_id", objectType: "accounting.account", value: "id" },
+      { path: "/transaction_id", objectType: "accounting.transaction", value: "id" },
+    ] }),
   }, async (input) => safeToolResult(async () => {
     const page = await accounting.searchTransactionsPage(pool, personId, {
       text: input.text,
@@ -1678,7 +1701,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     outputSchema: transactionObjectOutput,
     annotations: readOnly,
     _meta: {
-      ...toolMetadata("accounting.transactions"),
+      ...toolMetadata("accounting.transactions", { objectInputs: [
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
+        { path: "/transaction_id", objectType: "accounting.transaction", value: "id" },
+      ] }),
       "agent-slayer/objects": transactionObjectDescription,
     },
   }, async (input) => safeToolResult(async () => {
@@ -1714,7 +1740,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     inputSchema: { transaction_id: positiveInteger("Transaction id.") },
     outputSchema: transactionReadOutput,
     annotations: readOnly,
-    _meta: toolMetadata("accounting.transactions"),
+    _meta: toolMetadata("accounting.transactions", { objectInputs: [
+      { path: "/transaction_id", objectType: "accounting.transaction", value: "id" },
+    ] }),
   }, async ({ transaction_id }) => safeToolResult(async () => ({
     transaction: await accounting.getTransaction(pool, personId, transaction_id),
   })));
@@ -1764,7 +1792,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: transactionMutationOutput,
     annotations: writesData,
-    _meta: toolMetadata("accounting.transactions", { dependencies: ["list_accounts", "list_currencies"] }),
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["list_accounts", "list_currencies"],
+      objectInputs: [
+        { path: "/line_items/*/account_id", objectType: "accounting.account", value: "id" },
+      ],
+    }),
   }, async (input) => safeToolResult(async () => {
     if (!input.post && input.line_items.some((line) => line.question != null)) {
       throw Object.assign(new Error("Accounting questions require a posted transaction."), {
@@ -1845,7 +1878,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     outputSchema: accountingQuestionObjectOutput,
     annotations: readOnly,
     _meta: {
-      ...toolMetadata("accounting.reconciliation"),
+      ...toolMetadata("accounting.reconciliation", { objectInputs: [
+        { path: "/line_item_id", objectType: "accounting.question", value: "id" },
+        { path: "/account_id", objectType: "accounting.account", value: "id" },
+      ] }),
       "agent-slayer/objects": accountingQuestionObjectDescription,
     },
   }, async ({ line_item_id, status, audience, account_id, limit, cursor }) => safeToolResult(async () => {
@@ -1871,7 +1907,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: accountingQuestionMutationOutput,
     annotations: idempotentWrite,
-    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["get_transaction"] }),
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["get_transaction"],
+      objectInputs: [{ path: "/line_item_id", objectType: "accounting.question", value: "id" }],
+    }),
   }, async ({ line_item_id, audience, prompt }) => safeToolResult(async () => {
     const question = await accounting.openAccountingQuestion({
       pool, personId, lineItemId: line_item_id, audience, prompt,
@@ -1895,7 +1934,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: accountingQuestionMutationOutput,
     annotations: idempotentWrite,
-    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_accounting_questions", "list_accounts"] }),
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_accounting_questions", "list_accounts"],
+      objectInputs: [
+        { path: "/line_item_id", objectType: "accounting.question", value: "id" },
+        { path: "/target_account_id", objectType: "accounting.account", value: "id" },
+      ],
+    }),
   }, async ({ line_item_id, target_account_id, resolution }) => safeToolResult(async () => {
     const resolved = await accounting.resolveAccountingQuestion({
       pool, personId, lineItemId: line_item_id, targetAccountId: target_account_id, resolution,
@@ -1923,6 +1968,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     _meta: toolMetadata("accounting.reconciliation", {
       dependencies: ["list_account_objects"],
       attachmentHints: ["Attach exactly one statement and bind it to one confirmed accounting.account object."],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
     }),
   }, async ({ account_id }) => safeToolResult(async () => {
     const accounts = await accounting.listAccounts(pool, personId);
@@ -2103,7 +2149,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: accountReconciliationOutput,
     annotations: idempotentWrite,
-    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["save_balance_assertion"] }),
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["save_balance_assertion"],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
+    }),
   }, async ({ account_id, balance_date }) => safeToolResult(async () => {
     const reconciliation = await accounting.reconcileAccountThroughDate({
       pool, personId, accountId: account_id, balanceDate: balance_date,
@@ -2377,7 +2426,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     outputSchema: transactionImportJobObjectOutput,
     annotations: readOnly,
     _meta: {
-      ...toolMetadata("accounting.transactions"),
+      ...toolMetadata("accounting.transactions", { objectInputs: [
+        { path: "/import_job_id", objectType: "accounting.transaction_import_job", value: "id" },
+      ] }),
       "agent-slayer/objects": transactionImportJobObjectDescription,
     },
   }, async ({ import_job_id, text, limit, cursor }) => safeToolResult(async () => {
@@ -2394,7 +2445,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     inputSchema: { import_job_id: z.string().trim().uuid() },
     outputSchema: transactionImportJobOutput,
     annotations: readOnly,
-    _meta: toolMetadata("accounting.transactions"),
+    _meta: toolMetadata("accounting.transactions", { objectInputs: [
+      { path: "/import_job_id", objectType: "accounting.transaction_import_job", value: "id" },
+    ] }),
   }, async ({ import_job_id }) => safeWorkflowResult(async () => ({
     job: await accounting.getTransactionImportJob({ pool, personId, importJobId: import_job_id }),
   })));
@@ -2580,7 +2633,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     outputSchema: balanceAssertionObjectOutput,
     annotations: readOnly,
     _meta: {
-      ...toolMetadata("accounting.reconciliation"),
+      ...toolMetadata("accounting.reconciliation", { objectInputs: [
+        { path: "/assertion_id", objectType: "accounting.balance_assertion", value: "id" },
+      ] }),
       "agent-slayer/objects": balanceAssertionObjectDescription,
     },
   }, async ({ assertion_id, limit, cursor }) => safeToolResult(async () => {
@@ -2601,7 +2656,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     },
     outputSchema: assertionMutationOutput,
     annotations: idempotentWrite,
-    _meta: toolMetadata("accounting.reconciliation", { dependencies: ["list_accounts"] }),
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_accounts"],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
+    }),
   }, async ({ account_id, balance_date, known_balance_units }) => safeToolResult(async () => {
     const args = { account_id, balance_date, known_balance_units };
     const assertion = await accounting.saveBalanceAssertion({

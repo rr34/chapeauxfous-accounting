@@ -7,6 +7,7 @@ export const accountObjectDescription = Object.freeze({
     title: "Accounting account",
     summary: "One owner-scoped ledger account that the user can name, inspect, or select for a statement.",
     aliases: ["ledger account", "bank account", "exchange account", "crypto account"],
+    identity: { field: "id", summary: "Stable owner-scoped ledger account ID." },
     reference: { field: "sourceRef", summary: "Stable owner-scoped accounting://accounts/{id} reference." },
     display: { field: "displayName", summary: "Full account path in the user's chart of accounts." },
     qualifiers: [
@@ -32,6 +33,7 @@ export const transactionObjectDescription = Object.freeze({
     title: "Accounting transaction",
     summary: "One dated owner-scoped ledger event whose postings can be inspected as a unit.",
     aliases: ["ledger transaction", "journal entry", "payment", "transfer"],
+    identity: { field: "id", summary: "Stable owner-scoped transaction ID." },
     reference: { field: "sourceRef", summary: "Stable accounting://transactions/{id} reference." },
     display: { field: "displayName", summary: "Accounting date and a compact transaction description." },
     qualifiers: [
@@ -56,6 +58,7 @@ export const accountingQuestionObjectDescription = Object.freeze({
     title: "Accounting question",
     summary: "One owner-scoped suspense posting awaiting or recording a classification decision.",
     aliases: ["unresolved charge", "suspense question", "classification question"],
+    identity: { field: "id", summary: "Stable suspense-posting line ID for this question." },
     reference: { field: "sourceRef", summary: "Stable accounting://questions/{lineItemId} reference." },
     display: { field: "displayName", summary: "Transaction date and a compact question prompt." },
     qualifiers: [
@@ -82,6 +85,7 @@ export const transactionImportJobObjectDescription = Object.freeze({
     title: "Transaction import job",
     summary: "One durable owner-scoped source-file transaction import that can be resumed or inspected.",
     aliases: ["import job", "file import", "transaction import"],
+    identity: { field: "id", summary: "Stable provider-owned import-job UUID." },
     reference: { field: "sourceRef", summary: "Stable accounting://transaction-import-jobs/{id} reference." },
     display: { field: "displayName", summary: "Source filename or system, creation date, and current job state." },
     qualifiers: [
@@ -102,6 +106,7 @@ export const balanceAssertionObjectDescription = Object.freeze({
     title: "Balance assertion",
     summary: "One owner-entered end-of-day account balance used for reconciliation.",
     aliases: ["closing balance", "statement balance", "known balance"],
+    identity: { field: "id", summary: "Stable owner-scoped balance-assertion ID." },
     reference: { field: "sourceRef", summary: "Stable accounting://balance-assertions/{id} reference." },
     display: { field: "displayName", summary: "Balance date, account name, and known native-currency amount." },
     qualifiers: [

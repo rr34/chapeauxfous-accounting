@@ -75,6 +75,7 @@ test("all five Accounting object read paths return the fields they advertise", a
       assert.equal(result.structuredContent.resultMetadata.complete, true);
       const [object] = result.structuredContent.objects;
       assert.equal(object.objectType, objectType);
+      assert.equal(object[description.identity.field], object.id);
       assert.equal(object[description.reference.field], sourceRef);
       assert.ok(object[description.display.field]);
       assert.deepEqual(result.structuredContent.resultMetadata.sourceRefs, [sourceRef]);
@@ -94,6 +95,40 @@ test("all five Accounting object read paths return the fields they advertise", a
     assert.match(importQuery.sql, /ORDER BY import_job_id DESC LIMIT \?/);
     assert.equal(importQuery.params[0], 7);
     assert.equal(importQuery.params.at(-1), 101);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("an unknown exact account object is an empty search result rather than a provider error", async () => {
+  const missing = Object.assign(new Error("Account not found."), {
+    code: "ACCOUNT_NOT_FOUND",
+    status: 404,
+  });
+  const server = createAccountingMcpServer({
+    personId: 7,
+    pool: { async query() { assert.fail("An empty account result must not query paths."); } },
+    services: {
+      async getAccount() { throw missing; },
+      async loadAccountObjectPaths(_pool, _personId, accounts) {
+        assert.deepEqual(accounts, []);
+        return [];
+      },
+    },
+  });
+  const client = new Client({ name: "accounting-missing-object-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const result = await client.callTool({ name: "list_account_objects", arguments: { account_id: 1 } });
+    assert.notEqual(result.isError, true);
+    assert.equal(result.structuredContent.status, "success");
+    assert.deepEqual(result.structuredContent.objects, []);
+    assert.equal(result.structuredContent.resultMetadata.complete, true);
+    assert.equal(result.structuredContent.resultMetadata.returned, 0);
+    assert.deepEqual(result.structuredContent.resultMetadata.sourceRefs, []);
   } finally {
     await client.close();
     await server.close();

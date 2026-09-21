@@ -519,12 +519,21 @@ export const accountingCapabilityManifest = Object.freeze({
   ],
 });
 
-export function toolMetadata(capabilityId, { dependencies = [], attachmentHints = [], artifactUpload = null } = {}) {
+export function toolMetadata(capabilityId, {
+  dependencies = [], attachmentHints = [], artifactUpload = null, objectInputs = [],
+} = {}) {
   return {
     "agent-slayer/capabilityId": capabilityId,
     "agent-slayer/dependencies": dependencies,
     "agent-slayer/attachmentHints": attachmentHints,
     "agent-slayer/contractVersion": MCP_CONTRACT_VERSION,
     ...(artifactUpload == null ? {} : { "agent-slayer/artifactUpload": artifactUpload }),
+    ...(objectInputs.length ? {
+      "agent-slayer/object-input-bindings": {
+        protocol: "agent-slayer.object-input-bindings",
+        version: 1,
+        bindings: objectInputs,
+      },
+    } : {}),
   };
 }

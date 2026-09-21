@@ -8,7 +8,7 @@ const descriptions = {
   list_currencies: read("Find accessible currencies, crypto assets, securities, and their native-unit scales before using an accounting unit."),
   create_currency: mutate("Create one private accounting unit when its code, type, name, and scale are known.", ["CREATE"]),
   list_accounts: read("Read the owner's ledger accounts and balances to find a named account, including a Coinbase Bitcoin account. This checks Accounting's chart of accounts."),
-  list_account_objects: read("List stable accounting.account objects to identify and confirm the ledger account for an attached statement."),
+  list_account_objects: read("List stable accounting.account objects to identify and confirm the ledger account for an attached statement. Omit account_id for name searches; use it only from a verified accounting account reference."),
   create_account: mutate("Create an owner-scoped ledger account after its parent, type, and currency have been chosen; the owner may designate it for unresolved imports.", ["CREATE"]),
   update_account: mutate("Change an existing ledger account's name, parent, type, currency, placeholder status, or suspense designation.", ["UPDATE"]),
   import_account_tree: mutate("Preview one complete account-tree import, including new currency requirements, before any ledger accounts are created.", ["CREATE"]),
