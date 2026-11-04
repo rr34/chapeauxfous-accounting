@@ -41,14 +41,15 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   const savedStatementBalances = [];
   let reconciledAccount;
   let resolvedStatementJobOptions;
-  const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
+  const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId,
+    transactionCount = 1, sourceSystem = "source_app" }) => ({
     status,
     dryRun: !ledgerChanged,
     ledgerChanged,
     readyToCommit,
     importPlanId,
     importPlanExpiresAt: importPlanId ? "2026-08-25T18:42:00.000Z" : null,
-    sourceSystem: "source_app",
+    sourceSystem,
     submittedTransactionCount: transactionCount,
     uniqueTransactionCount: transactionCount,
     duplicateInputTransactionCount: 0,
@@ -368,8 +369,21 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     async commitTransactionImportPlan(input) {
       committedTransactionPlan = input;
+      const statement = input.importPlanId.startsWith("55555555");
       return { ...transactionImportFixture({ status: "committed", readyToCommit: false, ledgerChanged: true,
-        importPlanId: input.importPlanId }), committed: true, alreadyCommitted: false,
+        importPlanId: input.importPlanId,
+        sourceSystem: statement ? "single_account_statement" : "source_app" }),
+        ...(statement ? {
+          balanceAssertions: [
+            { assertionId: 12, accountId: 10, balanceDate: "2025-12-31",
+              sourceKnownBalanceUnits: "10000", storedKnownBalanceUnits: "10000", status: "created" },
+            { assertionId: 13, accountId: 10, balanceDate: "2026-01-31",
+              sourceKnownBalanceUnits: "8750", storedKnownBalanceUnits: "8750", status: "created" },
+          ],
+          statementEvidence: { statementImportJobId: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
+            evidenceFileId: 81, lineItemLinkCount: 1, balanceAssertionLinkCount: 2 },
+        } : {}),
+        committed: true, alreadyCommitted: false,
         expiresAt: "2026-08-25T18:42:00.000Z", previewDigest: `sha256:${"b".repeat(64)}`,
         summary: { transactionsCreated: 1, transactionsReused: 0, lineItemsCreated: 2,
           lineItemsReused: 0, rejectedTransactions: 0 } };
@@ -1125,6 +1139,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(statementGuide.structuredContent.suspenseAccount, null);
   assert.match(statementGuide.structuredContent.orderedQuestions[0].prompt,
     /period start date independently of the opening balance/);
+  assert.equal(Object.hasOwn(statementGuide.structuredContent.orderedQuestions[0].answerShape,
+    "balance_date_meaning"), false);
+  assert.match(statementGuide.structuredContent.rules.join(" "),
+    /opening balance always applies at the beginning.*previous calendar day/i);
   const statementJobObjects = await client.callTool({
     name: "list_statement_import_job_objects", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
@@ -1173,7 +1191,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "missing-balance", account_id: 10,
-      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_date: { found: false, value: null },
       start_amount: { found: false, value: null },
       end_date: { found: true, value: "2026-01-31" },
       end_amount: { found: true, value: "87.50" },
@@ -1193,8 +1211,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "independent-evidence-values", account_id: 10,
-      start_date: { found: true, value: "2026-01-01",
-        balance_date_meaning: "first_included_transaction_date" },
+      start_date: { found: true, value: "2026-01-01" },
       start_amount: { found: false, value: null },
       end_date: { found: false, value: null },
       end_amount: { found: true, value: "87.50" },
@@ -1211,7 +1228,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "transactions-only", account_id: 10,
-      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_date: { found: false, value: null },
       start_amount: { found: false, value: null },
       end_date: { found: false, value: null },
       end_amount: { found: false, value: null },
@@ -1227,7 +1244,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "candidate-overlap", account_id: 10,
-      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_date: { found: false, value: null },
       start_amount: { found: false, value: null },
       end_date: { found: false, value: null },
       end_amount: { found: false, value: null },
@@ -1243,7 +1260,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "no-designation", account_id: 10,
-      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_date: { found: false, value: null },
       start_amount: { found: false, value: null },
       end_date: { found: false, value: null },
       end_amount: { found: false, value: null },
@@ -1261,7 +1278,6 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     arguments: {
       statement_id: "bank-statement-2026-01", account_id: 10,
       start_date: { found: true, value: "2026-01-01",
-        balance_date_meaning: "first_included_transaction_date",
         available_text: "Statement period begins January 1" },
       start_amount: { found: true, value: "100.00", available_text: "Opening balance" },
       end_date: { found: true, value: "2026-01-31", available_text: "Statement period ends January 31" },
@@ -1294,6 +1310,16 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     /Nothing has been posted yet\. Approve this import\?$/);
   assert.doesNotMatch(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /line item|included|excluded/i);
+  const statementCommit = await client.callTool({
+    name: "commit_transaction_import",
+    arguments: { import_plan_id: "55555555-5555-4555-8555-555555555555" },
+  });
+  assert.equal(statementCommit.structuredContent.completionNote,
+    "Statement import succeeded. Added 1 new transaction. Recorded 2 new known balances. 1 imported transaction still needs a category. The original PDF remains linked as evidence.");
+  assert.equal(statementCommit.structuredContent.import.completionNote,
+    statementCommit.structuredContent.completionNote);
+  assert.doesNotMatch(statementCommit.structuredContent.completionNote,
+    /line item|rejected|excluded/i);
   assert.deepEqual(savedStatementBalances, []);
   assert.deepEqual({ ...oneSidedImport, lines: oneSidedImport.lines.map((line) => ({ ...line,
     externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })),
@@ -1321,7 +1347,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       artifact_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       statement_id: `sha256:${"6".repeat(64)}`,
       account_id: 10,
-      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_date: { found: false, value: null },
       start_amount: { found: false, value: null },
       end_date: { found: false, value: null },
       end_amount: { found: false, value: null },
@@ -1458,7 +1484,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.13.1");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.14.0");
 
   await handler.close();
 });

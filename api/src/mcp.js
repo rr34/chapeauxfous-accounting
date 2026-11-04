@@ -502,6 +502,37 @@ function statementJobObject(job) {
   };
 }
 
+function statementCommitCompletionNote(result) {
+  const createdTransactions = result.createdTransactionCount ?? 0;
+  const alreadyAccountedFor = (result.reusedTransactionCount ?? 0)
+    + (result.excludedTransactionCount ?? 0);
+  const createdBalances = (result.balanceAssertions ?? [])
+    .filter((assertion) => assertion.status === "created").length;
+  const existingBalances = (result.balanceAssertions ?? [])
+    .filter((assertion) => assertion.status === "preserved").length;
+  const sentences = [result.alreadyCommitted
+    ? "The statement import was already complete."
+    : "Statement import succeeded."];
+  sentences.push(createdTransactions
+    ? `Added ${createdTransactions} new transaction${createdTransactions === 1 ? "" : "s"}.`
+    : "No new transactions were added.");
+  if (alreadyAccountedFor) {
+    sentences.push(`${alreadyAccountedFor} statement transaction${alreadyAccountedFor === 1
+      ? " was already accounted for and was" : "s were already accounted for and were"} not added again.`);
+  }
+  if (createdBalances) {
+    sentences.push(`Recorded ${createdBalances} new known balance${createdBalances === 1 ? "" : "s"}.`);
+  }
+  if (existingBalances) {
+    sentences.push(`${existingBalances} known balance${existingBalances === 1 ? " was" : "s were"} already recorded.`);
+  }
+  if (createdTransactions) {
+    sentences.push(`${createdTransactions} imported transaction${createdTransactions === 1 ? " still needs" : "s still need"} a category.`);
+  }
+  if (result.statementEvidence) sentences.push("The original PDF remains linked as evidence.");
+  return sentences.join(" ");
+}
+
 function transactionDeletionStatusRecovery(result, deletionPlanId) {
   if (!["expired", "invalidated"].includes(result.status)) return result;
   return {
@@ -2405,10 +2436,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       },
       orderedQuestions: [
         { order: 1, key: "start_date",
-          prompt: "Determine the statement period start date independently of the opening balance. Extract the date wherever it appears, then identify whether it is the first included transaction date or an explicit end-of-day balance date. A period start is normally the first included date, so an opening-balance assertion is effective on the previous calendar day.",
-          answerShape: { found: "boolean", value: "YYYY-MM-DD or null",
-            balance_date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
-            available_text: "string or null" } },
+          prompt: "Determine the statement period start date independently of the opening balance. Extract the date wherever it appears. The opening balance always applies at the beginning of this date, and Accounting records it as a known end-of-day balance on the previous calendar day.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
         { order: 2, key: "start_amount",
           prompt: "Determine the opening balance independently of the period start date. Extract the signed amount exactly even when it appears elsewhere in the document.",
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
@@ -2433,7 +2462,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
-        "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day. Use explicit_end_of_day_balance_date only when the document clearly gives the balance's end-of-day effective date.",
+        "A statement opening balance always applies at the beginning of the statement start date. Accounting records it as a known end-of-day balance on the previous calendar day.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Never infer that one is absent merely because it is not physically adjacent to another.",
         "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
         "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
@@ -2467,10 +2496,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       },
       orderedQuestions: [
         { order: 1, key: "start_date",
-          prompt: "Determine the statement period start date across the complete original PDF independently of the opening balance. Extract it wherever it appears and identify whether it is the first included transaction date or an explicit end-of-day balance date.",
-          answerShape: { found: "boolean", value: "YYYY-MM-DD or null",
-            balance_date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
-            available_text: "string or null" } },
+          prompt: "Determine the statement period start date across the complete original PDF independently of the opening balance. Extract it wherever it appears. The opening balance always applies at the beginning of this date, and Accounting records it as a known end-of-day balance on the previous calendar day.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
         { order: 2, key: "start_amount",
           prompt: "Determine the opening balance across the complete original PDF independently of the period start date. Extract the signed amount exactly wherever it appears.",
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
@@ -2497,7 +2524,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
-        "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day.",
+        "A statement opening balance always applies at the beginning of the statement start date. Accounting records it as a known end-of-day balance on the previous calendar day.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Search the entire document for each one; do not require related values to be physically adjacent.",
         "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
         "Do not supply or choose a suspense account. Accounting resolves its configured account internally.",
@@ -2603,15 +2630,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     found: z.boolean(), value: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
     available_text: z.string().trim().max(16000).nullable().optional(),
   }).strict().superRefine(validateDetermination);
-  const statementStartDateAnswerSchema = z.object({
-    found: z.boolean(), value: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
-    balance_date_meaning: z.enum(["first_included_transaction_date", "explicit_end_of_day_balance_date"]).nullable(),
-    available_text: z.string().trim().max(16000).nullable().optional(),
-  }).strict().superRefine((value, context) => {
-    validateDetermination(value, context);
-    if (!value.found && value.balance_date_meaning != null) context.addIssue({ code: "custom",
-      path: ["balance_date_meaning"], message: "A missing start date cannot have a balance-date meaning." });
-  });
+  const statementStartDateAnswerSchema = statementDateAnswerSchema;
   const statementAmountAnswerSchema = z.object({
     found: z.boolean(), value: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
     available_text: z.string().trim().max(16000).nullable().optional(),
@@ -2631,9 +2650,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     statement_import_job_id = null, evidence_file_id = null,
     start_date, start_amount, end_date, end_amount, line_items }) => {
     const openingBalanceDate = start_date.found && start_amount.found
-      && start_date.balance_date_meaning != null
-      ? (start_date.balance_date_meaning === "first_included_transaction_date"
-        ? previousCalendarDate(start_date.value) : start_date.value) : null;
+      ? previousCalendarDate(start_date.value) : null;
     const closingBalanceDate = end_date.found && end_amount.found ? end_date.value : null;
     const accounts = await accounting.listAccounts(pool, personId);
     const account = accounts.find((candidate) => candidate.id === account_id);
@@ -3343,7 +3360,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("commit_transaction_import", {
     title: "Commit transaction import",
-    description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, per-line valuation values, balance, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent.",
+    description: "After the user confirms a successful transaction dry run, commit that exact durable plan using only import_plan_id. The server revalidates account paths, currencies, scales, per-line valuation values, balance, and source-ID conflicts; then it atomically creates the planned batch and returns actual created/reused counts. Plans are owner-scoped and expiring, and repeated calls are idempotent. For a single-account statement, present completionNote as the user-facing outcome and do not replace it with internal line-item, rejected, or excluded counters.",
     inputSchema: {
       import_plan_id: z.string().trim().uuid().describe("importPlanId returned by import_transactions."),
     },
@@ -3352,11 +3369,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     _meta: toolMetadata("accounting.transactions", { dependencies: ["import_transactions"] }),
   }, async ({ import_plan_id }) => safeWorkflowResult(async () => {
     const imported = await accounting.commitTransactionImportPlan({ pool, personId, importPlanId: import_plan_id });
+    const completed = imported.sourceSystem === "single_account_statement"
+      ? { ...imported, completionNote: statementCommitCompletionNote(imported) }
+      : imported;
     return {
-      ...imported,
-      import: imported,
+      ...completed,
+      import: completed,
       effectReceipt: effectReceipt("commit_transaction_import", { import_plan_id },
-        imported.alreadyCommitted ? "unchanged" : "committed", [
+        completed.alreadyCommitted ? "unchanged" : "committed", [
           { type: "transaction_import_plan", id: import_plan_id },
         ]),
     };

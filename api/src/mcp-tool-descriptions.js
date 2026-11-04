@@ -55,7 +55,7 @@ const descriptions = {
   commit_transaction_import_job: mutate("After confirmation, add ready imported transactions to the ledger while retaining import misfits for correction.", ["EXECUTE"]),
   import_transactions: mutate("Preview a complete balanced multi-account transaction batch and save an exact plan before ledger commit. One-account statements use import_single_account_statement.", ["CREATE"]),
   get_transaction_import_plan: read("Read a saved transaction-import plan's status, preview binding, and stored commit result."),
-  commit_transaction_import: mutate("Commit the exact confirmed transaction-import plan after server revalidation.", ["EXECUTE"]),
+  commit_transaction_import: mutate("Commit the exact confirmed transaction-import plan after server revalidation; statement results include a clean user-facing completion note.", ["EXECUTE"]),
   list_balance_assertions: read("Read known balances and ledger differences for reporting; use list_balance_assertion_objects to identify an assertion for another tool's assertion ID input."),
   list_balance_assertion_objects: read("Find dated owner-scoped balance assertion objects or one exact assertion by ID."),
   save_balance_assertion: mutate("Store or replace one known end-of-day native-unit account balance and report its ledger difference.", ["CREATE", "UPDATE"]),
