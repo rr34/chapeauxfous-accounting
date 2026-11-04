@@ -4,6 +4,7 @@ import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprot
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
+  bindArtifactToImportJob,
   mountArtifactUploadRoutes,
   parseCanonicalStatementArtifact,
   readCompleteArtifact,
@@ -91,7 +92,9 @@ import {
   accountingQuestionObjectDescription,
   balanceAssertionObjectDescription,
   currencyObjectDescription,
+  evidenceFileObjectDescription,
   lineItemObjectDescription,
+  statementImportJobObjectDescription,
   transactionImportJobObjectDescription,
   transactionObjectDescription,
 } from "./mcp-object-descriptions.js";
@@ -143,6 +146,15 @@ import {
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
 import { searchTransactionsPage } from "./transaction-search.js";
+import {
+  bindStatementImportPreview,
+  getStatementImportJob as getSingleAccountStatementImportJob,
+  listEvidenceFileObjectsPage,
+  listStatementImportJobObjectsPage,
+  resolveEvidenceRoot,
+  sendEvidenceFileContent,
+  startStatementImportJob,
+} from "./statement-import-jobs.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -385,7 +397,7 @@ function transactionDeletionStatusRecovery(result, deletionPlanId) {
   };
 }
 
-export function createAccountingMcpServer({ personId, pool, artifactRoot, services = {} }) {
+export function createAccountingMcpServer({ personId, pool, artifactRoot, evidenceRoot, services = {} }) {
   const injectedPage = (list, key) => async (...args) => {
     const options = args.at(-1) ?? {};
     const limit = Number(options.limit) || 100;
@@ -431,6 +443,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     getTransactionImportJob: services.getTransactionImportJob ?? getTransactionImportJob,
     listTransactionImportJobs: services.listTransactionImportJobs ?? listTransactionImportJobs,
     listTransactionImportJobObjectsPage: services.listTransactionImportJobObjectsPage ?? listTransactionImportJobObjectsPage,
+    getStatementImportJob: services.getStatementImportJob ?? getSingleAccountStatementImportJob,
+    startStatementImportJob: services.startStatementImportJob ?? startStatementImportJob,
+    bindStatementImportPreview: services.bindStatementImportPreview ?? bindStatementImportPreview,
+    listStatementImportJobObjectsPage: services.listStatementImportJobObjectsPage
+      ?? listStatementImportJobObjectsPage,
+    listEvidenceFileObjectsPage: services.listEvidenceFileObjectsPage ?? listEvidenceFileObjectsPage,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
@@ -910,7 +928,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     analysis: statementObservationAnalysisSchema,
     resultMetadata: resultMetadataSchema,
   });
-  const singleAccountStatementGuideOutput = successOutputSchema({
+  const singleAccountStatementGuideShape = {
     workflow: z.literal("single_account_statement"),
     workflowState: z.literal("instructions_only"),
     completionNote: z.string().min(1),
@@ -930,6 +948,53 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     nextTool: z.literal("import_single_account_statement_artifact"),
     inlineNextTool: z.literal("import_single_account_statement"),
     rules: z.array(z.string().min(1)),
+  };
+  const singleAccountStatementGuideOutput = successOutputSchema(singleAccountStatementGuideShape);
+  const evidenceFileObjectSchema = z.object({
+    objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1), fileName: z.string().min(1),
+    mediaType: z.literal("application/pdf"), byteSize: z.number().int().positive(),
+    sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/), createdAt: z.string().min(1),
+  });
+  const statementDownloadSchema = z.object({
+    contractVersion: z.literal(1), transportId: z.literal("statement_evidence_download"),
+    evidenceFileId: z.number().int().positive(), sourceRef: z.string().min(1),
+    fileName: z.string().min(1), mediaType: z.literal("application/pdf"),
+    byteSize: z.number().int().positive(), sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    method: z.literal("GET"), endpointPath: z.string().startsWith("/mcp/evidence-files/"),
+    acceptsByteRanges: z.literal(true),
+  });
+  const statementImportJobSchema = z.object({
+    objectType: z.literal("accounting.statement_import_job"), id: z.string().uuid(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+    status: z.enum(["ready", "processing", "preview_ready", "committed"]),
+    account: z.object({
+      objectType: z.literal("accounting.account"), id: z.number().int().positive(),
+      sourceRef: z.string().min(1), displayName: z.string().min(1), currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18),
+    }),
+    evidenceFile: evidenceFileObjectSchema,
+    sourceDocumentId: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    importPlanId: z.string().uuid().nullable(), canonicalArtifactId: z.string().uuid().nullable(),
+    createdAt: z.string().min(1), updatedAt: z.string().min(1), committedAt: z.string().nullable(),
+    download: statementDownloadSchema, copiedPrompt: z.string().min(1),
+  });
+  const statementImportJobObjectOutput = successOutputSchema({
+    objects: z.array(statementImportJobSchema), resultMetadata: resultMetadataSchema,
+  });
+  const statementImportJobOutput = successOutputSchema({ job: statementImportJobSchema });
+  const statementJobGuideShape = {
+    ...singleAccountStatementGuideShape,
+    nextTool: z.literal("submit_statement_import_job_artifact"),
+    inlineNextTool: z.literal("import_single_account_statement"),
+  };
+  const statementImportJobStartOutput = successOutputSchema({
+    job: statementImportJobSchema,
+    extraction: z.object(statementJobGuideShape),
+    effectReceipt: effectReceiptSchema,
+  });
+  const evidenceFileObjectOutput = successOutputSchema({
+    objects: z.array(evidenceFileObjectSchema), resultMetadata: resultMetadataSchema,
   });
   const referenceRateListOutput = successOutputSchema({
     referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
@@ -1016,11 +1081,25 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     summary: transactionImportSummarySchema.optional(), committed: z.boolean().optional(), alreadyCommitted: z.boolean().optional(),
     reconciliationValidation: reconciliationValidationSchema.optional(),
     balanceAssertions: z.array(z.object({
+      assertionId: z.number().int().positive().nullable().optional(),
       accountId: z.number().int().positive(), balanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       sourceKnownBalanceUnits: z.string().regex(/^-?\d+$/),
       storedKnownBalanceUnits: z.string().regex(/^-?\d+$/).nullable(),
       status: z.enum(["planned", "created", "preserved"]),
     })).optional(),
+    statementEvidence: z.object({
+      statementImportJobId: z.string().uuid(), evidenceFileId: z.number().int().positive(),
+      lineItemLinkCount: z.number().int().nonnegative(),
+      balanceAssertionLinkCount: z.number().int().nonnegative(),
+    }).optional(),
+    workflowState: z.enum(["preview_saved", "preview_not_saved"]).optional(),
+    completionNote: z.string().min(1).optional(),
+    reviewDestination: z.object({
+      surface: z.literal("account_register"),
+      accountId: z.number().int().positive(),
+      accountDisplayName: z.string().min(1),
+      state: z.literal("pending_review"),
+    }).optional(),
     requiredAction: z.enum(["REQUEST_USER_CONFIRMATION", "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN"]).optional(),
     nextAction: z.union([
       z.object({ type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
@@ -1051,6 +1130,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     statementArtifactImportSchema.extend({
       contractVersion: z.literal(MCP_CONTRACT_VERSION), import: statementArtifactImportSchema,
       effectReceipt: effectReceiptSchema.optional(),
+    }),
+    structuredErrorSchema,
+  ]);
+  const statementJobArtifactWorkflowOutput = z.union([
+    statementArtifactImportSchema.extend({
+      contractVersion: z.literal(MCP_CONTRACT_VERSION), import: statementArtifactImportSchema,
+      job: statementImportJobSchema,
+      effectReceipt: effectReceiptSchema,
     }),
     structuredErrorSchema,
   ]);
@@ -2204,10 +2291,155 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day. Use explicit_end_of_day_balance_date only when the document clearly gives the balance's end-of-day effective date.",
         "Opening and closing balances are optional. Record a dated balance when the source supplies one, then continue importing the transaction rows when either or both are absent.",
         "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
-        "Accounting selects the one user-designated suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
+        "Do not supply or choose a suspense account in the preview call. Accounting selects the one user-designated active, postable suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
         "The statement account and suspense account must be different accounts.",
       ],
     };
+  }));
+
+  const statementJobExtractionGuide = async (accountId) => {
+    const accounts = await accounting.listAccounts(pool, personId);
+    const account = accounts.find((candidate) => candidate.id === accountId);
+    if (!account) throw Object.assign(new Error("Statement account not found."), {
+      status: 404, code: "ACCOUNT_NOT_FOUND",
+    });
+    const paths = new Map(accountPathContext(accounts, { includeArchived: true })
+      .map((item) => [item.accountId, item.fullName]));
+    const designated = accounts.find((candidate) => candidate.suspense && candidate.currencyId === account.currencyId
+      && !candidate.placeholder && candidate.archivedAt == null);
+    return {
+      workflow: "single_account_statement",
+      workflowState: "instructions_only",
+      completionNote: "The original PDF is saved in Accounting and this job is processing. Submit one complete canonical artifact to create a pending preview; no ledger data has been posted.",
+      account: {
+        objectType: "accounting.account", id: account.id, sourceRef: `accounting://accounts/${account.id}`,
+        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode, scale: account.scale,
+      },
+      suspenseAccount: designated == null ? null : {
+        id: designated.id, sourceRef: `accounting://accounts/${designated.id}`,
+        displayName: paths.get(designated.id) ?? designated.name, currencyCode: designated.currencyCode,
+      },
+      orderedQuestions: [
+        { order: 1, key: "beginning_balance",
+          prompt: "Does the complete original PDF contain a beginning balance and a date? Extract both exactly, then identify whether the printed date is the first included transaction date or an explicit end-of-day balance date.",
+          answerShape: { found: "boolean", date: "YYYY-MM-DD or null",
+            date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
+            amount_decimal: "string or null", available_text: "string or null" } },
+        { order: 2, key: "ending_balance",
+          prompt: "Does the complete original PDF contain an ending balance with a date? If yes, extract the date and amount exactly as printed.",
+          answerShape: { found: "boolean", date: "YYYY-MM-DD or null", amount_decimal: "string or null", available_text: "string or null" } },
+        { order: 3, key: "line_items",
+          prompt: "What are all line items into or out of this account across the complete PDF? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
+          answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
+        { order: 4, key: "available_text",
+          prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text without inventing a category.",
+          answerShape: [{ source_record_id: "same row id as question 3", available_text: "string or null" }] },
+      ],
+      canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
+      artifactUpload: singleAccountStatementArtifactUpload,
+      nextTool: "submit_statement_import_job_artifact",
+      inlineNextTool: "import_single_account_statement",
+      rules: [
+        "Process the complete original PDF supplied by Accounting. Do not substitute server-extracted text, filter small print, or preselect pages.",
+        "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document.",
+        "Use only evidence visible in this one statement.",
+        "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
+        "Preserve every printed amount and all useful transaction text.",
+        "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day.",
+        "Opening and closing balances are optional. Continue importing rows when either or both are absent.",
+        "Do not supply or choose a suspense account. Accounting resolves its configured account internally.",
+        "Create only a pending preview. Never commit without the user's later approval.",
+      ],
+    };
+  };
+
+  registerTool("list_statement_import_job_objects", {
+    title: "Find statement import jobs",
+    description: "Canonical owner-scoped resolver for a copied accounting://statement-import-jobs/{id} reference. Use the exact ID from the user's copied prompt to bind one disposable statement-processing job before reading or starting it. Results contain metadata and stable references, not PDF bytes.",
+    inputSchema: {
+      statement_import_job_id: z.string().trim().uuid().optional(),
+      account_id: positiveInteger("Optional statement account filter.").optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().uuid().nullable().optional(),
+    },
+    outputSchema: statementImportJobObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.reconciliation", {
+        dependencies: ["list_account_objects"],
+        objectInputs: [
+          { path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id", allowUnbound: true },
+          { path: "/account_id", objectType: "accounting.account", value: "id" },
+        ],
+      }),
+      "agent-slayer/objects": statementImportJobObjectDescription,
+    },
+  }, async ({ statement_import_job_id, account_id, limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listStatementImportJobObjectsPage(pool, personId, {
+      statementImportJobId: statement_import_job_id, accountId: account_id, limit, cursor,
+    });
+    return { objects: page.objects,
+      resultMetadata: pageMetadata(page.objects, page.nextCursor, "statement-import-jobs") };
+  }));
+
+  registerTool("list_evidence_file_objects", {
+    title: "Find evidence files",
+    description: "Read owner-scoped immutable evidence-file identities and integrity metadata. This tool never returns file bytes; use the exact download descriptor from the owning statement job for byte access.",
+    inputSchema: {
+      evidence_file_id: positiveInteger("Read one exact owner-scoped evidence file when known.").optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().regex(/^\d+$/).nullable().optional(),
+    },
+    outputSchema: evidenceFileObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.reconciliation", {
+        objectInputs: [{ path: "/evidence_file_id", objectType: "accounting.evidence_file", value: "id", allowUnbound: true }],
+      }),
+      "agent-slayer/objects": evidenceFileObjectDescription,
+    },
+  }, async ({ evidence_file_id, limit, cursor }) => safeToolResult(async () => {
+    const page = await accounting.listEvidenceFileObjectsPage(pool, personId, {
+      evidenceFileId: evidence_file_id, limit, cursor,
+    });
+    return { objects: page.objects,
+      resultMetadata: pageMetadata(page.objects, page.nextCursor, "evidence-files") };
+  }));
+
+  registerTool("get_statement_import_job", {
+    title: "Read statement import job",
+    description: "Read one already-identified statement job, its bound account, immutable PDF metadata, and authenticated same-origin ranged-download descriptor. The descriptor identifies the complete original application/pdf; the tool result contains no PDF bytes or extracted text.",
+    inputSchema: { statement_import_job_id: z.string().trim().uuid() },
+    outputSchema: statementImportJobOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_statement_import_job_objects"],
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id" }],
+    }),
+  }, async ({ statement_import_job_id }) => safeToolResult(async () => ({
+    job: await accounting.getStatementImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id }),
+  })));
+
+  registerTool("start_statement_import_job", {
+    title: "Start statement import job",
+    description: "Atomically start one ready statement job in the owner's serial workflow and return the exact original-PDF download descriptor plus the current extraction requirements. Retrieve the complete PDF through the authenticated data plane and process the whole document directly; do not substitute server-side extracted text. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
+    inputSchema: { statement_import_job_id: z.string().trim().uuid() },
+    outputSchema: statementImportJobStartOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_statement_import_job_objects"],
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id" }],
+    }),
+  }, async ({ statement_import_job_id }) => safeToolResult(async () => {
+    const { job, transitioned } = await accounting.startStatementImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id });
+    return { job, extraction: await statementJobExtractionGuide(job.account.id),
+      effectReceipt: effectReceipt("start_statement_import_job", { statement_import_job_id },
+        transitioned ? "updated" : "unchanged", [
+          { type: "statement_import_job", id: statement_import_job_id },
+          { type: "evidence_file", id: job.evidenceFile.id },
+        ]) };
   }));
 
   const statementBalanceAnswerFields = {
@@ -2232,7 +2464,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
   }).strict();
   const oneSidedStatementLinesSchema = z.array(oneSidedStatementLineSchema)
     .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
-  const previewSingleAccountStatement = async ({ statement_id, account_id, suspense_account_id,
+  const previewSingleAccountStatement = async ({ statement_id, account_id,
+    statement_import_job_id = null, evidence_file_id = null,
     beginning_balance, ending_balance, line_items }) => {
     const openingBalanceDate = beginning_balance.found && beginning_balance.date != null
       && beginning_balance.amount_decimal != null && beginning_balance.date_meaning != null
@@ -2287,14 +2520,18 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         questionPrompt: `Review possible duplicate ledger transaction${possibleTransactionIds.length === 1 ? "" : "s"} ${possibleTransactionIds.join(", ")} for source row ${JSON.stringify(line_items[index].source_record_id)}. Confirm whether this is a distinct entry, then identify or match its other side.`,
       } : {}) };
     });
+    const accountDisplayName = accountPathContext(accounts, { includeArchived: true })
+      .find((item) => item.accountId === account_id)?.fullName ?? account.name;
     const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
       pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
-      suspenseAccountId: suspense_account_id, valuationCurrencyCode: account.currencyCode,
+      valuationCurrencyCode: account.currencyCode,
       questionAudience: "human", lines: reviewedRows,
       knownBalanceAssertions,
       importReview: {
         accountId: account_id,
         statementId: statement_id,
+        ...(statement_import_job_id == null ? {} : { statementJobId: statement_import_job_id }),
+        ...(evidence_file_id == null ? {} : { evidenceFileId: evidence_file_id }),
         decisions: rows.map((line, index) => {
           const decision = decisionsByObservation.get(analysis.observations[index].id);
           return {
@@ -2307,21 +2544,23 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
           };
         }),
       },
-    }));
+    }), { reviewDestination: { accountId: account_id, accountDisplayName } });
     return { ...imported, import: imported };
   };
   const statementImportFailureOptions = (retryTool) => ({ retryTool, preserveEntireBatch: true,
-    failureMapper: (error) => error?.code === "SUSPENSE_ACCOUNT_NOT_CONFIGURED"
-      ? { requiredAction: "MARK_SUSPENSE_ACCOUNT" } : null });
+    failureMapper: (error) => ({
+      message: `No statement import preview was saved, so nothing will appear in the account register and there is nothing to confirm or commit. ${String(error?.message ?? "The preview failed.")}`,
+      ...(error?.code === "SUSPENSE_ACCOUNT_NOT_CONFIGURED"
+        ? { requiredAction: "MARK_SUSPENSE_ACCOUNT" } : {}),
+    }) });
 
   registerTool("import_single_account_statement", {
     title: "Preview inline single-account statement",
-    description: "Submit the four answers from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting first marks rows through a matching known-balance checkpoint Imported exclude, then ranks exact amounts and tests small exclusions. It creates the balancing line in the designated suspense account. Balances are optional. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    description: "Submit the four answers from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Balances are optional. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
       account_id: positiveInteger("The single authoritative statement account."),
-      suspense_account_id: positiveInteger("Optional compatibility check; when supplied it must be the designated suspense account for this currency.").optional(),
       beginning_balance: beginningBalanceAnswerSchema,
       ending_balance: endingBalanceAnswerSchema,
       line_items: oneSidedStatementLinesSchema,
@@ -2332,10 +2571,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     _meta: toolMetadata("accounting.reconciliation", {
       dependencies: ["start_single_account_statement_import", "list_account_objects"],
       attachmentHints: ["Use this inline path only for bounded records already present directly in the interaction."],
-      objectInputs: [
-        { path: "/account_id", objectType: "accounting.account", value: "id" },
-        { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
-      ],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
     }),
   }, async (answers) => safeWorkflowResult(
     () => previewSingleAccountStatement(answers), statementImportFailureOptions("import_single_account_statement"),
@@ -2343,13 +2579,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 
   registerTool("import_single_account_statement_artifact", {
     title: "Preview uploaded single-account statement",
-    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit optional printed balances separately. Accounting performs known-balance checkpoint, duplicate, and small-exclusion analysis and creates designated suspense counterlines. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Row details remain available in the account register. Do not run an LLM deduplication pass.",
+    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit optional printed balances separately. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Do not run an LLM deduplication pass.",
     inputSchema: {
       artifact_id: z.string().trim().uuid(),
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable original attachment identifier or SHA-256; reuse it for the same source statement."),
       account_id: positiveInteger("The single authoritative statement account."),
-      suspense_account_id: positiveInteger("Optional compatibility check; when supplied it must be the designated suspense account for this currency.").optional(),
       beginning_balance: beginningBalanceAnswerSchema,
       ending_balance: endingBalanceAnswerSchema,
       include_row_details: z.boolean().default(false)
@@ -2365,10 +2600,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
         "The artifact contains every source row for validation; the user-facing response should summarize the preview unless row details are requested.",
       ],
       artifactUpload: singleAccountStatementArtifactUpload,
-      objectInputs: [
-        { path: "/account_id", objectType: "accounting.account", value: "id" },
-        { path: "/suspense_account_id", objectType: "accounting.account", value: "id" },
-      ],
+      objectInputs: [{ path: "/account_id", objectType: "accounting.account", value: "id" }],
     }),
   }, async ({ artifact_id, include_row_details, ...answers }) => safeWorkflowResult(async () => {
     const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
@@ -2385,6 +2617,79 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
     const { transactions: _importTransactions, ...compactImport } = fullImport;
     return { ...compactPreview, import: compactImport };
   }, statementImportFailureOptions("import_single_account_statement_artifact")));
+
+  registerTool("submit_statement_import_job_artifact", {
+    title: "Submit statement job extraction",
+    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. A successful ready result saves a pending, unposted preview in the account register and returns the one confirmation handoff. The original PDF remains the evidence file; JSON Lines is disposable operational data.",
+    inputSchema: {
+      statement_import_job_id: z.string().trim().uuid(),
+      artifact_id: z.string().trim().uuid(),
+      beginning_balance: beginningBalanceAnswerSchema,
+      ending_balance: endingBalanceAnswerSchema,
+      include_row_details: z.boolean().default(false),
+      dry_run: z.literal(true).default(true),
+    },
+    outputSchema: statementJobArtifactWorkflowOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["start_statement_import_job"],
+      attachmentHints: [
+        "Download and process the complete original PDF from the job descriptor; do not substitute server-side text or omit pages.",
+        "Upload only the complete derived canonical JSON Lines artifact through this tool's advertised transport.",
+      ],
+      artifactUpload: singleAccountStatementArtifactUpload,
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id" }],
+    }),
+  }, async ({ statement_import_job_id, artifact_id, include_row_details, ...answers }) => safeWorkflowResult(async () => {
+    const job = await accounting.getStatementImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id });
+    if (job.status !== "processing") throw Object.assign(
+      new Error(job.status === "preview_ready"
+        ? "This statement job already has a pending preview. Review or restart it instead of processing it again."
+        : "Start this ready statement job before submitting its extraction."), {
+        code: job.status === "preview_ready" ? "STATEMENT_PREVIEW_ALREADY_READY" : "STATEMENT_JOB_NOT_PROCESSING",
+        status: 409,
+      });
+    const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
+    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
+      importJobId: statement_import_job_id });
+    const parsed = oneSidedStatementLinesSchema.safeParse(
+      parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type),
+    );
+    if (!parsed.success) throw Object.assign(new Error("The statement artifact does not match the canonical line schema."), {
+      code: "INVALID_SINGLE_ACCOUNT_STATEMENT_ARTIFACT", details: parsed.error.issues,
+    });
+    const preview = await previewSingleAccountStatement({
+      ...answers,
+      statement_id: job.sourceDocumentId,
+      account_id: job.account.id,
+      statement_import_job_id,
+      evidence_file_id: job.evidenceFile.id,
+      line_items: parsed.data,
+    });
+    if (!preview.importPlanId) throw Object.assign(new Error(
+      "No statement import preview was saved. Restart the statement job before trying a fresh extraction."), {
+      code: "STATEMENT_PREVIEW_NOT_SAVED", status: 409,
+    });
+    const savedJob = await accounting.bindStatementImportPreview({ pool, personId,
+      statementImportJobId: statement_import_job_id, importPlanId: preview.importPlanId,
+      canonicalArtifactId: artifact_id });
+    const visiblePreview = include_row_details ? preview : (() => {
+      const { transactions: _transactions, import: fullImport, ...compactPreview } = preview;
+      const { transactions: _importTransactions, ...compactImport } = fullImport;
+      return { ...compactPreview, import: compactImport };
+    })();
+    return {
+      ...visiblePreview,
+      job: savedJob,
+      effectReceipt: effectReceipt("submit_statement_import_job_artifact",
+        { statement_import_job_id, artifact_id, source_sha256: job.evidenceFile.sha256 }, "created", [
+          { type: "statement_import_job", id: statement_import_job_id },
+          { type: "evidence_file", id: job.evidenceFile.id },
+          { type: "transaction_import_plan", id: preview.importPlanId },
+        ]),
+    };
+  }, statementImportFailureOptions("submit_statement_import_job_artifact")));
 
   registerTool("reconcile_account_through_date", {
     title: "Reconcile account through known balance",
@@ -3160,7 +3465,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, servic
 }
 
 export function mountAccountingMcp(app, {
-  pool, artifactRoot, jsonBodyParser, artifactJsonBodyParser, artifactRawBodyParser,
+  pool, artifactRoot, evidenceRoot, jsonBodyParser, artifactJsonBodyParser, artifactRawBodyParser,
 }) {
   const authenticate = requireApiToken(pool);
   mountArtifactUploadRoutes(app, {
@@ -3169,7 +3474,16 @@ export function mountAccountingMcp(app, {
     jsonBodyParser: artifactJsonBodyParser,
     rawBodyParser: artifactRawBodyParser,
   });
-  const handler = createAccountingMcpHandler({ pool, artifactRoot });
+  for (const method of ["get", "head"]) {
+    app[method]("/mcp/evidence-files/:evidenceFileId/content", authenticate, async (req, res, next) => {
+      try {
+        await sendEvidenceFileContent({ pool, evidenceRoot, personId: req.auth.personId,
+          evidenceFileId: req.params.evidenceFileId, rangeHeader: req.get("Range"), method: req.method,
+          response: res });
+      } catch (error) { next(error); }
+    });
+  }
+  const handler = createAccountingMcpHandler({ pool, artifactRoot, evidenceRoot });
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => console.error("Accounting MCP HTTP adapter error:", error),
   });
@@ -3192,7 +3506,7 @@ export function mountAccountingMcp(app, {
   });
 }
 
-export function createAccountingMcpHandler({ pool, artifactRoot }) {
+export function createAccountingMcpHandler({ pool, artifactRoot, evidenceRoot = resolveEvidenceRoot() }) {
   return createMcpHandler(
     (requestContext) => {
       const accountingAuth = requestContext.authInfo?.extra?.accountingAuth ?? {};
@@ -3200,7 +3514,7 @@ export function createAccountingMcpHandler({ pool, artifactRoot }) {
       if (!Number.isInteger(personId) || personId <= 0) {
         throw new Error("Authenticated accounting user is required.");
       }
-      return createAccountingMcpServer({ personId, pool, artifactRoot });
+      return createAccountingMcpServer({ personId, pool, artifactRoot, evidenceRoot });
     },
     {
       legacy: "stateless",

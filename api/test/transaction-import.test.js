@@ -41,6 +41,9 @@ function memoryPool() {
     tags: [],
     tagJoins: [],
     balanceAssertions: [],
+    statementJobs: [],
+    lineItemEvidenceLinks: [],
+    assertionEvidenceLinks: [],
     plans: new Map(),
     nextTransactionId: 100,
     nextLineItemId: 1000,
@@ -55,6 +58,8 @@ function memoryPool() {
       const snapshot = structuredClone({
         transactions: state.transactions, lineItems: state.lineItems, rates: state.rates,
         tags: state.tags, tagJoins: state.tagJoins, balanceAssertions: state.balanceAssertions,
+        statementJobs: state.statementJobs, lineItemEvidenceLinks: state.lineItemEvidenceLinks,
+        assertionEvidenceLinks: state.assertionEvidenceLinks,
         plans: [...state.plans], nextTransactionId: state.nextTransactionId,
         nextLineItemId: state.nextLineItemId, nextRateId: state.nextRateId, nextTagId: state.nextTagId,
       });
@@ -69,6 +74,9 @@ function memoryPool() {
           state.tags = snapshot.tags;
           state.tagJoins = snapshot.tagJoins;
           state.balanceAssertions = snapshot.balanceAssertions;
+          state.statementJobs = snapshot.statementJobs;
+          state.lineItemEvidenceLinks = snapshot.lineItemEvidenceLinks;
+          state.assertionEvidenceLinks = snapshot.assertionEvidenceLinks;
           state.plans = new Map(snapshot.plans);
           state.nextTransactionId = snapshot.nextTransactionId;
           state.nextLineItemId = snapshot.nextLineItemId;
@@ -78,6 +86,45 @@ function memoryPool() {
         release() {},
         async query(sql, params = []) {
           if (sql.startsWith("DELETE FROM accounting_import_plans")) return [{ affectedRows: 0 }];
+          if (sql.includes("FROM accounting_statement_import_jobs sij")
+              && sql.includes("JOIN accounting_evidence_files")) {
+            const [jobId, ownerPersonId] = params;
+            return [state.statementJobs.filter((job) => job.statement_import_job_id === jobId
+              && Number(job.owner_person_id) === Number(ownerPersonId)).map((job) => ({
+              ...job, sha256: job.sha256,
+            }))];
+          }
+          if (sql.includes("FROM line_items li") && sql.includes("li.source_id <=>")) {
+            const [transactionId, accountId, sourceId, ownerPersonId] = params;
+            const transaction = state.transactions.find((item) => Number(item.transaction_id) === Number(transactionId));
+            if (Number(transaction?.owner_person_id) !== Number(ownerPersonId)) return [[]];
+            return [state.lineItems.filter((line) => Number(line.transaction_id) === Number(transactionId)
+              && Number(line.account_id) === Number(accountId) && line.source_id === sourceId)
+              .slice(0, 2).map((line) => ({ line_item_id: line.line_item_id }))];
+          }
+          if (sql.includes("INSERT IGNORE INTO line_item_evidence_links")) {
+            const [evidenceFileId, lineItemId, sourceRecordId] = params;
+            const exists = state.lineItemEvidenceLinks.some((link) => link.evidence_file_id === evidenceFileId
+              && link.line_item_id === lineItemId);
+            if (!exists) state.lineItemEvidenceLinks.push({ evidence_file_id: evidenceFileId,
+              line_item_id: lineItemId, source_record_id: sourceRecordId });
+            return [{ affectedRows: exists ? 0 : 1 }];
+          }
+          if (sql.includes("INSERT IGNORE INTO balance_assertion_evidence_links")) {
+            const [evidenceFileId, assertionId] = params;
+            const exists = state.assertionEvidenceLinks.some((link) => link.evidence_file_id === evidenceFileId
+              && link.account_balance_assertion_id === assertionId);
+            if (!exists) state.assertionEvidenceLinks.push({ evidence_file_id: evidenceFileId,
+              account_balance_assertion_id: assertionId });
+            return [{ affectedRows: exists ? 0 : 1 }];
+          }
+          if (sql.includes("UPDATE accounting_statement_import_jobs") && sql.includes("job_status = 'committed'")) {
+            const [jobId, ownerPersonId] = params;
+            const job = state.statementJobs.find((item) => item.statement_import_job_id === jobId
+              && Number(item.owner_person_id) === Number(ownerPersonId));
+            if (job) job.job_status = "committed";
+            return [{ affectedRows: job ? 1 : 0 }];
+          }
           if (sql.includes("SELECT account_id, AccountName, parent_account_id")) {
             const [ownerPersonId] = params;
             if (Number(ownerPersonId) !== 7) return [[]];
@@ -155,11 +202,14 @@ function memoryPool() {
             const plan = state.plans.get(planId);
             return [[plan && Number(plan.owner_person_id) === Number(ownerPersonId) ? plan : undefined].filter(Boolean)];
           }
-          if (sql.includes("SELECT known_balance_units FROM account_balance_assertions")) {
+          if (sql.includes("known_balance_units FROM account_balance_assertions")) {
             const [ownerPersonId, accountId, balanceDate] = params;
             if (Number(ownerPersonId) !== 7) return [[]];
             return [state.balanceAssertions.filter((item) => Number(item.account_id) === Number(accountId)
-              && item.balance_date === balanceDate).map((item) => ({ known_balance_units: item.known_balance_units }))];
+              && item.balance_date === balanceDate).map((item) => ({
+                account_balance_assertion_id: item.account_balance_assertion_id,
+                known_balance_units: item.known_balance_units,
+              }))];
           }
           if (sql.includes("INSERT INTO account_balance_assertions")) {
             const [ownerPersonId, accountId, balanceDate, knownBalanceUnits] = params;
@@ -760,6 +810,40 @@ test("an assertion entered after preview is preserved when the import commits", 
   assert.equal(committed.balanceAssertions[0].status, "preserved");
   assert.equal(committed.balanceAssertions[0].storedKnownBalanceUnits, "9000");
   assert.equal(pool.state.balanceAssertions[0].known_balance_units, "9000");
+});
+
+test("statement-job commit links the original PDF only to authoritative account lines and balances", async () => {
+  const pool = memoryPool();
+  const statementJobId = "f06cf9a5-5b92-4f8c-a0da-30a03831e0a5";
+  const evidenceFileId = 44;
+  const sourceDigest = `sha256:${"a".repeat(64)}`;
+  const transaction = importedTransactions()[0];
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_statement", transactions: [transaction],
+    knownBalanceAssertions: [{ accountId: 11, balanceDate: "2026-01-31", knownBalanceUnits: "8766" }],
+    importReview: {
+      accountId: 11, statementId: sourceDigest, statementJobId, evidenceFileId,
+      decisions: [{ externalId: transaction.externalId, decision: "include",
+        sourceRecordId: "pdf-row-1" }],
+    },
+  });
+  pool.state.statementJobs.push({ statement_import_job_id: statementJobId, owner_person_id: 7,
+    job_status: "preview_ready", import_plan_id: preview.importPlanId,
+    account_id: 11, evidence_file_id: evidenceFileId, sha256: "a".repeat(64) });
+
+  const committed = await commitTransactionImportPlan({ pool, personId: 7,
+    importPlanId: preview.importPlanId });
+  assert.deepEqual(committed.statementEvidence, { statementImportJobId: statementJobId,
+    evidenceFileId, lineItemLinkCount: 1, balanceAssertionLinkCount: 1 });
+  assert.equal(pool.state.statementJobs[0].job_status, "committed");
+  assert.equal(pool.state.lineItemEvidenceLinks.length, 1);
+  const linkedLine = pool.state.lineItems.find((line) =>
+    line.line_item_id === pool.state.lineItemEvidenceLinks[0].line_item_id);
+  assert.equal(linkedLine.account_id, 11);
+  assert.equal(pool.state.lineItemEvidenceLinks[0].source_record_id, "pdf-row-1");
+  assert.equal(pool.state.lineItems.some((line) => line.account_id === 21
+    && pool.state.lineItemEvidenceLinks.some((link) => link.line_item_id === line.line_item_id)), false);
+  assert.deepEqual(pool.state.assertionEvidenceLinks.map((link) => link.evidence_file_id), [evidenceFileId]);
 });
 
 test("transaction import accepts a zero-value commodity quantity adjustment", async () => {

@@ -57,7 +57,7 @@ function requiredText(value, field, maximum) {
 }
 
 export function compileSingleAccountStatementImport({
-  accounts, accountId, suspenseAccountId = null, valuationCurrencyCode, lines, questionAudience = "human",
+  accounts, accountId, valuationCurrencyCode, lines, questionAudience = "human",
 }) {
   const resolvedAccountId = Number(accountId);
   if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
@@ -78,10 +78,6 @@ export function compileSingleAccountStatementImport({
         currencyCode: statementAccount.currencyCode, designatedAccountIds: designated.map((account) => account.id) });
   }
   const suspenseAccount = designated[0];
-  if (suspenseAccountId != null && Number(suspenseAccountId) !== suspenseAccount.id) {
-    throw workflowError("The supplied suspense account is not the designated account for this currency.",
-      "SUSPENSE_ACCOUNT_NOT_DESIGNATED", { designatedAccountId: suspenseAccount.id });
-  }
   if (resolvedAccountId === suspenseAccount.id) {
     throw workflowError("The statement account cannot also hold its own unresolved counterlines.",
       "SUSPENSE_ACCOUNT_MATCHES_STATEMENT_ACCOUNT");
@@ -139,12 +135,12 @@ export function compileSingleAccountStatementImport({
 }
 
 export async function previewSingleAccountStatementImport({
-  pool, personId, accountId, suspenseAccountId = null, sourceSystem, valuationCurrencyCode,
+  pool, personId, accountId, sourceSystem, valuationCurrencyCode,
   lines, questionAudience = "human", reconciliation = null, knownBalanceAssertions = [], importReview = null,
 }) {
   const accounts = await listAccounts(pool, personId);
   const compiled = compileSingleAccountStatementImport({
-    accounts, accountId, suspenseAccountId, valuationCurrencyCode, lines, questionAudience,
+    accounts, accountId, valuationCurrencyCode, lines, questionAudience,
   });
   return previewTransactionImport({
     pool, personId, sourceSystem, transactions: compiled.transactions,

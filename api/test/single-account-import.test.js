@@ -11,7 +11,7 @@ const accounts = [
   { id: 3, name: "Ask Human", parentAccountId: 1, placeholder: false, archivedAt: null,
     currencyId: 1, currencyCode: "USD", suspense: true },
   { id: 4, name: "BTC suspense", parentAccountId: 1, placeholder: false, archivedAt: null,
-    currencyId: 2, currencyCode: "BTC" },
+    currencyId: 2, currencyCode: "BTC", suspense: true },
 ];
 
 test("one-sided statement lines compile into cleared authoritative lines and one suspense bucket", () => {
@@ -32,13 +32,6 @@ test("one-sided statement lines compile into cleared authoritative lines and one
           audience: "accountant", prompt: "What evidence identifies the other side of \"ACME 1234\"? Check for a matching imported account entry, including near matches affected by fees.",
       } },
   ]);
-});
-
-test("one-sided import rejects a suspense bucket other than the designated account", () => {
-  assert.throws(() => compileSingleAccountStatementImport({
-    accounts, accountId: 2, suspenseAccountId: 4, valuationCurrencyCode: "USD",
-    lines: [{ externalId: "row-1", transactionDate: "2026-08-10", amountDecimal: "-1.00" }],
-  }), (error) => error.code === "SUSPENSE_ACCOUNT_NOT_DESIGNATED");
 });
 
 test("one-sided import asks for designation when the currency has no suspense account", () => {

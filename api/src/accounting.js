@@ -169,6 +169,32 @@ export async function listAccountLedger(pool, personId, accountId) {
     }
   }
 
+  const evidenceByLineItemId = new Map();
+  const lineItemIds = [...entriesByLineItemId.keys()];
+  if (lineItemIds.length) {
+    const [evidenceRows] = await pool.query(
+      `SELECT liel.line_item_id, ef.evidence_file_id, ef.original_file_name,
+              ef.media_type, ef.byte_size, ef.sha256, liel.evidence_role, liel.source_record_id
+         FROM line_item_evidence_links liel
+         JOIN accounting_evidence_files ef ON ef.evidence_file_id = liel.evidence_file_id
+        WHERE ef.owner_person_id = ?
+          AND liel.line_item_id IN (${lineItemIds.map(() => "?").join(", ")})
+        ORDER BY liel.line_item_id, ef.evidence_file_id`,
+      [personId, ...lineItemIds],
+    );
+    for (const evidence of evidenceRows) {
+      const id = Number(evidence.line_item_id);
+      if (!evidenceByLineItemId.has(id)) evidenceByLineItemId.set(id, []);
+      evidenceByLineItemId.get(id).push({
+        id: Number(evidence.evidence_file_id), fileName: String(evidence.original_file_name),
+        mediaType: String(evidence.media_type), byteSize: Number(evidence.byte_size),
+        sha256: `sha256:${String(evidence.sha256)}`, role: String(evidence.evidence_role),
+        sourceRecordId: evidence.source_record_id == null ? null : String(evidence.source_record_id),
+        downloadPath: `/api/evidence-files/${evidence.evidence_file_id}/content`,
+      });
+    }
+  }
+
   let runningBalance = 0n;
   const balanceSign = normalBalanceSign(account.type);
   const entries = [...entriesByLineItemId.values()].map((entry) => {
@@ -182,6 +208,7 @@ export async function listAccountLedger(pool, personId, accountId) {
       memo: entry.memo,
       splitAccountNames: [...entry.splitAccounts.values()],
       splits: [...entry.splits.values()],
+      evidenceFiles: evidenceByLineItemId.get(entry.lineItemId) ?? [],
       debitUnits: amount > 0n ? amount.toString() : null,
       creditUnits: amount < 0n ? (-amount).toString() : null,
       runningBalanceUnits: runningBalance.toString(),

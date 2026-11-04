@@ -83,15 +83,27 @@ export function accountTreeReadyWorkflow(result) {
   };
 }
 
-export function transactionPreviewWorkflow(result) {
+export function transactionPreviewWorkflow(result, { reviewDestination = null } = {}) {
   if (result.readyToCommit && result.importPlanId) {
+    const destination = reviewDestination == null ? null : {
+      surface: "account_register",
+      accountId: reviewDestination.accountId,
+      accountDisplayName: reviewDestination.accountDisplayName,
+      state: "pending_review",
+    };
+    const savedMessage = destination == null
+      ? "A durable import preview was saved. No transactions have been posted yet."
+      : `A durable import preview was saved and is now visible in the account register for ${destination.accountDisplayName}. No transactions have been posted yet.`;
     return {
       ...result,
       status: "ready",
+      workflowState: "preview_saved",
+      completionNote: savedMessage,
+      ...(destination == null ? {} : { reviewDestination: destination }),
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `Commit these import settings now? Review the proposed rows shown in the account register, including ${result.excludedTransactionCount ?? 0} temporarily excluded transaction${(result.excludedTransactionCount ?? 0) === 1 ? "" : "s"}. It will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
+        instruction: `${savedMessage} Review the proposed rows${destination == null ? "" : " there"}, including ${result.excludedTransactionCount ?? 0} temporarily excluded transaction${(result.excludedTransactionCount ?? 0) === 1 ? "" : "s"}. Then ask: Commit these import settings now? Approval will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
           ? `; ${result.balanceAssertions.filter((item) => item.status === "planned").length} known balances will be saved`
           : ""}${result.balanceAssertions?.some((item) => item.status === "preserved"
             && item.storedKnownBalanceUnits !== item.sourceKnownBalanceUnits)
@@ -108,6 +120,8 @@ export function transactionPreviewWorkflow(result) {
   return {
     ...result,
     status: "incomplete",
+    workflowState: "preview_not_saved",
+    completionNote: "No durable import preview was saved. Nothing will appear in an account register and there is nothing to confirm or commit.",
     requiredAction: "REVIEW_REJECTIONS_AND_RUN_NEW_DRY_RUN",
     retry: makeRetryDescriptor("transaction_batch_rejected", { preserveCompleteOriginalBatch: true }),
     nextAction: {

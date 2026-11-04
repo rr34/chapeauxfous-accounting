@@ -7,6 +7,133 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0019: durable-statement-evidence
+-- writer downtime: schedule maintenance; the new tables and foreign keys take metadata locks.
+-- deployment order: apply before deploying direct statement-PDF upload or statement-job tools.
+-- recovery: restore the verified pre-migration backup if any statement fails after an implicit commit.
+-- Original PDF evidence is durable; statement processing jobs and canonical artifacts are disposable.
+
+CREATE TABLE `accounting_evidence_files` (
+  `evidence_file_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable owner-scoped identifier for one immutable evidence file.',
+  `owner_person_id` int(11) NOT NULL
+    COMMENT 'Person whose private accounting evidence owns this file.',
+  `original_file_name` varchar(1024) NOT NULL
+    COMMENT 'Sanitized informational filename supplied at upload; it never determines a storage path.',
+  `media_type` varchar(255) NOT NULL
+    COMMENT 'Verified media type of the immutable evidence bytes. Direct statement intake currently accepts application/pdf.',
+  `byte_size` bigint(20) unsigned NOT NULL
+    COMMENT 'Exact byte count of the immutable evidence file.',
+  `sha256` char(64) NOT NULL
+    COMMENT 'Lowercase hexadecimal SHA-256 digest of the exact immutable evidence bytes.',
+  `storage_key` varchar(255) NOT NULL
+    COMMENT 'Provider-owned relative storage identity; never expose it as a filesystem path or download URL.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC time this immutable evidence file was first accepted.',
+  PRIMARY KEY (`evidence_file_id`),
+  UNIQUE KEY `accounting_evidence_files_owner_sha_UQ` (`owner_person_id`, `sha256`),
+  UNIQUE KEY `accounting_evidence_files_storage_key_UQ` (`storage_key`),
+  KEY `accounting_evidence_files_owner_created_IDX` (`owner_person_id`, `created_at`, `evidence_file_id`),
+  CONSTRAINT `accounting_evidence_files_owner_FK`
+    FOREIGN KEY (`owner_person_id`) REFERENCES `people2_people` (`person_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Store metadata and integrity identity for immutable owner-scoped accounting evidence held in provider-owned durable byte storage. One row: One exact file body. Rules: File bytes are addressed only through authenticated owner-scoped services; matching owner and SHA-256 uploads reuse this record.';
+
+CREATE TABLE `accounting_statement_import_jobs` (
+  `statement_import_job_id` char(36) NOT NULL
+    COMMENT 'Opaque disposable UUID for one processing run against an immutable statement PDF.',
+  `owner_person_id` int(11) NOT NULL
+    COMMENT 'Person whose ledger and evidence own this statement job.',
+  `account_id` int(11) NOT NULL
+    COMMENT 'Exact statement account selected by the account page when the PDF was uploaded.',
+  `evidence_file_id` bigint(20) NOT NULL
+    COMMENT 'Immutable original PDF processed by this job.',
+  `job_status` enum('ready','processing','preview_ready','committed') NOT NULL DEFAULT 'ready'
+    COMMENT 'Current disposable workflow state. Values: ready: available for one agent run. processing: exact PDF is being transformed. preview_ready: an uncommitted review plan exists. committed: that exact preview posted.',
+  `import_plan_id` char(36) NULL DEFAULT NULL
+    COMMENT 'Optional transaction-import plan created from this job; null before a successful preview.',
+  `canonical_artifact_id` char(36) NULL DEFAULT NULL
+    COMMENT 'Optional disposable canonical JSON Lines artifact submitted for this processing run.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC time this disposable processing job was created.',
+  `updated_at` datetime(6) NOT NULL DEFAULT current_timestamp(6) ON UPDATE current_timestamp(6)
+    COMMENT 'UTC time this disposable processing job last changed state.',
+  `committed_at` datetime(6) NULL DEFAULT NULL
+    COMMENT 'UTC time the exact job preview committed, or null before commit.',
+  PRIMARY KEY (`statement_import_job_id`),
+  UNIQUE KEY `accounting_statement_import_jobs_plan_UQ` (`import_plan_id`),
+  KEY `accounting_statement_import_jobs_owner_status_IDX` (`owner_person_id`, `job_status`, `updated_at`),
+  KEY `accounting_statement_import_jobs_account_IDX` (`owner_person_id`, `account_id`, `updated_at`),
+  KEY `accounting_statement_import_jobs_evidence_IDX` (`evidence_file_id`),
+  CONSTRAINT `accounting_statement_import_jobs_owner_FK`
+    FOREIGN KEY (`owner_person_id`) REFERENCES `people2_people` (`person_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `accounting_statement_import_jobs_account_FK`
+    FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `accounting_statement_import_jobs_evidence_FK`
+    FOREIGN KEY (`evidence_file_id`) REFERENCES `accounting_evidence_files` (`evidence_file_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `accounting_statement_import_jobs_plan_FK`
+    FOREIGN KEY (`import_plan_id`) REFERENCES `accounting_import_plans` (`import_plan_id`)
+    ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Own one disposable serial processing run for an original one-account statement PDF. One row: One fresh job bound to one account and evidence file. Rules: Restart deletes the uncommitted row and creates a new UUID while preserving only the immutable evidence file.';
+
+CREATE TABLE `line_item_evidence_links` (
+  `line_item_evidence_link_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identifier for one evidence-to-posting relationship.',
+  `evidence_file_id` bigint(20) NOT NULL
+    COMMENT 'Immutable evidence file supporting the posting.',
+  `line_item_id` bigint(20) NOT NULL
+    COMMENT 'Authoritative statement-account posting supported by the evidence.',
+  `evidence_role` enum('source_statement') NOT NULL
+    COMMENT 'Typed meaning of this relationship. source_statement means the file directly reports this account movement.',
+  `source_record_id` varchar(128) NULL DEFAULT NULL
+    COMMENT 'Optional stable record identity within the source document.',
+  `page_number` int(10) unsigned NULL DEFAULT NULL
+    COMMENT 'Optional one-based source PDF page number when extraction supplies it.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC time this evidence relationship was created during ledger commit.',
+  PRIMARY KEY (`line_item_evidence_link_id`),
+  UNIQUE KEY `line_item_evidence_links_edge_UQ` (`evidence_file_id`, `line_item_id`, `evidence_role`),
+  KEY `line_item_evidence_links_line_IDX` (`line_item_id`, `created_at`),
+  CONSTRAINT `line_item_evidence_links_file_FK`
+    FOREIGN KEY (`evidence_file_id`) REFERENCES `accounting_evidence_files` (`evidence_file_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `line_item_evidence_links_line_FK`
+    FOREIGN KEY (`line_item_id`) REFERENCES `line_items` (`line_item_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Associate immutable evidence with authoritative ledger postings. One row: One typed evidence edge. Rules: Statement import links the PDF only to the statement-account line, never its inferred suspense counterline.';
+
+CREATE TABLE `balance_assertion_evidence_links` (
+  `balance_assertion_evidence_link_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identifier for one evidence-to-balance-assertion relationship.',
+  `evidence_file_id` bigint(20) NOT NULL
+    COMMENT 'Immutable statement file supporting the known balance.',
+  `account_balance_assertion_id` bigint(20) NOT NULL
+    COMMENT 'Known end-of-day account balance supported by the statement.',
+  `evidence_role` enum('source_statement') NOT NULL
+    COMMENT 'Typed meaning of this relationship. source_statement means the file directly reports this balance.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC time this evidence relationship was created during ledger commit.',
+  PRIMARY KEY (`balance_assertion_evidence_link_id`),
+  UNIQUE KEY `balance_assertion_evidence_links_edge_UQ`
+    (`evidence_file_id`, `account_balance_assertion_id`, `evidence_role`),
+  KEY `balance_assertion_evidence_links_assertion_IDX` (`account_balance_assertion_id`, `created_at`),
+  CONSTRAINT `balance_assertion_evidence_links_file_FK`
+    FOREIGN KEY (`evidence_file_id`) REFERENCES `accounting_evidence_files` (`evidence_file_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `balance_assertion_evidence_links_assertion_FK`
+    FOREIGN KEY (`account_balance_assertion_id`) REFERENCES `account_balance_assertions` (`account_balance_assertion_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Associate immutable statement evidence with known account balances. One row: One typed evidence edge. Rules: Commit may link the statement to a newly created or exactly preserved assertion.';
+
+-- end migration 0019
+
 -- migration 0018: designate-suspense-accounts
 -- writer downtime: schedule maintenance; adding an account column takes a metadata lock.
 -- deployment order: apply before deploying code that reads or writes is_suspense.

@@ -407,9 +407,39 @@ complete source outside model context. `import_single_account_statement`
 remains the inline alternative for bounded records already present directly in
 the interaction.
 
+The account page also accepts the original statement PDF before any agent work.
+Accounting stores that immutable original in its owner-scoped evidence store,
+binds it to the selected account, and creates a serial statement-import job.
+The copied prompt contains only the stable
+`accounting://statement-import-jobs/<uuid>` reference. The agent resolves that
+reference, calls `start_statement_import_job`, and downloads the complete PDF
+through the returned authenticated `/mcp/evidence-files/{id}/content` data-plane
+descriptor. The endpoint supports `GET`, `HEAD`, and single byte ranges and
+returns the provider-owned filename, media type, byte size, SHA-256, ETag, and
+range metadata. PDF bytes never enter an MCP JSON result, and Accounting does
+not extract text, choose pages, or filter the original document.
+
+The agent processes the entire original PDF directly, uploads canonical JSONL
+as a separate derived artifact, and calls
+`submit_statement_import_job_artifact`. The preview is then bound to the exact
+job, account, evidence file, and source digest. Commit links the original PDF to
+the authoritative statement-account line item for every created or reused row
+and to any stored opening or closing balance assertions; it does not link the
+PDF to generated suspense lines. Evidence is visible and downloadable from the
+account register and balance-assertion list.
+
+Set `ACCOUNTING_EVIDENCE_ROOT` to an absolute durable path in production; it
+defaults to `api/data/evidence` locally. The API service user needs exclusive
+read/write access, and this directory must be backed up with the accounting
+database. A full pre-commit restart preserves this original evidence but
+deletes the disposable job, pending preview, and derived artifact, then creates
+a new job UUID. A committed job cannot use this restart path.
+
 Both preview tools avoid asking the caller to construct the unknown half of
-every journal entry. Select the statement account and one ordinary, active,
-same-currency suspense account. Each source line becomes its own balanced
+every journal entry. The caller supplies only the statement account; Accounting
+resolves the owner's one designated active, postable suspense account in that
+currency. The statement-import MCP tools do not accept a suspense-account ID.
+Each source line becomes its own balanced
 transaction: the source amount and value are copied unchanged to the statement
 account and marked `cleared`; the exact opposite amount and value go to the
 selected suspense account, remain `unreconciled`, and carry an open accounting
@@ -419,6 +449,12 @@ import idempotency guarantees, and screenshot or overlapping-file imports
 still run through statement-observation duplicate analysis first. User-facing
 chat should summarize preview counts, balance findings, exclusions, and open
 questions; row-level review stays in the account register unless requested.
+
+Uploading or transforming a statement is not itself an import preview. Only a
+successful preview with an `importPlanId` is saved. The target account register
+shows that plan as pending and not posted, with its proposed rows and accept
+action. A failed preview saves no plan; its MCP error states that nothing will
+appear in the register and nothing can be committed.
 
 After saving the closing balance assertion and committing the statement import,
 `reconcile_account_through_date` compares that assertion with the posted normal

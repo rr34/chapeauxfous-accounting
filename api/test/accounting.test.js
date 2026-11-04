@@ -91,6 +91,10 @@ test("an account ledger groups split accounts and calculates its running balance
             TransactionDate: "2026-08-02", description: "Card purchase", ...split(24, "20", 10, "Tax") },
         ]];
       }
+      if (sql.includes("FROM line_item_evidence_links")) {
+        assert.deepEqual(params, [7, 20, 21]);
+        return [[]];
+      }
       throw new Error(`Unexpected query: ${sql}`);
     },
   };
@@ -104,7 +108,7 @@ test("an account ledger groups split accounts and calculates its running balance
           currencyId: 1, currencyCode: "USD", scale: 2 },
         { lineItemId: 22, accountId: 8, accountName: "Income", memo: null, amountUnits: "-320",
           currencyId: 1, currencyCode: "USD", scale: 2 },
-      ], debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
+      ], evidenceFiles: [], debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
     { lineItemId: 21, transactionId: 11, date: "2026-08-02", description: "Card purchase", memo: "Lunch",
       splitAccountNames: ["Food", "Tax"], splits: [
         { lineItemId: 21, accountId: 3, accountName: "Checking", memo: "Lunch", amountUnits: "-120",
@@ -113,7 +117,7 @@ test("an account ledger groups split accounts and calculates its running balance
           currencyId: 1, currencyCode: "USD", scale: 2 },
         { lineItemId: 24, accountId: 10, accountName: "Tax", memo: null, amountUnits: "20",
           currencyId: 1, currencyCode: "USD", scale: 2 },
-      ], debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
+      ], evidenceFiles: [], debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
   ]);
 });
 
@@ -142,6 +146,10 @@ test("a credit-normal account register keeps journal sides and reverses running-
             split_account_id: 3, split_account_name: "Credit card",
             split_currency_id: 1, split_currency_code: "USD", split_scale: 2 },
         ]];
+      }
+      if (sql.includes("FROM line_item_evidence_links")) {
+        assert.deepEqual(params, [7, 20, 21]);
+        return [[]];
       }
       throw new Error(`Unexpected query: ${sql}`);
     },

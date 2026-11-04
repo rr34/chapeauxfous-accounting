@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "./api";
+import { api, downloadEvidenceFile, uploadStatementPdf } from "./api";
 import { unitsToDecimal } from "./money";
-import type { Account, BalanceAssertion } from "./types";
+import type { Account, BalanceAssertion, StatementImportJob } from "./types";
 
 type AccountingQuestion = {
   lineItemId: number;
@@ -41,6 +41,8 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const postable = accounts.filter((account) => !account.placeholder && !account.archivedAt);
   const [accountId, setAccountId] = useState(initialAccountId == null ? "" : String(initialAccountId));
   const [designationId, setDesignationId] = useState("");
+  const [statementFile, setStatementFile] = useState<File | null>(null);
+  const [statementJobs, setStatementJobs] = useState<StatementImportJob[]>([]);
   const [questions, setQuestions] = useState<AccountingQuestion[]>([]);
   const [questionCursor, setQuestionCursor] = useState<string | null>(null);
   const [questionTargets, setQuestionTargets] = useState<Record<number, string>>({});
@@ -55,6 +57,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     && candidate.id !== account?.id);
   const latestAssertion = assertions.filter((assertion) => assertion.accountId === account?.id)
     .sort((left, right) => right.date.localeCompare(left.date))[0];
+  const activeStatementJob = statementJobs.find((job) => job.status !== "committed") ?? null;
 
   useEffect(() => {
     if (initialAccountId != null) setAccountId(String(initialAccountId));
@@ -63,6 +66,18 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   useEffect(() => {
     setDesignationId("");
   }, [accountId]);
+
+  async function loadStatementJobs() {
+    if (!account) { setStatementJobs([]); return; }
+    const result = await api<{ jobs: StatementImportJob[] }>(
+      `/accounts/${account.id}/statement-import-jobs?limit=25`, {}, token,
+    );
+    setStatementJobs(result.jobs);
+  }
+
+  useEffect(() => {
+    void loadStatementJobs().catch((nextError) => setError(message(nextError)));
+  }, [account?.id, token]);
 
   async function designateSuspense() {
     const candidate = sameCurrencyBuckets.find((item) => item.id === Number(designationId));
@@ -92,43 +107,42 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     void loadQuestions().catch((nextError) => setError(message(nextError)));
   }, [token]);
 
-  async function copyAgentHandoff() {
-    if (!account || !suspense) return;
-    const accountObject = {
-      objectType: "accounting.account",
-      id: account.id,
-      sourceRef: `accounting://accounts/${account.id}`,
-      displayName: paths.get(account.id),
-      currencyCode: account.currencyCode,
-      scale: account.scale,
-    };
-    const suspenseObject = {
-      objectType: "accounting.account",
-      id: suspense.id,
-      sourceRef: `accounting://accounts/${suspense.id}`,
-      displayName: paths.get(suspense.id),
-      currencyCode: suspense.currencyCode,
-      scale: suspense.scale,
-    };
-    const instructions = [
-      "I am attaching one account statement.",
-      `Statement account object: ${JSON.stringify(accountObject)}`,
-      `Designated suspense account object: ${JSON.stringify(suspenseObject)}`,
-      "Use the Accounting MCP single-account statement workflow. First call start_single_account_statement_import for the statement account. That read-only call only returns requirements; it does not start or save an import and is not a completed response.",
-      "Answer its four questions from the attached document, in this order:",
-      "1. Does it contain a beginning balance and date? Extract both, and say whether that date is the first included statement date or an explicit end-of-day balance date. If it is the first included date, the balance belongs to the previous calendar day.",
-      "2. Does it contain an ending balance with a date? Extract both exactly.",
-      "3. What are every line item's date and signed change to the displayed statement balance (positive increases it; negative decreases it)?",
-      "4. What payee, description, memo, reference, or other text is available for each line?",
-      "Missing opening or closing balances are fine; report them as absent and continue with the transactions. Do not guess any counteraccount, category, transfer, fee, or price.",
-      "For an attached file, transform every source row to the returned canonical schema, upload the complete generated JSON Lines artifact, and submit the answers once to import_single_account_statement_artifact. Use import_single_account_statement only when the bounded rows are already present directly in the interaction. Accounting will first exclude rows on or before an existing matching known-balance checkpoint, then perform duplicate and remaining-balance analysis, use the designated suspense account, and keep every proposed row available in the account register as Imported include or Imported exclude. In chat, present a compact summary and the exact confirmation question; do not list every row unless asked. Do not run another LLM deduplication pass. Ask once before commit_transaction_import. Check any known closing balance after commit; reconcile only when it matches.",
-    ].join("\n");
+  async function uploadStatement() {
+    if (!account || !statementFile) return;
+    setBusy("upload"); setError(""); setNotice("");
     try {
-      await navigator.clipboard.writeText(instructions);
-      setNotice("Agent handoff copied. Attach the statement in your agent and paste the instructions.");
+      const result = await uploadStatementPdf<{ job: StatementImportJob }>(account.id, statementFile, token);
+      setStatementJobs((current) => [result.job, ...current]);
+      setStatementFile(null);
+      setNotice("The original PDF is saved in Accounting. Nothing has been posted.");
+    } catch (nextError) { setError(message(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function copyAgentHandoff() {
+    if (!activeStatementJob || !suspense) return;
+    try {
+      await navigator.clipboard.writeText(activeStatementJob.copiedPrompt);
+      setNotice("Agent handoff copied. Paste it into your agent; the agent will retrieve the complete PDF from Accounting.");
     } catch {
-      setError("Clipboard access was blocked. Select the account objects and copy them manually.");
+      setError("Clipboard access was blocked. Copy the statement job reference manually.");
     }
+  }
+
+  async function restartStatementJob() {
+    if (!activeStatementJob || !window.confirm(
+      "Restart this uncommitted statement import? Accounting will keep the original PDF but permanently remove the current job, derived artifact, and pending preview.",
+    )) return;
+    setBusy("restart"); setError(""); setNotice("");
+    try {
+      const result = await api<{ job: StatementImportJob }>(
+        `/statement-import-jobs/${activeStatementJob.id}/restart`, { method: "POST", body: "{}" }, token,
+      );
+      setStatementJobs((current) => [result.job,
+        ...current.filter((job) => job.id !== activeStatementJob.id)]);
+      setNotice("The processing state was removed and a fresh job was created from the unchanged original PDF.");
+    } catch (nextError) { setError(message(nextError)); }
+    finally { setBusy(""); }
   }
 
   async function assign(question: AccountingQuestion) {
@@ -156,10 +170,10 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   return <section className="statement-workspace card">
     <div className="section-heading"><div><p className="eyebrow">Agent statement workflow</p>
       <h2>One statement, one account</h2></div></div>
-    <p className="muted">Choose the statement account and designate where unresolved entries wait, then attach the CSV, PDF, or screenshot in your agent. Accounting imports the transaction rows and keeps questions for later matching.</p>
+    <p className="muted">Upload the original PDF directly to Accounting. Your agent retrieves that exact document, creates a pending review, and leaves posting for your explicit approval.</p>
     <div className="statement-layout">
       <section className="statement-import-panel">
-        <h3>1. Select the statement account</h3>
+        <h3>Statement account</h3>
         <label>Statement account<select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
           <option value="">Choose account</option>
           {postable.map((candidate) => <option key={candidate.id} value={candidate.id}>
@@ -167,6 +181,21 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
           </option>)}
         </select></label>
         {latestAssertion && <p className="statement-file">Latest known balance: {latestAssertion.date} · {unitsToDecimal(latestAssertion.knownBalanceUnits, latestAssertion.scale)} {latestAssertion.currencyCode}</p>}
+
+        <h3>1. Upload the original PDF</h3>
+        {!activeStatementJob && <>
+          <label>Statement PDF<input type="file" accept="application/pdf,.pdf"
+            onChange={(event) => setStatementFile(event.target.files?.[0] ?? null)} /></label>
+          <button type="button" className="primary" disabled={!account || !statementFile || Boolean(busy)}
+            onClick={() => void uploadStatement()}>{busy === "upload" ? "Uploading…" : "Save PDF in Accounting"}</button>
+        </>}
+        {activeStatementJob && <div className="statement-file"><strong>{activeStatementJob.evidenceFile.fileName}</strong>
+          <span>{activeStatementJob.status.replaceAll("_", " ")} · {activeStatementJob.evidenceFile.sha256}</span>
+          <button type="button" className="link-button" onClick={() => void downloadEvidenceFile(
+            activeStatementJob.evidenceFile.downloadPath
+              ?? `/api/evidence-files/${activeStatementJob.evidenceFile.id}/content`,
+            activeStatementJob.evidenceFile.fileName, token,
+          ).catch((nextError) => setError(message(nextError)))}>Download original PDF</button></div>}
 
         <h3>2. Designate where unknown sides wait</h3>
         {suspense && <p className="statement-file">Suspense account: {paths.get(suspense.id)} · {suspense.currencyCode}</p>}
@@ -192,8 +221,14 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
           <li>All available text for every line item.</li>
         </ol>
         <p className="muted">No category guessing happens during intake. Each unknown counterline remains an open question in the suspense account for later matching or classification.</p>
-        <button type="button" className="primary" disabled={!account || !suspense}
+        <button type="button" className="primary" disabled={!activeStatementJob || !suspense || Boolean(busy)}
           onClick={() => void copyAgentHandoff()}>Copy agent handoff</button>
+        {activeStatementJob && activeStatementJob.status !== "committed" && <button type="button" className="secondary"
+          disabled={Boolean(busy)} onClick={() => void restartStatementJob()}>
+          {busy === "restart" ? "Restarting…" : "Restart from original PDF"}</button>}
+        {activeStatementJob && <button type="button" className="link-button" disabled={Boolean(busy)}
+          onClick={() => void loadStatementJobs().catch((nextError) => setError(message(nextError)))}>
+          Refresh statement status</button>}
       </section>
 
       <section className="statement-questions-panel">

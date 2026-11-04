@@ -200,7 +200,7 @@ test("the authoritative account read bootstraps the exact binding required by st
       toolDefinition: statementStart,
       argumentsObject: { account_id: 1 },
       observedGroups: observed,
-    }), /must use the exact id.*178/);
+    }), /must use (?:(?:an|the) )?exact(?: verified)? id.*178/);
   } finally {
     await client.close();
     await server.close();

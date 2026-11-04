@@ -155,6 +155,16 @@ function normalizeImportReview(review, transactions) {
     throw importError("An import review requires a positive account ID.", "INVALID_IMPORT_REVIEW");
   }
   const statementId = limitedRequiredText(review.statementId, "statement ID", 128);
+  const statementJobId = review.statementJobId == null ? null
+    : limitedRequiredText(review.statementJobId, "statement job ID", 36);
+  if (statementJobId != null && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(statementJobId)) {
+    throw importError("Statement job ID must be a UUID.", "INVALID_IMPORT_REVIEW");
+  }
+  const evidenceFileId = review.evidenceFileId == null ? null : Number(review.evidenceFileId);
+  if ((statementJobId == null) !== (evidenceFileId == null)
+      || (evidenceFileId != null && (!Number.isInteger(evidenceFileId) || evidenceFileId <= 0))) {
+    throw importError("Statement-job imports require one exact evidence file.", "INVALID_IMPORT_REVIEW");
+  }
   const externalIds = new Set(transactions.map((transaction) => transaction.externalId));
   const supplied = Array.isArray(review.decisions) ? review.decisions : [];
   const byExternalId = new Map();
@@ -186,7 +196,8 @@ function normalizeImportReview(review, transactions) {
       reason: "No conclusive duplicate evidence was found.", sourceRecordId: null, matchedTransactionIds: [],
     });
   }
-  return { accountId, statementId, decisions: [...byExternalId.values()] };
+  return { accountId, statementId, statementJobId, evidenceFileId,
+    decisions: [...byExternalId.values()] };
 }
 
 function normalizeReconciliation(reconciliation) {
@@ -229,7 +240,7 @@ async function inspectKnownBalanceAssertions(connection, personId, assertions, {
   const results = [];
   for (const assertion of assertions) {
     const [existing] = await connection.query(
-      `SELECT known_balance_units FROM account_balance_assertions
+      `SELECT account_balance_assertion_id, known_balance_units FROM account_balance_assertions
         WHERE owner_person_id = ? AND account_id = ? AND balance_date = ?${commit ? " FOR UPDATE" : ""}`,
       [personId, assertion.accountId, assertion.balanceDate],
     );
@@ -244,13 +255,14 @@ async function inspectKnownBalanceAssertions(connection, personId, assertions, {
       );
       created = insert.affectedRows === 1;
       const [rows] = await connection.query(
-        `SELECT known_balance_units FROM account_balance_assertions
+        `SELECT account_balance_assertion_id, known_balance_units FROM account_balance_assertions
           WHERE owner_person_id = ? AND account_id = ? AND balance_date = ?`,
         [personId, assertion.accountId, assertion.balanceDate],
       );
       stored = rows[0];
     }
     results.push({
+      assertionId: stored == null ? null : Number(stored.account_balance_assertion_id),
       accountId: assertion.accountId, balanceDate: assertion.balanceDate,
       sourceKnownBalanceUnits: assertion.knownBalanceUnits,
       storedKnownBalanceUnits: stored == null ? null : String(stored.known_balance_units),
@@ -1125,6 +1137,79 @@ export async function insertImportedTransaction(connection, personId, sourceSyst
   return transactionId;
 }
 
+async function lockStatementEvidenceContext(connection, personId, importPlanId, importReview) {
+  if (importReview?.statementJobId == null) return null;
+  const [rows] = await connection.query(
+    `SELECT sij.statement_import_job_id, sij.job_status, sij.import_plan_id,
+            sij.account_id, sij.evidence_file_id, ef.sha256
+       FROM accounting_statement_import_jobs sij
+       JOIN accounting_evidence_files ef
+         ON ef.evidence_file_id = sij.evidence_file_id AND ef.owner_person_id = sij.owner_person_id
+      WHERE sij.statement_import_job_id = ? AND sij.owner_person_id = ? FOR UPDATE`,
+    [importReview.statementJobId, personId],
+  );
+  const row = rows[0];
+  const expectedDigest = String(importReview.statementId).replace(/^sha256:/u, "");
+  if (!row || row.job_status !== "preview_ready" || String(row.import_plan_id) !== String(importPlanId)
+      || Number(row.account_id) !== Number(importReview.accountId)
+      || Number(row.evidence_file_id) !== Number(importReview.evidenceFileId)
+      || String(row.sha256) !== expectedDigest) {
+    throw importError("The statement job, original evidence, account, and preview binding no longer match.",
+      "STATEMENT_JOB_BINDING_CONFLICT", undefined, 409);
+  }
+  return {
+    jobId: String(row.statement_import_job_id), accountId: Number(row.account_id),
+    evidenceFileId: Number(row.evidence_file_id),
+  };
+}
+
+async function attachStatementEvidence(connection, personId, context, entries, balanceAssertions) {
+  if (context == null) return { lineItemLinkCount: 0, balanceAssertionLinkCount: 0 };
+  let lineItemLinkCount = 0;
+  for (const entry of entries) {
+    if (!new Set(["created", "existing"]).has(entry.status) || !entry.transactionId) continue;
+    const statementLine = entry.resolved.lineItems.find((line) => line.accountId === context.accountId);
+    if (!statementLine) throw importError("Imported transaction lost its authoritative statement line.",
+      "STATEMENT_EVIDENCE_LINE_NOT_FOUND", { transactionId: entry.transactionId }, 500);
+    const [lines] = await connection.query(
+      `SELECT li.line_item_id
+         FROM line_items li
+         JOIN transactions t ON t.transaction_id = li.transaction_id
+        WHERE li.transaction_id = ? AND li.account_id = ? AND li.source_id <=> ?
+          AND t.owner_person_id = ?
+        ORDER BY li.line_item_id LIMIT 2`,
+      [entry.transactionId, context.accountId, statementLine.externalId, personId],
+    );
+    if (lines.length !== 1) throw importError("The authoritative statement line could not be identified exactly.",
+      "STATEMENT_EVIDENCE_LINE_NOT_FOUND", { transactionId: entry.transactionId }, 500);
+    const [link] = await connection.query(
+      `INSERT IGNORE INTO line_item_evidence_links
+        (evidence_file_id, line_item_id, evidence_role, source_record_id)
+       VALUES (?, ?, 'source_statement', ?)`,
+      [context.evidenceFileId, Number(lines[0].line_item_id), entry.reviewDecision?.sourceRecordId ?? null],
+    );
+    lineItemLinkCount += Number(link.affectedRows);
+  }
+  let balanceAssertionLinkCount = 0;
+  for (const assertion of balanceAssertions) {
+    if (!assertion.assertionId) continue;
+    const [link] = await connection.query(
+      `INSERT IGNORE INTO balance_assertion_evidence_links
+        (evidence_file_id, account_balance_assertion_id, evidence_role)
+       VALUES (?, ?, 'source_statement')`,
+      [context.evidenceFileId, assertion.assertionId],
+    );
+    balanceAssertionLinkCount += Number(link.affectedRows);
+  }
+  await connection.query(
+    `UPDATE accounting_statement_import_jobs
+        SET job_status = 'committed', committed_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6)
+      WHERE statement_import_job_id = ? AND owner_person_id = ?`,
+    [context.jobId, personId],
+  );
+  return { lineItemLinkCount, balanceAssertionLinkCount };
+}
+
 export async function commitTransactionImportPlan({ pool, personId, importPlanId }) {
   const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
   const outcome = await withPoolTransaction(pool, async (connection) => {
@@ -1161,6 +1246,8 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     }
 
     const normalized = JSON.parse(plan.payload_json);
+    const statementEvidence = await lockStatementEvidenceContext(connection, personId,
+      resolvedPlanId, normalized.importReview);
     if (normalized.valuationContractVersion !== 3) {
       await connection.query(
         `UPDATE accounting_import_plans
@@ -1206,8 +1293,15 @@ export async function commitTransactionImportPlan({ pool, personId, importPlanId
     }
     const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
       normalized.knownBalanceAssertions ?? [], { commit: true });
+    const evidenceLinks = await attachStatementEvidence(connection, personId,
+      statementEvidence, entries, balanceAssertions);
     const result = { ...summarize(normalized, entries, { ledgerChanged: true }),
       ...(balanceAssertions.length ? { balanceAssertions } : {}),
+      ...(statementEvidence == null ? {} : { statementEvidence: {
+        statementImportJobId: statementEvidence.jobId,
+        evidenceFileId: statementEvidence.evidenceFileId,
+        ...evidenceLinks,
+      } }),
       ...(reconciliationValidation == null ? {} : { reconciliationValidation }),
       ...identity, readyToCommit: false, status: "committed", committed: true, alreadyCommitted: false };
     const resultJson = JSON.stringify(result);

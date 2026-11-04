@@ -1,5 +1,5 @@
 import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
-import { api, ApiError, mcpEndpointUrl } from "./api";
+import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
@@ -1954,6 +1954,18 @@ function formatRegisterDate(value: string) {
   return month ? `${match[3]} ${month} ${match[1]}` : value;
 }
 
+function importReviewDateRange(review: TransactionImportReview) {
+  const dates = review.rows.map((row) => row.transactionDate).sort();
+  if (dates.length === 0) return "No dated rows";
+  if (dates[0] === dates.at(-1)) return formatRegisterDate(dates[0]);
+  return `${formatRegisterDate(dates[0])} – ${formatRegisterDate(dates.at(-1) ?? dates[0])}`;
+}
+
+function formatImportReviewExpiry(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token, onShowAll,
   onImportStatement, openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
@@ -2230,8 +2242,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
-      <div><strong>Statement import ready for review</strong>
-        <small>{review.includedCount} included · {review.excludedCount} excluded. Toggle rows below, then accept.</small></div>
+      <div><strong>Pending statement import · not posted</strong>
+        <small>{review.rows.length} proposed rows ({review.includedCount} included · {review.excludedCount} excluded) · {importReviewDateRange(review)}</small>
+        <small>Saved in this account register. Review the highlighted rows below, then accept to post them. Expires {formatImportReviewExpiry(review.expiresAt)}.</small></div>
       <button type="button" className="primary" disabled={importReviewBusy !== ""}
         onClick={() => void acceptImportReview(review)}>
         {importReviewBusy === review.importPlanId ? "Accepting…" : "Accept import settings"}</button>
@@ -2272,7 +2285,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               <td>{formatRegisterDate(assertion.date)}</td>
               <td><strong>Known balance</strong><small>{assertion.matches
                 ? "Matches the ledger"
-                : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small></td>
+                : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small>
+                {assertion.evidenceFiles?.map((evidence) => <button type="button" className="register-evidence-link"
+                  key={evidence.id} onClick={() => void downloadEvidenceFile(
+                    evidence.downloadPath ?? `/api/evidence-files/${evidence.id}/content`, evidence.fileName, token,
+                  ).catch((nextError) => setReconciliationError(errorMessage(nextError)))}>
+                  PDF evidence · {evidence.fileName}</button>)}</td>
               <td></td>
               <td className="amount balance">{unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</td>
               <td className="amount known-balance"><div className="known-balance-controls">
@@ -2398,7 +2416,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
               <td className="register-description"><strong title={entry.description || "Untitled transaction"}>
                 {entry.description || "Untitled transaction"}</strong>
-                {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
+                {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}
+                {entry.evidenceFiles.map((evidence) => <button type="button" className="register-evidence-link"
+                  key={evidence.id} onClick={(event) => {
+                    event.stopPropagation();
+                    void downloadEvidenceFile(evidence.downloadPath
+                      ?? `/api/evidence-files/${evidence.id}/content`, evidence.fileName, token)
+                      .catch((nextError) => setSelectionError(errorMessage(nextError)));
+                  }} onKeyDown={(event) => event.stopPropagation()}>
+                  PDF evidence · {evidence.fileName}</button>)}</td>
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
                 {signedAccountMovement(row.totalAmountUnits, account)}</td>
               <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>

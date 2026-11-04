@@ -19,7 +19,18 @@ import { commitUserDeletion, getUserDataSummary, previewUserDeletion } from "./u
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
 import { listAccountingQuestionsPage, resolveAccountingQuestion } from "./accounting-questions.js";
-import { ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, resolveArtifactUploadRoot } from "./artifact-upload.js";
+import {
+  ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, removeArtifactUpload, resolveArtifactUploadRoot,
+} from "./artifact-upload.js";
+import {
+  STATEMENT_EVIDENCE_MAX_BYTES,
+  createStatementImportFromPdf,
+  getStatementImportJob,
+  listStatementImportJobs,
+  resolveEvidenceRoot,
+  restartStatementImportJob,
+  sendEvidenceFileContent,
+} from "./statement-import-jobs.js";
 import {
   commitTransactionImportJob,
   excludeTransactionImportException,
@@ -39,12 +50,15 @@ const app = express();
 const port = Number(process.env.API_PORT || 5004);
 const host = process.env.API_HOST || "127.0.0.1";
 const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const artifactRoot = resolveArtifactUploadRoot();
+const evidenceRoot = resolveEvidenceRoot();
 
 app.disable("x-powered-by");
 app.use(cors({ origin: clientOrigin }));
 mountAccountingMcp(app, {
   pool,
-  artifactRoot: resolveArtifactUploadRoot(),
+  artifactRoot,
+  evidenceRoot,
   jsonBodyParser: express.json({ limit: TRANSACTION_IMPORT_HTTP_BODY_LIMIT }),
   artifactJsonBodyParser: express.json({ limit: "64kb" }),
   artifactRawBodyParser: express.raw({ type: "application/octet-stream", limit: ARTIFACT_UPLOAD_MAX_CHUNK_BYTES }),
@@ -121,6 +135,57 @@ app.get("/api/accounts/:accountId/ledger", requireAuth, async (req, res, next) =
 app.get("/api/accounts/:accountId/import-reviews", requireAuth, async (req, res, next) => {
   try { res.json({ reviews: await listAccountTransactionImportReviews({ pool, personId: req.auth.personId,
     accountId: req.params.accountId }) }); } catch (error) { next(error); }
+});
+
+app.get("/api/accounts/:accountId/statement-import-jobs", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ jobs: await listStatementImportJobs({ pool, personId: req.auth.personId,
+      accountId: req.params.accountId, limit: req.query.limit ?? 25 }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/accounts/:accountId/statement-import-jobs", requireAuth,
+  express.raw({ type: "application/pdf", limit: STATEMENT_EVIDENCE_MAX_BYTES }), async (req, res, next) => {
+    try {
+      let fileName;
+      try { fileName = decodeURIComponent(String(req.get("X-File-Name") ?? "")); } catch {
+        return res.status(400).json({ error: "INVALID_STATEMENT_FILE_NAME",
+          message: "The statement filename header is invalid." });
+      }
+      return res.status(201).json({ job: await createStatementImportFromPdf({
+        pool, evidenceRoot, personId: req.auth.personId, accountId: req.params.accountId,
+        fileName, mediaType: req.get("Content-Type"), bytes: req.body,
+      }) });
+    } catch (error) { return next(error); }
+  });
+
+app.get("/api/statement-import-jobs/:statementImportJobId", requireAuth, async (req, res, next) => {
+  try { res.json({ job: await getStatementImportJob({ pool, personId: req.auth.personId,
+    statementImportJobId: req.params.statementImportJobId }) }); } catch (error) { next(error); }
+});
+
+app.post("/api/statement-import-jobs/:statementImportJobId/restart", requireAuth, async (req, res, next) => {
+  try {
+    const restarted = await restartStatementImportJob({ pool, personId: req.auth.personId,
+      statementImportJobId: req.params.statementImportJobId });
+    if (restarted.removedCanonicalArtifactId) {
+      await removeArtifactUpload({ artifactRoot, personId: req.auth.personId,
+        artifactId: restarted.removedCanonicalArtifactId });
+    }
+    res.status(201).json({ job: restarted.job });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/evidence-files/:evidenceFileId/content", requireAuth, async (req, res, next) => {
+  try { await sendEvidenceFileContent({ pool, evidenceRoot, personId: req.auth.personId,
+    evidenceFileId: req.params.evidenceFileId, rangeHeader: req.get("Range"), method: req.method,
+    response: res }); } catch (error) { next(error); }
+});
+
+app.head("/api/evidence-files/:evidenceFileId/content", requireAuth, async (req, res, next) => {
+  try { await sendEvidenceFileContent({ pool, evidenceRoot, personId: req.auth.personId,
+    evidenceFileId: req.params.evidenceFileId, rangeHeader: req.get("Range"), method: req.method,
+    response: res }); } catch (error) { next(error); }
 });
 
 app.patch("/api/accounts/:accountId/import-reviews/:importPlanId/rows/:externalId", requireAuth,

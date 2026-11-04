@@ -378,6 +378,25 @@ export async function bindArtifactToImportJob({ artifactRoot, personId, artifact
   });
 }
 
+export async function removeArtifactUpload({ artifactRoot, personId, artifactId }) {
+  const normalizedArtifactId = uuid(artifactId, "artifact ID");
+  const paths = artifactPaths(artifactRoot, personId, normalizedArtifactId);
+  return withLock(paths.lock, async () => {
+    let metadata;
+    try {
+      metadata = await readMetadata(paths);
+    } catch (error) {
+      if (error.code === "ARTIFACT_NOT_FOUND") return { artifact_id: normalizedArtifactId, removed: false };
+      throw error;
+    }
+    if (metadata.bound_import_job_id) {
+      await rm(path.join(paths.jobs, `${metadata.bound_import_job_id}.json`), { force: true });
+    }
+    await rm(paths.directory, { recursive: true, force: true });
+    return { artifact_id: normalizedArtifactId, removed: true };
+  });
+}
+
 function parseCanonicalJsonLinesArtifact(bytes, artifactMediaType, label, unsupportedCode) {
   const normalizedMediaType = mediaType(artifactMediaType);
   if (!TRANSACTION_IMPORT_ARTIFACT_MEDIA_TYPES.includes(normalizedMediaType)) throw artifactError(

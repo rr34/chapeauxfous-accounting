@@ -63,6 +63,34 @@ function mapAssertion(row) {
   };
 }
 
+async function attachAssertionEvidence(connection, personId, assertions) {
+  if (!assertions.length) return assertions;
+  const ids = assertions.map((assertion) => assertion.id);
+  const [rows] = await connection.query(
+    `SELECT bael.account_balance_assertion_id, ef.evidence_file_id, ef.original_file_name,
+            ef.media_type, ef.byte_size, ef.sha256, bael.evidence_role
+       FROM balance_assertion_evidence_links bael
+       JOIN accounting_evidence_files ef ON ef.evidence_file_id = bael.evidence_file_id
+      WHERE ef.owner_person_id = ?
+        AND bael.account_balance_assertion_id IN (${ids.map(() => "?").join(", ")})
+      ORDER BY bael.account_balance_assertion_id, ef.evidence_file_id`,
+    [personId, ...ids],
+  );
+  const byAssertion = new Map();
+  for (const row of rows) {
+    const id = Number(row.account_balance_assertion_id);
+    if (!byAssertion.has(id)) byAssertion.set(id, []);
+    byAssertion.get(id).push({
+      id: Number(row.evidence_file_id), fileName: String(row.original_file_name),
+      mediaType: String(row.media_type), byteSize: Number(row.byte_size),
+      sha256: `sha256:${String(row.sha256)}`, role: String(row.evidence_role),
+      downloadPath: `/api/evidence-files/${row.evidence_file_id}/content`,
+    });
+  }
+  return assertions.map((assertion) => ({ ...assertion,
+    evidenceFiles: byAssertion.get(assertion.id) ?? [] }));
+}
+
 export async function listBalanceAssertions(pool, personId) {
   const [rows] = await pool.query(
     `${assertionSelect}
@@ -70,7 +98,7 @@ export async function listBalanceAssertions(pool, personId) {
       ORDER BY aba.balance_date DESC, a.AccountName, aba.account_balance_assertion_id DESC`,
     [personId],
   );
-  return rows.map(mapAssertion);
+  return attachAssertionEvidence(pool, personId, rows.map(mapAssertion));
 }
 
 export async function listMatchingBalanceCheckpoints(pool, personId, accountIds, throughDate) {
@@ -109,7 +137,7 @@ export async function listBalanceAssertionsPage(pool, personId, { limit = 100, b
     cursor == null ? [personId, resolvedLimit + 1] : [personId, cursor, resolvedLimit + 1],
   );
   const hasMore = rows.length > resolvedLimit;
-  const assertions = rows.slice(0, resolvedLimit).map(mapAssertion);
+  const assertions = await attachAssertionEvidence(pool, personId, rows.slice(0, resolvedLimit).map(mapAssertion));
   return { assertions, nextCursor: hasMore ? String(assertions.at(-1).id) : null };
 }
 
@@ -124,7 +152,7 @@ export async function getBalanceAssertion(pool, personId, assertionId) {
     [resolvedAssertionId, personId],
   );
   if (!rows.length) throw applicationError("Balance assertion not found.", 404, "BALANCE_ASSERTION_NOT_FOUND");
-  return mapAssertion(rows[0]);
+  return (await attachAssertionEvidence(pool, personId, [mapAssertion(rows[0])]))[0];
 }
 
 export async function saveBalanceAssertion({ personId, accountId, balanceDate, knownBalanceUnits }) {
@@ -161,6 +189,6 @@ export async function saveBalanceAssertion({ personId, accountId, balanceDate, k
         WHERE aba.account_balance_assertion_id = ? AND aba.owner_person_id = ?`,
       [Number(result.insertId), personId],
     );
-    return mapAssertion(rows[0]);
+    return (await attachAssertionEvidence(connection, personId, [mapAssertion(rows[0])]))[0];
   });
 }

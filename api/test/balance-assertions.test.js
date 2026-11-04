@@ -10,7 +10,11 @@ const { listBalanceAssertions, listMatchingBalanceCheckpoints } = await import("
 
 test("a balance assertion reports the exact known-minus-ledger difference", async () => {
   const pool = {
-    async query(_sql, params) {
+    async query(sql, params) {
+      if (sql.includes("FROM balance_assertion_evidence_links")) {
+        assert.deepEqual(params, [7, 12]);
+        return [[]];
+      }
       assert.deepEqual(params, [7]);
       return [[{
         account_balance_assertion_id: 12,
@@ -35,7 +39,11 @@ test("a balance assertion reports the exact known-minus-ledger difference", asyn
 
 test("credit-normal balance assertions compare against credits minus debits", async () => {
   const pool = {
-    async query(_sql, params) {
+    async query(sql, params) {
+      if (sql.includes("FROM balance_assertion_evidence_links")) {
+        assert.deepEqual(params, [7, 1, 2, 3]);
+        return [[]];
+      }
       assert.deepEqual(params, [7]);
       return [["liability", "income", "equity"].map((accountType, index) => ({
         account_balance_assertion_id: index + 1,

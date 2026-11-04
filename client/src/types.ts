@@ -46,6 +46,41 @@ export type Account = {
   archivedAt: string | null;
 };
 
+export type EvidenceFile = {
+  id: number;
+  fileName: string;
+  mediaType: string;
+  byteSize: number;
+  sha256: string;
+  role?: string;
+  sourceRecordId?: string | null;
+  downloadPath?: string;
+};
+
+export type StatementImportJob = {
+  objectType: "accounting.statement_import_job";
+  id: string;
+  sourceRef: string;
+  displayName: string;
+  status: "ready" | "processing" | "preview_ready" | "committed";
+  account: {
+    objectType: "accounting.account";
+    id: number;
+    sourceRef: string;
+    displayName: string;
+    currencyCode: string;
+    scale: number;
+  };
+  evidenceFile: EvidenceFile & { sourceRef: string; displayName: string; createdAt: string };
+  sourceDocumentId: string;
+  importPlanId: string | null;
+  canonicalArtifactId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  committedAt: string | null;
+  copiedPrompt: string;
+};
+
 export type AccountLedgerEntry = {
   lineItemId: number;
   transactionId: number;
@@ -66,6 +101,7 @@ export type AccountLedgerEntry = {
   debitUnits: string | null;
   creditUnits: string | null;
   runningBalanceUnits: string;
+  evidenceFiles: EvidenceFile[];
 };
 
 export type TransactionImportReview = {
@@ -105,6 +141,7 @@ export type BalanceAssertion = {
   currencyId: number;
   currencyCode: string;
   scale: number;
+  evidenceFiles?: EvidenceFile[];
 };
 
 export type TransactionSummary = {

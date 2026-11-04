@@ -152,6 +152,51 @@ export const transactionImportJobObjectDescription = Object.freeze({
   }],
 });
 
+export const statementImportJobObjectDescription = Object.freeze({
+  protocol: "agent-slayer.object-description",
+  version: 1,
+  types: [{
+    id: "accounting.statement_import_job",
+    title: "Statement import job",
+    summary: "One disposable owner-scoped processing run for an immutable PDF already bound to one ledger account.",
+    aliases: ["statement job", "pending statement", "statement import"],
+    identity: { field: "id", summary: "Disposable provider-owned statement-job UUID." },
+    reference: { field: "sourceRef", summary: "Stable accounting://statement-import-jobs/{id} reference for this run." },
+    display: { field: "displayName", summary: "Source filename, statement account, and current job state." },
+    qualifiers: [
+      { field: "status", summary: "Ready, processing, preview-ready, or committed state." },
+      { field: "sourceDocumentId", summary: "SHA-256 identity of the immutable original PDF." },
+      { field: "createdAt", summary: "Creation time of this disposable processing job." },
+    ],
+    relationships: [
+      { name: "account", targetType: "accounting.account",
+        summary: "account.id identifies the one account selected before upload." },
+      { name: "evidence_file", targetType: "accounting.evidence_file",
+        summary: "evidenceFile.id identifies the immutable original PDF." },
+    ],
+  }],
+});
+
+export const evidenceFileObjectDescription = Object.freeze({
+  protocol: "agent-slayer.object-description",
+  version: 1,
+  types: [{
+    id: "accounting.evidence_file",
+    title: "Accounting evidence file",
+    summary: "One immutable owner-scoped file retained as evidence for accounting records.",
+    aliases: ["evidence", "statement PDF", "source document"],
+    identity: { field: "id", summary: "Stable owner-scoped evidence-file ID." },
+    reference: { field: "sourceRef", summary: "Stable accounting://evidence-files/{id} reference." },
+    display: { field: "displayName", summary: "Safe original filename." },
+    qualifiers: [
+      { field: "mediaType", summary: "Verified media type; direct statement evidence is application/pdf." },
+      { field: "byteSize", summary: "Exact immutable byte count." },
+      { field: "sha256", summary: "SHA-256 integrity identity of the complete bytes." },
+      { field: "createdAt", summary: "Time Accounting first accepted the immutable bytes." },
+    ],
+  }],
+});
+
 export const balanceAssertionObjectDescription = Object.freeze({
   protocol: "agent-slayer.object-description",
   version: 1,
