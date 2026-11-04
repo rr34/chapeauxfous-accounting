@@ -13,14 +13,20 @@ try {
   if (versions.length !== 1 || Number(versions[0].schema_version) !== expectedVersion) {
     throw new Error(`Expected schema version ${expectedVersion}; found ${versions[0]?.schema_version ?? "none"}`);
   }
+  const requiredTables = [
+    "people2_people", "accounts", "transactions", "line_items", "tags", "lineitems_tags_join", "xrates",
+    "account_balance_assertions", "accounting_import_plans", "api_tokens",
+    "accounting_evidence_files", "accounting_statement_import_jobs",
+    "line_item_evidence_links", "balance_assertion_evidence_links",
+  ];
   const [tables] = await pool.query(
     `SELECT TABLE_NAME FROM information_schema.TABLES
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN
-        ('people2_people','accounts','transactions','line_items','tags','lineitems_tags_join','xrates',
-         'account_balance_assertions','accounting_import_plans','api_tokens')`,
-    [databaseName],
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (${requiredTables.map(() => "?").join(",")})`,
+    [databaseName, ...requiredTables],
   );
-  if (tables.length !== 10) throw new Error("Required accounting tables are missing");
+  const presentTables = new Set(tables.map((row) => row.TABLE_NAME));
+  const missingTables = requiredTables.filter((table) => !presentTables.has(table));
+  if (missingTables.length) throw new Error(`Required accounting tables are missing: ${missingTables.join(", ")}`);
   const [storageComments] = await pool.query(
     `SELECT COUNT(DISTINCT t.TABLE_NAME) AS table_count,
             SUM(t.TABLE_COMMENT = '') AS missing_table_comments,
@@ -32,9 +38,10 @@ try {
     [databaseName],
   );
   const comments = storageComments[0];
-  if (Number(comments.table_count) !== 15 || Number(comments.missing_table_comments) !== 0
+  if (Number(comments.table_count) !== 19 || Number(comments.missing_table_comments) !== 0
     || Number(comments.missing_column_comments) !== 0) {
-    throw new Error("Accounting storage comments are incomplete");
+    throw new Error(`Accounting storage comments are incomplete: expected 19 tables; found ${comments.table_count}; `
+      + `${comments.missing_table_comments} table comments and ${comments.missing_column_comments} column comments are missing.`);
   }
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);
