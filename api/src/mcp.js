@@ -76,6 +76,7 @@ import {
   SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI,
   singleAccountStatementArtifactUpload,
   singleAccountStatementImportCanonicalJsonSchema,
+  statementImportJobArtifactUpload,
   statementObservationAnalysisSchema,
   statementReconciliationContextSchema,
   structuredErrorSchema,
@@ -2356,7 +2357,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           answerShape: [{ source_record_id: "same row id as question 5", available_text: "string or null" }] },
       ],
       canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
-      artifactUpload: singleAccountStatementArtifactUpload,
+      artifactUpload: statementImportJobArtifactUpload,
       nextTool: "submit_statement_import_job_artifact",
       inlineNextTool: "import_single_account_statement",
       rules: [
@@ -2628,7 +2629,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     _meta: toolMetadata("accounting.reconciliation", {
       dependencies: ["start_single_account_statement_import", "list_account_objects"],
       attachmentHints: [
-        "Transform the complete source to the canonical schema returned by start_single_account_statement_import, then upload that generated JSON Lines file.",
+        "Produce complete structured records matching the canonical schema returned by start_single_account_statement_import and let the host validate and materialize their JSON Lines artifact.",
+        "Upload only that complete derived artifact through this tool's dedicated advertised transport.",
         "The artifact contains every source row for validation; the user-facing response should summarize the preview unless row details are requested.",
       ],
       artifactUpload: singleAccountStatementArtifactUpload,
@@ -2669,9 +2671,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       dependencies: ["start_statement_import_job"],
       attachmentHints: [
         "Download and process the complete original PDF from the job descriptor; do not substitute server-side text or omit pages.",
-        "Upload only the complete derived canonical JSON Lines artifact through this tool's advertised transport.",
+        "Produce complete structured records matching the returned canonical schema and let the host validate and materialize their JSON Lines artifact.",
+        "Upload only that complete derived artifact through this tool's dedicated advertised transport.",
       ],
-      artifactUpload: singleAccountStatementArtifactUpload,
+      artifactUpload: statementImportJobArtifactUpload,
       objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id" }],
     }),
   }, async ({ statement_import_job_id, artifact_id, include_row_details, ...answers }) => safeWorkflowResult(async () => {

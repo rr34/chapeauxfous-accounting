@@ -595,10 +595,20 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   const inlineStatementImportTool = tools.tools.find((tool) => tool.name === "import_single_account_statement");
   const artifactStatementImportTool = tools.tools.find((tool) =>
     tool.name === "import_single_account_statement_artifact");
+  const statementJobArtifactTool = tools.tools.find((tool) =>
+    tool.name === "submit_statement_import_job_artifact");
   assert.equal(Object.hasOwn(inlineStatementImportTool.inputSchema.properties, "suspense_account_id"), false);
   assert.equal(Object.hasOwn(artifactStatementImportTool.inputSchema.properties, "suspense_account_id"), false);
   assert.equal(artifactStatementImportTool._meta["agent-slayer/artifactUpload"].transportId,
     "single_account_statement_import");
+  assert.equal(statementJobArtifactTool._meta["agent-slayer/artifactUpload"].transportId,
+    "statement_import_job");
+  assert.notEqual(statementJobArtifactTool._meta["agent-slayer/artifactUpload"].transportId,
+    artifactStatementImportTool._meta["agent-slayer/artifactUpload"].transportId);
+  const artifactTransportIds = tools.tools
+    .map((tool) => tool._meta?.["agent-slayer/artifactUpload"]?.transportId)
+    .filter(Boolean);
+  assert.equal(new Set(artifactTransportIds).size, artifactTransportIds.length);
   assert.equal(tools.tools.some((tool) => tool.name === "reconcile_account_through_date"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "search_transactions"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "preview_delete_transactions"), true);
@@ -1125,6 +1135,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "/mcp/evidence-files/81/content");
   assert.match(startedStatementJob.structuredContent.extraction.rules.join(" "),
     /complete original PDF.*(?:omit|preselect) pages/s);
+  assert.equal(startedStatementJob.structuredContent.extraction.artifactUpload.transportId,
+    "statement_import_job");
   const missingStatementBalance = await client.callTool({
     name: "import_single_account_statement",
     arguments: {
