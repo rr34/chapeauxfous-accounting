@@ -95,6 +95,8 @@ export type AccountLedgerEntry = {
   date: string;
   description: string | null;
   memo: string | null;
+  reconciliationState: "unreconciled" | "cleared" | "reconciled";
+  reconciledAt: string | null;
   splitAccountNames: string[];
   splits: Array<{
     lineItemId: number;

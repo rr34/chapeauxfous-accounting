@@ -112,6 +112,7 @@ export async function listAccountLedger(pool, personId, accountId) {
   const account = await getAccount(pool, personId, accountId);
   const [rows] = await pool.query(
     `SELECT li.line_item_id, li.amount_units, li.memo,
+            li.reconciliation_state, li.reconciled_at,
             t.transaction_id, t.TransactionDate, t.description,
             split_line.line_item_id AS split_line_item_id,
             split_line.amount_units AS split_amount_units,
@@ -146,6 +147,8 @@ export async function listAccountLedger(pool, personId, accountId) {
         description: row.description,
         memo: row.memo,
         amountUnits: String(row.amount_units),
+        reconciliationState: String(row.reconciliation_state),
+        reconciledAt: row.reconciled_at == null ? null : String(row.reconciled_at),
         splitAccounts: new Map(),
         splits: new Map(),
       };
@@ -222,6 +225,8 @@ export async function listAccountLedger(pool, personId, accountId) {
       splitAccountNames: [...entry.splitAccounts.values()],
       splits: [...entry.splits.values()],
       evidenceFiles: evidenceByLineItemId.get(entry.lineItemId) ?? [],
+      reconciliationState: entry.reconciliationState,
+      reconciledAt: entry.reconciledAt,
       debitUnits: amount > 0n ? amount.toString() : null,
       creditUnits: amount < 0n ? (-amount).toString() : null,
       runningBalanceUnits: runningBalance.toString(),

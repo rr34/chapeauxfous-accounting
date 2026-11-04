@@ -80,14 +80,19 @@ test("an account ledger groups split accounts and calculates its running balance
         });
         return [[
           { line_item_id: 20, amount_units: "320", memo: null, transaction_id: 10,
+            reconciliation_state: "reconciled", reconciled_at: "2026-08-31",
             TransactionDate: "2026-08-01", description: "Deposit", ...split(20, "320", 3, "Checking") },
           { line_item_id: 20, amount_units: "320", memo: null, transaction_id: 10,
+            reconciliation_state: "reconciled", reconciled_at: "2026-08-31",
             TransactionDate: "2026-08-01", description: "Deposit", ...split(22, "-320", 8, "Income") },
           { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            reconciliation_state: "unreconciled", reconciled_at: null,
             TransactionDate: "2026-08-02", description: "Card purchase", ...split(21, "-120", 3, "Checking", "Lunch") },
           { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            reconciliation_state: "unreconciled", reconciled_at: null,
             TransactionDate: "2026-08-02", description: "Card purchase", ...split(23, "100", 9, "Food") },
           { line_item_id: 21, amount_units: "-120", memo: "Lunch", transaction_id: 11,
+            reconciliation_state: "unreconciled", reconciled_at: null,
             TransactionDate: "2026-08-02", description: "Card purchase", ...split(24, "20", 10, "Tax") },
         ]];
       }
@@ -103,6 +108,7 @@ test("an account ledger groups split accounts and calculates its running balance
   assert.equal(result.account.name, "Checking");
   assert.deepEqual(result.entries, [
     { lineItemId: 20, transactionId: 10, date: "2026-08-01", description: "Deposit", memo: null,
+      reconciliationState: "reconciled", reconciledAt: "2026-08-31",
       splitAccountNames: ["Income"], splits: [
         { lineItemId: 20, accountId: 3, accountName: "Checking", memo: null, amountUnits: "320",
           currencyId: 1, currencyCode: "USD", scale: 2 },
@@ -110,6 +116,7 @@ test("an account ledger groups split accounts and calculates its running balance
           currencyId: 1, currencyCode: "USD", scale: 2 },
       ], evidenceFiles: [], debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
     { lineItemId: 21, transactionId: 11, date: "2026-08-02", description: "Card purchase", memo: "Lunch",
+      reconciliationState: "unreconciled", reconciledAt: null,
       splitAccountNames: ["Food", "Tax"], splits: [
         { lineItemId: 21, accountId: 3, accountName: "Checking", memo: "Lunch", amountUnits: "-120",
           currencyId: 1, currencyCode: "USD", scale: 2 },
@@ -136,11 +143,13 @@ test("a credit-normal account register keeps journal sides and reverses running-
         assert.deepEqual(params, [3, 7]);
         return [[
           { line_item_id: 20, amount_units: "-320", memo: null, transaction_id: 10,
+            reconciliation_state: "unreconciled", reconciled_at: null,
             TransactionDate: "2026-08-01", description: "Purchase",
             split_line_item_id: 20, split_amount_units: "-320", split_memo: null,
             split_account_id: 3, split_account_name: "Credit card",
             split_currency_id: 1, split_currency_code: "USD", split_scale: 2 },
           { line_item_id: 21, amount_units: "120", memo: null, transaction_id: 11,
+            reconciliation_state: "unreconciled", reconciled_at: null,
             TransactionDate: "2026-08-02", description: "Payment",
             split_line_item_id: 21, split_amount_units: "120", split_memo: null,
             split_account_id: 3, split_account_name: "Credit card",

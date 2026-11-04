@@ -56,12 +56,15 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .register-known-balance-actions .link-button { padding: .2rem 0; font-size: .73rem; }
 .known-balance-form-actions { display: flex; align-items: center; gap: .5rem; }
 .known-balance-form-actions .link-button { padding: .5rem; }
-.account-register .register-table .known-balance-add { min-width: 1.8rem; min-height: 1.8rem; margin: 0 0 0 auto; }
+.account-register .register-table .known-balance-add { min-width: 1.8rem; min-height: 1.8rem; margin: 0; }
 .register-table .register-known-balance-form-row td { background: #eef2ec; padding: 0 .7rem .7rem; white-space: normal; }
 .register-known-balance-form-row .known-balance-form { margin: 0; }
 .register-known-balance-form-row .known-balance-form input[readonly] { background: #f7f9f6; }
 .register-heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .5rem; }.register-current-balance { display: grid; justify-items: end; margin-right: .35rem; white-space: nowrap; }.register-current-balance span { color: #748078; font-size: .68rem; }.register-current-balance strong { color: #244a2d; font-size: 1.05rem; font-variant-numeric: tabular-nums; }.register-current-balance small { color: #79522b; font-size: .68rem; font-weight: 750; }.known-balance-form { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(220px, 1fr) auto; gap: .65rem; align-items: end; margin-top: 1rem; border-radius: 8px; background: #eef2ec; padding: .8rem; }.known-balance-form label { margin: 0; }.known-balance-form .error { grid-column: 1 / -1; margin: 0; }.register-table { min-width: 1040px; }.register-table .known-balance-add { display: block; margin: .18rem 0 0 auto; border: 0; border-radius: 4px; background: transparent; color: #526f58; padding: 0 .18rem; font-size: 1rem; line-height: 1; }.register-table .known-balance-add:hover, .register-table .known-balance-add:focus-visible { background: #dfeadd; color: #244a2d; }.register-assertion-row td { background: #f4f7f2; }.register-assertion-row.matches td:first-child { box-shadow: inset 4px 0 #4e8a57; }.register-table .known-balance { color: #315d3b; font-weight: 800; }.register-assertion-row.mismatch .known-balance { color: #9b342e; }.known-balance-edit { border: 0; background: transparent; color: inherit; padding: 0; font-weight: inherit; }.known-balance-edit:hover, .known-balance-edit:focus-visible { text-decoration: underline; }
 .known-balance-controls { display: flex; align-items: center; justify-content: flex-end; gap: .3rem; }
+.register-known-balance-cell { display: flex; align-items: center; justify-content: flex-end; gap: .28rem; }
+.register-reconciliation-status { display: inline-flex; align-items: center; gap: .2rem; border-radius: 999px; background: #dcebdd; color: #30603a; padding: .18rem .42rem; font-size: .62rem; font-weight: 800; white-space: nowrap; }
+.register-reconciliation-status.partial { background: #eee8d8; color: #715b2d; }
 .known-balance-reconcile, .known-balance-edit-icon { border: 0; background: transparent; color: inherit; padding: 0; font-weight: inherit; }
 .known-balance-reconcile { display: grid; justify-items: end; }
 .known-balance-reconcile small { color: #526f58; font-size: .62rem; font-weight: 750; }

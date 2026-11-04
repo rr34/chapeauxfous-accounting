@@ -1942,7 +1942,8 @@ function Ledger({ transactions, selected, onSelect, onOpenInRegister, onVerify, 
 
 type AccountRegisterRow =
   | { kind: "entry"; date: string; order: number; entry: AccountLedgerEntry;
-      totalAmountUnits: string; currentAccountLineCount: number; projectedBalanceUnits: string }
+      totalAmountUnits: string; currentAccountLineCount: number; reconciledLineCount: number;
+      reconciledThrough: string | null; projectedBalanceUnits: string }
   | { kind: "import"; date: string; order: number; importPlanId: string;
       row: TransactionImportReview["rows"][number]; amountUnits: string; projectedBalanceUnits: string }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
@@ -2020,7 +2021,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       const amountUnits = BigInt(entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`));
       groupedEntries.set(entry.transactionId, { kind: "entry", date: entry.date, order, entry,
         totalAmountUnits: (BigInt(previous?.totalAmountUnits ?? "0") + amountUnits).toString(),
-        currentAccountLineCount: (previous?.currentAccountLineCount ?? 0) + 1 });
+        currentAccountLineCount: (previous?.currentAccountLineCount ?? 0) + 1,
+        reconciledLineCount: (previous?.reconciledLineCount ?? 0)
+          + Number(entry.reconciliationState === "reconciled"),
+        reconciledThrough: entry.reconciledAt == null ? previous?.reconciledThrough ?? null
+          : previous?.reconciledThrough == null || entry.reconciledAt > previous.reconciledThrough
+            ? entry.reconciledAt : previous.reconciledThrough });
     });
     const imported = importReviews.flatMap((review) => review.rows.map((row, index) => ({
       kind: "import" as const, date: row.transactionDate, order: entries.length + index,
@@ -2376,12 +2382,24 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           const isEndOfDateEntry = lastEntryByDate.get(entry.date) === entry.lineItemId;
           const showAddKnownBalance = isEndOfDateEntry && !assertionDates.has(entry.date)
             && !account.placeholder && !account.archivedAt;
-          const knownBalanceAction = showAddKnownBalance && <button type="button"
-            className="known-balance-add" aria-label={`Add known balance for ${entry.date}`}
-            aria-expanded={knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date}
-            aria-controls="known-balance-form" title={`Add known balance for ${formatRegisterDate(entry.date)}`}
-            onClick={(event) => { event.stopPropagation(); addKnownBalance(entry.date); }}
-            onKeyDown={(event) => event.stopPropagation()}>+</button>;
+          const reconciliationIndicator = row.reconciledLineCount > 0 && <span
+            className={`register-reconciliation-status ${row.reconciledLineCount === row.currentAccountLineCount ? "complete" : "partial"}`}
+            title={row.reconciledLineCount === row.currentAccountLineCount
+              ? `Reconciled${row.reconciledThrough ? ` through ${formatRegisterDate(row.reconciledThrough)}` : ""}`
+              : `${row.reconciledLineCount} of ${row.currentAccountLineCount} account postings reconciled`}>
+            <span aria-hidden="true">{row.reconciledLineCount === row.currentAccountLineCount ? "✓" : "◐"}</span>
+            {row.reconciledLineCount === row.currentAccountLineCount ? "Reconciled" : "Partial"}
+          </span>;
+          const knownBalanceAction = (showAddKnownBalance || reconciliationIndicator) && <div
+            className="register-known-balance-cell">
+            {reconciliationIndicator}
+            {showAddKnownBalance && <button type="button"
+              className="known-balance-add" aria-label={`Add known balance for ${entry.date}`}
+              aria-expanded={knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date}
+              aria-controls="known-balance-form" title={`Add known balance for ${formatRegisterDate(entry.date)}`}
+              onClick={(event) => { event.stopPropagation(); addKnownBalance(entry.date); }}
+              onKeyDown={(event) => event.stopPropagation()}>+</button>}
+          </div>;
           const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
           if (selectedTransaction?.id === entry.transactionId) {
@@ -3082,7 +3100,7 @@ export default function App() {
               openTransaction={openRegisterTransaction}
               onOpenTransactionHandled={() => setOpenRegisterTransaction(null)}
               onTransactionCreated={refreshAfterTransaction}
-              onChanged={refresh} />
+              onChanged={refreshAfterTransaction} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
               onOpenInRegister={openTransactionInRegister}
               onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id],
