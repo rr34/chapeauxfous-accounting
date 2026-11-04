@@ -46,18 +46,23 @@ test("account balances follow each account type's normal side", async () => {
     ["equity", "500", "-500"],
   ];
   const pool = {
-    async query(_sql, params) {
+    async query(sql, params) {
       assert.deepEqual(params, [7]);
+      assert.match(sql, /li\.reconciliation_state = 'reconciled'/);
+      assert.match(sql, /li\.reconciled_at END\) AS latest_reconciled_date/);
       return [accountTypes.map(([type, rawBalance], index) => ({
         account_id: index + 1, AccountName: type, description: null, is_placeholder: 0,
         parent_account_id: null, AccountType: type, account_currency_id: 1,
-        CurrencyAbbreviation: "USD", scale: 2, balance_units: rawBalance, archived_at: null,
+        CurrencyAbbreviation: "USD", scale: 2, balance_units: rawBalance,
+        latest_reconciled_date: index === 0 ? "2026-10-31" : null, archived_at: null,
       }))];
     },
   };
 
   const accounts = await listAccounts(pool, 7);
   assert.deepEqual(accounts.map((account) => account.balanceUnits), accountTypes.map(([, , expected]) => expected));
+  assert.equal(accounts[0].latestReconciledDate, "2026-10-31");
+  assert.equal(accounts[1].latestReconciledDate, null);
 });
 
 test("an account ledger groups split accounts and calculates its running balance", async () => {

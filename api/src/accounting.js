@@ -42,7 +42,9 @@ function mapAccount(row) {
     placeholder: Boolean(row.is_placeholder), suspense: Boolean(row.is_suspense),
     parentAccountId: row.parent_account_id == null ? null : Number(row.parent_account_id),
     type: row.AccountType, currencyId: Number(row.account_currency_id), currencyCode: row.CurrencyAbbreviation.trim(),
-    scale: Number(row.scale), balanceUnits: normalBalanceUnits(row.AccountType, row.balance_units), archivedAt: row.archived_at,
+    scale: Number(row.scale), balanceUnits: normalBalanceUnits(row.AccountType, row.balance_units),
+    latestReconciledDate: row.latest_reconciled_date == null ? null : String(row.latest_reconciled_date),
+    archivedAt: row.archived_at,
   };
 }
 
@@ -52,6 +54,8 @@ export async function listAccounts(pool, personId) {
             a.parent_account_id, a.AccountType,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale,
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
+            MAX(CASE WHEN t.TransactionState = 'posted' AND li.reconciliation_state = 'reconciled'
+                     THEN li.reconciled_at END) AS latest_reconciled_date,
             a.archived_at
        FROM accounts a
        JOIN currencies c ON c.currency_id = a.account_currency_id
@@ -76,6 +80,8 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
             a.parent_account_id, a.AccountType,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale,
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
+            MAX(CASE WHEN t.TransactionState = 'posted' AND li.reconciliation_state = 'reconciled'
+                     THEN li.reconciled_at END) AS latest_reconciled_date,
             a.archived_at
        FROM accounts a
        JOIN currencies c ON c.currency_id = a.account_currency_id

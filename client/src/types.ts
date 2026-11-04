@@ -43,6 +43,7 @@ export type Account = {
   currencyCode: string;
   scale: number;
   balanceUnits: string;
+  latestReconciledDate: string | null;
   archivedAt: string | null;
 };
 

@@ -312,6 +312,12 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
             {unitsToGroupedDecimal(balance.units, balance.scale)}
             {node.subtreeBalances.length > 1 && <em>{balance.currencyCode}</em>}
           </b>)}</div>
+          <time className="account-reconciled-date" dateTime={node.latestReconciledDate ?? undefined}
+            title={node.latestReconciledDate
+              ? `Reconciled through ${formatRegisterDate(node.latestReconciledDate)}`
+              : "Not yet reconciled"}>
+            {node.latestReconciledDate ? formatRegisterDate(node.latestReconciledDate) : "—"}
+          </time>
         </button>
         <button type="button" className="account-edit-button" aria-label={`Edit account ${node.name}`}
           onClick={() => onEdit(node)}>✎</button>
@@ -322,7 +328,12 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
     </div>;
   }
 
-  return <div className="account-list">{tree.map((node) => renderNode(node, 0))}</div>;
+  return <div className="account-list">
+    <div className="account-list-heading" aria-hidden="true">
+      <span>Account</span><span>Balance</span><span>Last reconciled</span>
+    </div>
+    {tree.map((node) => renderNode(node, 0))}
+  </div>;
 }
 
 function AuthScreen({ onAuthenticated }: AuthProps) {
