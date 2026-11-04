@@ -40,6 +40,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   let oneSidedImport;
   const savedStatementBalances = [];
   let reconciledAccount;
+  let resolvedStatementJobOptions;
   const transactionImportFixture = ({ status, readyToCommit, ledgerChanged, importPlanId, transactionCount = 1 }) => ({
     status,
     dryRun: !ledgerChanged,
@@ -100,7 +101,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     copiedPrompt: "Process accounting://statement-import-jobs/728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
   });
   const services = {
-    async listStatementImportJobObjectsPage() {
+    async listStatementImportJobObjectsPage(_pool, _personId, options) {
+      resolvedStatementJobOptions = options;
       return { objects: [statementJobFixture()], nextCursor: null };
     },
     async listEvidenceFileObjectsPage() {
@@ -499,7 +501,6 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   ]);
   assert.deepEqual(objectInputContracts.list_statement_import_job_objects, [
     { path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id", allowUnbound: true },
-    { path: "/account_id", objectType: "accounting.account", value: "id" },
   ]);
   assert.deepEqual(objectInputContracts.list_evidence_file_objects, [
     { path: "/evidence_file_id", objectType: "accounting.evidence_file", value: "id", allowUnbound: true },
@@ -582,6 +583,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(tools.tools.some((tool) => tool.name === "get_statement_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "start_statement_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "submit_statement_import_job_artifact"), true);
+  const statementJobResolver = tools.tools.find((tool) => tool.name === "list_statement_import_job_objects");
+  assert.deepEqual(Object.keys(statementJobResolver.inputSchema.properties), ["statement_import_job_id"]);
+  assert.deepEqual(statementJobResolver.inputSchema.required, ["statement_import_job_id"]);
+  assert.equal(statementJobResolver.inputSchema.additionalProperties, false);
+  assert.match(statementJobResolver.description, /Do not resolve or provide an account/);
   assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "import_single_account_statement_artifact"), true);
   const inlineStatementImportTool = tools.tools.find((tool) => tool.name === "import_single_account_statement");
@@ -1088,8 +1094,25 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
     },
   });
+  assert.deepEqual(resolvedStatementJobOptions, {
+    statementImportJobId: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", limit: 1,
+  });
   assert.equal(statementJobObjects.structuredContent.objects[0].evidenceFile.mediaType, "application/pdf");
   assert.equal(statementJobObjects.structuredContent.objects[0].download.acceptsByteRanges, true);
+  const invalidStatementJobResolution = await client.callTool({
+    name: "list_statement_import_job_objects", arguments: {
+      statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", account_id: 10,
+    },
+  });
+  assert.equal(invalidStatementJobResolution.isError, true);
+  assert.match(invalidStatementJobResolution.content[0].text, /Invalid arguments/);
+  const readStatementJob = await client.callTool({
+    name: "get_statement_import_job", arguments: {
+      statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
+    },
+  });
+  assert.equal(readStatementJob.structuredContent.job.account.id, 10);
+  assert.equal(readStatementJob.structuredContent.job.download.mediaType, "application/pdf");
   const startedStatementJob = await client.callTool({
     name: "start_statement_import_job", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
@@ -1343,7 +1366,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.13.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.13.1");
 
   await handler.close();
 });

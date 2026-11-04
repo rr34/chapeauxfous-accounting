@@ -32,7 +32,7 @@ const descriptions = {
   list_accounting_question_objects: read("Find owner-scoped accounting question objects by status, audience, account, or exact line-item ID."),
   open_accounting_question: mutate("Mark one existing suspense posting as an open accounting question without changing its amount.", ["CREATE"]),
   resolve_accounting_question: mutate("Assign an open suspense posting to a supported same-currency account while preserving its amount and balanced transaction.", ["UPDATE"]),
-  list_statement_import_job_objects: read("Resolve an exact copied statement-job reference or list owner-scoped statement jobs before processing one."),
+  list_statement_import_job_objects: read("Resolve exactly one copied statement-job UUID before processing it; the job already owns its account binding."),
   list_evidence_file_objects: read("Read immutable owner-scoped evidence-file identities and integrity metadata without returning file bytes."),
   get_statement_import_job: read("Read one identified statement job with its account, original-PDF metadata, and authenticated download descriptor."),
   start_statement_import_job: mutate("Start one ready statement job in the serial workflow and return its complete-PDF access contract and current extraction requirements.", ["UPDATE"]),

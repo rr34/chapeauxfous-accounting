@@ -2354,29 +2354,25 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   };
 
   registerTool("list_statement_import_job_objects", {
-    title: "Find statement import jobs",
-    description: "Canonical owner-scoped resolver for a copied accounting://statement-import-jobs/{id} reference. Use the exact ID from the user's copied prompt to bind one disposable statement-processing job before reading or starting it. Results contain metadata and stable references, not PDF bytes.",
-    inputSchema: {
-      statement_import_job_id: z.string().trim().uuid().optional(),
-      account_id: positiveInteger("Optional statement account filter.").optional(),
-      limit: z.number().int().min(1).max(500).default(100),
-      cursor: z.string().uuid().nullable().optional(),
-    },
+    title: "Resolve statement import job",
+    description: "Canonical owner-scoped resolver for one copied accounting://statement-import-jobs/{id} reference. Supply exactly the UUID from that reference. Do not resolve or provide an account: the job already owns its exact account binding. Results contain metadata and stable references, not PDF bytes.",
+    inputSchema: z.object({
+      statement_import_job_id: z.string().trim().uuid()
+        .describe("Exact UUID copied from accounting://statement-import-jobs/{id}."),
+    }).strict(),
     outputSchema: statementImportJobObjectOutput,
     annotations: readOnly,
     _meta: {
       ...toolMetadata("accounting.reconciliation", {
-        dependencies: ["list_account_objects"],
         objectInputs: [
           { path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id", allowUnbound: true },
-          { path: "/account_id", objectType: "accounting.account", value: "id" },
         ],
       }),
       "agent-slayer/objects": statementImportJobObjectDescription,
     },
-  }, async ({ statement_import_job_id, account_id, limit, cursor }) => safeToolResult(async () => {
+  }, async ({ statement_import_job_id }) => safeToolResult(async () => {
     const page = await accounting.listStatementImportJobObjectsPage(pool, personId, {
-      statementImportJobId: statement_import_job_id, accountId: account_id, limit, cursor,
+      statementImportJobId: statement_import_job_id, limit: 1,
     });
     return { objects: page.objects,
       resultMetadata: pageMetadata(page.objects, page.nextCursor, "statement-import-jobs") };
