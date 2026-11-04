@@ -940,9 +940,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     suspenseAccount: z.object({ id: z.number().int().positive(), sourceRef: z.string().min(1),
       displayName: z.string().min(1), currencyCode: z.string().min(1) }).nullable(),
     orderedQuestions: z.array(z.object({
-      order: z.number().int().min(1).max(4), key: z.string().min(1), prompt: z.string().min(1),
+      order: z.number().int().min(1).max(6), key: z.string().min(1), prompt: z.string().min(1),
       answerShape: z.json(),
-    })).length(4),
+    })).length(6),
     canonicalArtifactSchema: z.json(),
     artifactUpload: z.json(),
     nextTool: z.literal("import_single_account_statement_artifact"),
@@ -954,7 +954,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
     sourceRef: z.string().min(1), displayName: z.string().min(1), fileName: z.string().min(1),
     mediaType: z.literal("application/pdf"), byteSize: z.number().int().positive(),
-    sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/), createdAt: z.string().min(1),
+    sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    startAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    endAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
+    currencyId: z.number().int().positive().nullable(), currencyCode: z.string().min(1).nullable(),
+    scale: z.number().int().min(0).max(18).nullable(), createdAt: z.string().min(1),
   });
   const statementDownloadSchema = z.object({
     contractVersion: z.literal(1), transportId: z.literal("statement_evidence_download"),
@@ -970,7 +976,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     status: z.enum(["ready", "processing", "preview_ready", "committed"]),
     account: z.object({
       objectType: z.literal("accounting.account"), id: z.number().int().positive(),
-      sourceRef: z.string().min(1), displayName: z.string().min(1), currencyCode: z.string().min(1),
+      sourceRef: z.string().min(1), displayName: z.string().min(1),
+      currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
       scale: z.number().int().min(0).max(18),
     }),
     evidenceFile: evidenceFileObjectSchema,
@@ -2265,20 +2272,26 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         displayName: paths.get(designated.id) ?? designated.name, currencyCode: designated.currencyCode,
       },
       orderedQuestions: [
-        { order: 1, key: "beginning_balance",
-          prompt: "Does the statement contain a beginning balance and a date? Extract both exactly, then identify whether the printed date is the first included transaction date or an explicit end-of-day balance date. A beginning balance at the start of a period is normally the end-of-day balance immediately before the first included date.",
-          answerShape: { found: "boolean", date: "YYYY-MM-DD or null",
-            date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
-            amount_decimal: "string or null", available_text: "string or null" } },
-        { order: 2, key: "ending_balance",
-          prompt: "Does the statement contain an ending balance with a date? If yes, extract the date and amount exactly as printed.",
-          answerShape: { found: "boolean", date: "YYYY-MM-DD or null", amount_decimal: "string or null", available_text: "string or null" } },
-        { order: 3, key: "line_items",
+        { order: 1, key: "start_date",
+          prompt: "Determine the statement period start date independently of the opening balance. Extract the date wherever it appears, then identify whether it is the first included transaction date or an explicit end-of-day balance date. A period start is normally the first included date, so an opening-balance assertion is effective on the previous calendar day.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null",
+            balance_date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
+            available_text: "string or null" } },
+        { order: 2, key: "start_amount",
+          prompt: "Determine the opening balance independently of the period start date. Extract the signed amount exactly even when it appears elsewhere in the document.",
+          answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
+        { order: 3, key: "end_date",
+          prompt: "Determine the statement period end date independently of the closing balance. Extract the date wherever it appears.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
+        { order: 4, key: "end_amount",
+          prompt: "Determine the closing balance independently of the period end date. Extract the signed amount exactly even when it appears elsewhere in the document.",
+          answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
+        { order: 5, key: "line_items",
           prompt: "What are all line items into or out of this account? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
-        { order: 4, key: "available_text",
+        { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text from the document without inventing a category.",
-          answerShape: [{ source_record_id: "same row id as question 3", available_text: "string or null" }] },
+          answerShape: [{ source_record_id: "same row id as question 5", available_text: "string or null" }] },
       ],
       canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
       artifactUpload: singleAccountStatementArtifactUpload,
@@ -2289,7 +2302,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
         "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day. Use explicit_end_of_day_balance_date only when the document clearly gives the balance's end-of-day effective date.",
-        "Opening and closing balances are optional. Record a dated balance when the source supplies one, then continue importing the transaction rows when either or both are absent.",
+        "Start date, opening balance, end date, and closing balance are four independent determinations. Never infer that one is absent merely because it is not physically adjacent to another.",
+        "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
         "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
         "Do not supply or choose a suspense account in the preview call. Accounting selects the one user-designated active, postable suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
         "The statement account and suspense account must be different accounts.",
@@ -2320,20 +2334,26 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         displayName: paths.get(designated.id) ?? designated.name, currencyCode: designated.currencyCode,
       },
       orderedQuestions: [
-        { order: 1, key: "beginning_balance",
-          prompt: "Does the complete original PDF contain a beginning balance and a date? Extract both exactly, then identify whether the printed date is the first included transaction date or an explicit end-of-day balance date.",
-          answerShape: { found: "boolean", date: "YYYY-MM-DD or null",
-            date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
-            amount_decimal: "string or null", available_text: "string or null" } },
-        { order: 2, key: "ending_balance",
-          prompt: "Does the complete original PDF contain an ending balance with a date? If yes, extract the date and amount exactly as printed.",
-          answerShape: { found: "boolean", date: "YYYY-MM-DD or null", amount_decimal: "string or null", available_text: "string or null" } },
-        { order: 3, key: "line_items",
+        { order: 1, key: "start_date",
+          prompt: "Determine the statement period start date across the complete original PDF independently of the opening balance. Extract it wherever it appears and identify whether it is the first included transaction date or an explicit end-of-day balance date.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null",
+            balance_date_meaning: "first_included_transaction_date | explicit_end_of_day_balance_date | null",
+            available_text: "string or null" } },
+        { order: 2, key: "start_amount",
+          prompt: "Determine the opening balance across the complete original PDF independently of the period start date. Extract the signed amount exactly wherever it appears.",
+          answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
+        { order: 3, key: "end_date",
+          prompt: "Determine the statement period end date across the complete original PDF independently of the closing balance. Extract it wherever it appears.",
+          answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
+        { order: 4, key: "end_amount",
+          prompt: "Determine the closing balance across the complete original PDF independently of the period end date. Extract the signed amount exactly wherever it appears.",
+          answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
+        { order: 5, key: "line_items",
           prompt: "What are all line items into or out of this account across the complete PDF? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
-        { order: 4, key: "available_text",
+        { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text without inventing a category.",
-          answerShape: [{ source_record_id: "same row id as question 3", available_text: "string or null" }] },
+          answerShape: [{ source_record_id: "same row id as question 5", available_text: "string or null" }] },
       ],
       canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
       artifactUpload: singleAccountStatementArtifactUpload,
@@ -2346,7 +2366,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
         "When the beginning date is the statement's first included date, Accounting records the balance on the previous calendar day.",
-        "Opening and closing balances are optional. Continue importing rows when either or both are absent.",
+        "Start date, opening balance, end date, and closing balance are four independent determinations. Search the entire document for each one; do not require related values to be physically adjacent.",
+        "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
         "Do not supply or choose a suspense account. Accounting resolves its configured account internally.",
         "Create only a pending preview. Never commit without the user's later approval.",
       ],
@@ -2438,17 +2459,29 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         ]) };
   }));
 
-  const statementBalanceAnswerFields = {
-    found: z.boolean(),
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
-    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
-    available_text: z.string().trim().max(16000).nullable().optional(),
+  const validateDetermination = (value, context) => {
+    if (value.found !== (value.value != null)) {
+      context.addIssue({ code: "custom", path: ["value"],
+        message: "found must be true exactly when value contains a determination." });
+    }
   };
-  const beginningBalanceAnswerSchema = z.object({
-    ...statementBalanceAnswerFields,
-    date_meaning: z.enum(["first_included_transaction_date", "explicit_end_of_day_balance_date"]).nullable(),
-  }).strict();
-  const endingBalanceAnswerSchema = z.object(statementBalanceAnswerFields).strict();
+  const statementDateAnswerSchema = z.object({
+    found: z.boolean(), value: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    available_text: z.string().trim().max(16000).nullable().optional(),
+  }).strict().superRefine(validateDetermination);
+  const statementStartDateAnswerSchema = z.object({
+    found: z.boolean(), value: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    balance_date_meaning: z.enum(["first_included_transaction_date", "explicit_end_of_day_balance_date"]).nullable(),
+    available_text: z.string().trim().max(16000).nullable().optional(),
+  }).strict().superRefine((value, context) => {
+    validateDetermination(value, context);
+    if (!value.found && value.balance_date_meaning != null) context.addIssue({ code: "custom",
+      path: ["balance_date_meaning"], message: "A missing start date cannot have a balance-date meaning." });
+  });
+  const statementAmountAnswerSchema = z.object({
+    found: z.boolean(), value: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
+    available_text: z.string().trim().max(16000).nullable().optional(),
+  }).strict().superRefine(validateDetermination);
   const oneSidedStatementLineSchema = z.object({
     source_record_id: z.string().trim().min(1).max(96)
       .describe("Stable row identifier within this statement; reuse it when the same attachment is processed again."),
@@ -2462,13 +2495,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
   const previewSingleAccountStatement = async ({ statement_id, account_id,
     statement_import_job_id = null, evidence_file_id = null,
-    beginning_balance, ending_balance, line_items }) => {
-    const openingBalanceDate = beginning_balance.found && beginning_balance.date != null
-      && beginning_balance.amount_decimal != null && beginning_balance.date_meaning != null
-      ? (beginning_balance.date_meaning === "first_included_transaction_date"
-        ? previousCalendarDate(beginning_balance.date) : beginning_balance.date) : null;
-    const closingBalanceDate = ending_balance.found && ending_balance.date != null
-      && ending_balance.amount_decimal != null ? ending_balance.date : null;
+    start_date, start_amount, end_date, end_amount, line_items }) => {
+    const openingBalanceDate = start_date.found && start_amount.found
+      && start_date.balance_date_meaning != null
+      ? (start_date.balance_date_meaning === "first_included_transaction_date"
+        ? previousCalendarDate(start_date.value) : start_date.value) : null;
+    const closingBalanceDate = end_date.found && end_amount.found ? end_date.value : null;
     const accounts = await accounting.listAccounts(pool, personId);
     const account = accounts.find((candidate) => candidate.id === account_id);
     if (!account) throw Object.assign(new Error("Statement account not found."), {
@@ -2477,10 +2509,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     const knownBalanceAssertions = [
       ...(openingBalanceDate == null || openingBalanceDate === closingBalanceDate ? []
         : [{ accountId: account_id, balanceDate: openingBalanceDate,
-        knownBalanceUnits: decimalToUnits(beginning_balance.amount_decimal, account.scale) }]),
+        knownBalanceUnits: decimalToUnits(start_amount.value, account.scale) }]),
       ...(closingBalanceDate == null ? []
         : [{ accountId: account_id, balanceDate: closingBalanceDate,
-          knownBalanceUnits: decimalToUnits(ending_balance.amount_decimal, account.scale) }]),
+          knownBalanceUnits: decimalToUnits(end_amount.value, account.scale) }]),
     ];
     const rows = line_items.map((line) => ({
       externalId: `sha256:${createHash("sha256").update(`${statement_id}\u0000${line.source_record_id}`, "utf8").digest("hex")}`,
@@ -2552,13 +2584,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement", {
     title: "Preview inline single-account statement",
-    description: "Submit the four answers from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Balances are optional. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    description: "Submit the six independent determinations from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Evidence dates and balances are optional and independent. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
       account_id: positiveInteger("The single authoritative statement account."),
-      beginning_balance: beginningBalanceAnswerSchema,
-      ending_balance: endingBalanceAnswerSchema,
+      start_date: statementStartDateAnswerSchema,
+      start_amount: statementAmountAnswerSchema,
+      end_date: statementDateAnswerSchema,
+      end_amount: statementAmountAnswerSchema,
       line_items: oneSidedStatementLinesSchema,
       dry_run: z.literal(true).default(true),
     },
@@ -2575,14 +2609,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement_artifact", {
     title: "Preview uploaded single-account statement",
-    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit optional printed balances separately. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Do not run an LLM deduplication pass.",
+    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit the optional start date, opening balance, end date, and closing balance as separate determinations. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Do not run an LLM deduplication pass.",
     inputSchema: {
       artifact_id: z.string().trim().uuid(),
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable original attachment identifier or SHA-256; reuse it for the same source statement."),
       account_id: positiveInteger("The single authoritative statement account."),
-      beginning_balance: beginningBalanceAnswerSchema,
-      ending_balance: endingBalanceAnswerSchema,
+      start_date: statementStartDateAnswerSchema,
+      start_amount: statementAmountAnswerSchema,
+      end_date: statementDateAnswerSchema,
+      end_amount: statementAmountAnswerSchema,
       include_row_details: z.boolean().default(false)
         .describe("Return row-level preview details only when the user explicitly asked to see them; otherwise return the compact summary."),
       dry_run: z.literal(true).default(true),
@@ -2620,8 +2656,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
-      beginning_balance: beginningBalanceAnswerSchema,
-      ending_balance: endingBalanceAnswerSchema,
+      start_date: statementStartDateAnswerSchema,
+      start_amount: statementAmountAnswerSchema,
+      end_date: statementDateAnswerSchema,
+      end_amount: statementAmountAnswerSchema,
       include_row_details: z.boolean().default(false),
       dry_run: z.literal(true).default(true),
     },
@@ -2669,7 +2707,17 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     });
     const savedJob = await accounting.bindStatementImportPreview({ pool, personId,
       statementImportJobId: statement_import_job_id, importPlanId: preview.importPlanId,
-      canonicalArtifactId: artifact_id });
+      canonicalArtifactId: artifact_id,
+      evidenceMetadata: {
+        startDate: answers.start_date.found ? answers.start_date.value : null,
+        startAmountUnits: answers.start_amount.found
+          ? decimalToUnits(answers.start_amount.value, job.account.scale) : null,
+        endDate: answers.end_date.found ? answers.end_date.value : null,
+        endAmountUnits: answers.end_amount.found
+          ? decimalToUnits(answers.end_amount.value, job.account.scale) : null,
+        currencyId: job.account.currencyId,
+      },
+    });
     const visiblePreview = include_row_details ? preview : (() => {
       const { transactions: _transactions, import: fullImport, ...compactPreview } = preview;
       const { transactions: _importTransactions, ...compactImport } = fullImport;

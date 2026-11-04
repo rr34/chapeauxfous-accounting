@@ -68,9 +68,13 @@ async function attachAssertionEvidence(connection, personId, assertions) {
   const ids = assertions.map((assertion) => assertion.id);
   const [rows] = await connection.query(
     `SELECT bael.account_balance_assertion_id, ef.evidence_file_id, ef.original_file_name,
-            ef.media_type, ef.byte_size, ef.sha256, bael.evidence_role
+            ef.media_type, ef.byte_size, ef.sha256,
+            ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
+            ef.currency_id, ec.CurrencyAbbreviation AS evidence_currency_code,
+            ec.scale AS evidence_currency_scale, bael.evidence_role
        FROM balance_assertion_evidence_links bael
        JOIN accounting_evidence_files ef ON ef.evidence_file_id = bael.evidence_file_id
+       LEFT JOIN currencies ec ON ec.currency_id = ef.currency_id
       WHERE ef.owner_person_id = ?
         AND bael.account_balance_assertion_id IN (${ids.map(() => "?").join(", ")})
       ORDER BY bael.account_balance_assertion_id, ef.evidence_file_id`,
@@ -84,6 +88,13 @@ async function attachAssertionEvidence(connection, personId, assertions) {
       id: Number(row.evidence_file_id), fileName: String(row.original_file_name),
       mediaType: String(row.media_type), byteSize: Number(row.byte_size),
       sha256: `sha256:${String(row.sha256)}`, role: String(row.evidence_role),
+      startDate: row.start_date == null ? null : String(row.start_date),
+      startAmountUnits: row.start_amount_units == null ? null : String(row.start_amount_units),
+      endDate: row.end_date == null ? null : String(row.end_date),
+      endAmountUnits: row.end_amount_units == null ? null : String(row.end_amount_units),
+      currencyId: row.currency_id == null ? null : Number(row.currency_id),
+      currencyCode: row.evidence_currency_code == null ? null : String(row.evidence_currency_code).trim(),
+      scale: row.evidence_currency_scale == null ? null : Number(row.evidence_currency_scale),
       downloadPath: `/api/evidence-files/${row.evidence_file_id}/content`,
     });
   }

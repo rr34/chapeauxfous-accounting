@@ -115,6 +115,14 @@ function evidenceValue(row) {
     mediaType: String(row.media_type),
     byteSize: Number(row.byte_size),
     sha256: `sha256:${String(row.sha256)}`,
+    startDate: row.start_date == null ? null : String(row.start_date),
+    startAmountUnits: row.start_amount_units == null ? null : String(row.start_amount_units),
+    endDate: row.end_date == null ? null : String(row.end_date),
+    endAmountUnits: row.end_amount_units == null ? null : String(row.end_amount_units),
+    currencyId: row.evidence_currency_id == null && row.currency_id == null
+      ? null : Number(row.evidence_currency_id ?? row.currency_id),
+    currencyCode: row.evidence_currency_code == null ? null : String(row.evidence_currency_code).trim(),
+    scale: row.evidence_currency_scale == null ? null : Number(row.evidence_currency_scale),
     createdAt: String(row.evidence_created_at ?? row.created_at),
   };
 }
@@ -163,6 +171,7 @@ function statementJobValue(row) {
       id: Number(row.account_id),
       sourceRef: `accounting://accounts/${row.account_id}`,
       displayName: accountDisplayName(row),
+      currencyId: Number(row.account_currency_id),
       currencyCode: String(row.CurrencyAbbreviation).trim(),
       scale: Number(row.scale),
     },
@@ -182,12 +191,17 @@ const statementJobSelect = `
   SELECT sij.statement_import_job_id, sij.account_id, sij.evidence_file_id, sij.job_status,
          sij.import_plan_id, sij.canonical_artifact_id, sij.created_at, sij.updated_at, sij.committed_at,
          ef.original_file_name, ef.media_type, ef.byte_size, ef.sha256, ef.storage_key,
-         ef.created_at AS evidence_created_at, a.AccountName, c.CurrencyAbbreviation, c.scale
+         ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
+         ef.currency_id AS evidence_currency_id,
+         ec.CurrencyAbbreviation AS evidence_currency_code, ec.scale AS evidence_currency_scale,
+         ef.created_at AS evidence_created_at, a.AccountName, a.account_currency_id,
+         c.CurrencyAbbreviation, c.scale
     FROM accounting_statement_import_jobs sij
     JOIN accounting_evidence_files ef
       ON ef.evidence_file_id = sij.evidence_file_id AND ef.owner_person_id = sij.owner_person_id
     JOIN accounts a ON a.account_id = sij.account_id AND a.owner_person_id = sij.owner_person_id
-    JOIN currencies c ON c.currency_id = a.account_currency_id`;
+    JOIN currencies c ON c.currency_id = a.account_currency_id
+    LEFT JOIN currencies ec ON ec.currency_id = ef.currency_id`;
 
 async function loadStatementJob(connection, personId, statementImportJobId, { lock = false } = {}) {
   const id = jobId(statementImportJobId);
@@ -301,22 +315,27 @@ export async function listEvidenceFileObjectsPage(pool, personId, {
   limit = 100, cursor = null, evidenceFileId = null,
 } = {}) {
   const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
-  const clauses = ["owner_person_id = ?"];
+  const clauses = ["ef.owner_person_id = ?"];
   const params = [ownerId(personId)];
   if (evidenceFileId != null) {
     if (cursor != null) throw statementError("An exact evidence ID cannot be combined with a cursor.",
       "INVALID_EVIDENCE_OBJECT_FILTER");
-    clauses.push("evidence_file_id = ?");
+    clauses.push("ef.evidence_file_id = ?");
     params.push(positiveId(evidenceFileId, "Evidence file"));
   } else if (cursor != null) {
-    clauses.push("evidence_file_id < ?");
+    clauses.push("ef.evidence_file_id < ?");
     params.push(positiveId(cursor, "Evidence cursor"));
   }
   const [rows] = await pool.query(
-    `SELECT evidence_file_id, original_file_name, media_type, byte_size, sha256, created_at
-       FROM accounting_evidence_files
+    `SELECT ef.evidence_file_id, ef.original_file_name, ef.media_type, ef.byte_size, ef.sha256,
+            ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
+            ef.currency_id AS evidence_currency_id,
+            ec.CurrencyAbbreviation AS evidence_currency_code, ec.scale AS evidence_currency_scale,
+            ef.created_at
+       FROM accounting_evidence_files ef
+       LEFT JOIN currencies ec ON ec.currency_id = ef.currency_id
       WHERE ${clauses.join(" AND ")}
-      ORDER BY evidence_file_id DESC LIMIT ?`,
+      ORDER BY ef.evidence_file_id DESC LIMIT ?`,
     [...params, resolvedLimit + 1],
   );
   const objects = rows.slice(0, resolvedLimit).map(evidenceValue);
@@ -359,7 +378,7 @@ export async function startStatementImportJob({ pool, personId, statementImportJ
 }
 
 export async function bindStatementImportPreview({
-  pool, personId, statementImportJobId, importPlanId, canonicalArtifactId,
+  pool, personId, statementImportJobId, importPlanId, canonicalArtifactId, evidenceMetadata,
 }) {
   return withPoolTransaction(pool, async (connection) => {
     const row = await loadStatementJob(connection, personId, statementImportJobId, { lock: true });
@@ -375,6 +394,31 @@ export async function bindStatementImportPreview({
     }
     if (row.job_status !== "processing") throw statementError("Start this statement job before submitting extraction.",
       "STATEMENT_JOB_NOT_PROCESSING", undefined, 409);
+    const metadata = evidenceMetadata ?? {};
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/u;
+    const integerPattern = /^-?\d+$/u;
+    for (const [name, value] of [["startDate", metadata.startDate], ["endDate", metadata.endDate]]) {
+      if (value != null && !datePattern.test(String(value))) {
+        throw statementError(`Evidence ${name} must be an ISO calendar date or null.`,
+          "INVALID_EVIDENCE_METADATA");
+      }
+    }
+    for (const [name, value] of [["startAmountUnits", metadata.startAmountUnits],
+      ["endAmountUnits", metadata.endAmountUnits]]) {
+      if (value != null && !integerPattern.test(String(value))) {
+        throw statementError(`Evidence ${name} must be signed integer native units or null.`,
+          "INVALID_EVIDENCE_METADATA");
+      }
+    }
+    const currencyId = positiveId(metadata.currencyId, "Evidence currency", "INVALID_EVIDENCE_METADATA");
+    await connection.query(
+      `UPDATE accounting_evidence_files
+          SET start_date = ?, start_amount_units = ?, end_date = ?, end_amount_units = ?, currency_id = ?
+        WHERE evidence_file_id = ? AND owner_person_id = ?`,
+      [metadata.startDate ?? null, metadata.startAmountUnits ?? null,
+        metadata.endDate ?? null, metadata.endAmountUnits ?? null, currencyId,
+        row.evidence_file_id, ownerId(personId)],
+    );
     await connection.query(
       `UPDATE accounting_statement_import_jobs
           SET job_status = 'preview_ready', import_plan_id = ?, canonical_artifact_id = ?,
@@ -422,7 +466,8 @@ export async function restartStatementImportJob({ pool, personId, statementImpor
 export async function getEvidenceFile({ pool, personId, evidenceFileId }) {
   const id = positiveId(evidenceFileId, "Evidence file", "EVIDENCE_FILE_NOT_FOUND");
   const [rows] = await pool.query(
-    `SELECT evidence_file_id, original_file_name, media_type, byte_size, sha256, storage_key, created_at
+    `SELECT evidence_file_id, original_file_name, media_type, byte_size, sha256, storage_key,
+            currency_id, start_date, start_amount_units, end_date, end_amount_units, created_at
        FROM accounting_evidence_files
       WHERE evidence_file_id = ? AND owner_person_id = ?`,
     [id, ownerId(personId)],

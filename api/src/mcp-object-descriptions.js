@@ -192,8 +192,20 @@ export const evidenceFileObjectDescription = Object.freeze({
       { field: "mediaType", summary: "Verified media type; direct statement evidence is application/pdf." },
       { field: "byteSize", summary: "Exact immutable byte count." },
       { field: "sha256", summary: "SHA-256 integrity identity of the complete bytes." },
+      { field: "startDate", summary: "Optional first accounting-significant date, such as a receipt date or statement period start." },
+      { field: "startAmountUnits", summary: "Optional first signed amount in native integer units, such as a receipt amount or statement opening balance." },
+      { field: "endDate", summary: "Optional second accounting-significant date for evidence covering a period." },
+      { field: "endAmountUnits", summary: "Optional second signed amount in native integer units, such as a statement closing balance." },
+      { field: "currencyId", summary: "Optional applicable accounting currency or unit ID for both evidence amounts." },
+      { field: "currencyCode", summary: "Optional applicable accounting currency or unit code." },
+      { field: "scale", summary: "Decimal places used to interpret both evidence amounts." },
       { field: "createdAt", summary: "Time Accounting first accepted the immutable bytes." },
     ],
+    relationships: [{
+      name: "currency",
+      targetType: "accounting.currency",
+      summary: "currencyId identifies the optional accounting unit for startAmountUnits and endAmountUnits.",
+    }],
   }],
 });
 

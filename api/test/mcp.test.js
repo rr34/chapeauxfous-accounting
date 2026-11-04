@@ -85,10 +85,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     displayName: `statement.pdf · Wallet · ${status}`,
     status,
     account: { objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10",
-      displayName: "Wallet", currencyCode: "USD", scale: 2 },
+      displayName: "Wallet", currencyId: 1, currencyCode: "USD", scale: 2 },
     evidenceFile: { objectType: "accounting.evidence_file", id: 81,
       sourceRef: "accounting://evidence-files/81", displayName: "statement.pdf", fileName: "statement.pdf",
       mediaType: "application/pdf", byteSize: 2048, sha256: `sha256:${"9".repeat(64)}`,
+      startDate: null, startAmountUnits: null, endDate: null, endAmountUnits: null,
+      currencyId: null, currencyCode: null, scale: null,
       createdAt: "2026-11-04T12:00:00.000Z" },
     sourceDocumentId: `sha256:${"9".repeat(64)}`,
     importPlanId: null, canonicalArtifactId: null,
@@ -1085,10 +1087,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(statementGuide.structuredContent.canonicalArtifactSchema.$id,
     "accounting://schemas/single-account-statement-import-record/v1");
   assert.deepEqual(statementGuide.structuredContent.orderedQuestions.map((question) => question.key),
-    ["beginning_balance", "ending_balance", "line_items", "available_text"]);
+    ["start_date", "start_amount", "end_date", "end_amount", "line_items", "available_text"]);
   assert.equal(statementGuide.structuredContent.suspenseAccount, null);
   assert.match(statementGuide.structuredContent.orderedQuestions[0].prompt,
-    /end-of-day balance immediately before the first included date/);
+    /period start date independently of the opening balance/);
   const statementJobObjects = await client.callTool({
     name: "list_statement_import_job_objects", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
@@ -1127,8 +1129,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "missing-balance", account_id: 10,
-      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
-      ending_balance: { found: true, date: "2026-01-31", amount_decimal: "87.50" },
+      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: true, value: "2026-01-31" },
+      end_amount: { found: true, value: "87.50" },
       line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
         available_text: "ACME", amount_decimal: "-12.50" }],
       dry_run: true,
@@ -1141,12 +1145,32 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   ]);
   assert.deepEqual(savedStatementBalances, []);
 
+  const independentEvidenceValues = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "independent-evidence-values", account_id: 10,
+      start_date: { found: true, value: "2026-01-01",
+        balance_date_meaning: "first_included_transaction_date" },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: true, value: "87.50" },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.notEqual(independentEvidenceValues.isError, true);
+  assert.equal(independentEvidenceValues.structuredContent.readyToCommit, true);
+  assert.deepEqual(oneSidedImport.knownBalanceAssertions, []);
+
   const noStatementBalances = await client.callTool({
     name: "import_single_account_statement",
     arguments: {
       statement_id: "transactions-only", account_id: 10,
-      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
-      ending_balance: { found: false, date: null, amount_decimal: null },
+      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: false, value: null },
       line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
         available_text: "ACME", amount_decimal: "-12.50" }],
       dry_run: true,
@@ -1159,8 +1183,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "candidate-overlap", account_id: 10,
-      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
-      ending_balance: { found: false, date: null, amount_decimal: null },
+      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: false, value: null },
       line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
         available_text: "ACME", amount_decimal: "-12.50" }],
       dry_run: true,
@@ -1173,8 +1199,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "no-designation", account_id: 10,
-      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
-      ending_balance: { found: false, date: null, amount_decimal: null },
+      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: false, value: null },
       line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
         available_text: "NO SUSPENSE", amount_decimal: "-12.50" }],
       dry_run: true,
@@ -1188,10 +1216,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     name: "import_single_account_statement",
     arguments: {
       statement_id: "bank-statement-2026-01", account_id: 10,
-      beginning_balance: { found: true, date: "2026-01-01",
-        date_meaning: "first_included_transaction_date", amount_decimal: "100.00",
+      start_date: { found: true, value: "2026-01-01",
+        balance_date_meaning: "first_included_transaction_date",
         available_text: "Statement period begins January 1" },
-      ending_balance: { found: true, date: "2026-01-31", amount_decimal: "87.50", available_text: "Ending balance" },
+      start_amount: { found: true, value: "100.00", available_text: "Opening balance" },
+      end_date: { found: true, value: "2026-01-31", available_text: "Statement period ends January 31" },
+      end_amount: { found: true, value: "87.50", available_text: "Ending balance" },
       line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
         available_text: "ACME", amount_decimal: "-12.50" }],
       dry_run: true,
@@ -1231,8 +1261,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       artifact_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       statement_id: `sha256:${"6".repeat(64)}`,
       account_id: 10,
-      beginning_balance: { found: false, date: null, date_meaning: null, amount_decimal: null },
-      ending_balance: { found: false, date: null, amount_decimal: null },
+      start_date: { found: false, value: null, balance_date_meaning: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: false, value: null },
       dry_run: true,
     },
   });

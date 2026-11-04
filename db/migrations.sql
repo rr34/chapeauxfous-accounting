@@ -7,6 +7,35 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0020: evidence-accounting-significance
+-- writer downtime: schedule maintenance; altering the evidence table takes a metadata lock.
+-- deployment order: apply before deploying evidence metadata reads or independent statement determinations.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+-- Dates and amounts are deliberately independent because a document may establish only one of them.
+
+ALTER TABLE `accounting_evidence_files`
+  ADD COLUMN `currency_id` int(11) NULL DEFAULT NULL
+    COMMENT 'Optional accounting currency or unit applicable to start_amount_units and end_amount_units. The unit may be known even when neither amount was found.'
+    AFTER `storage_key`,
+  ADD COLUMN `start_date` date NULL DEFAULT NULL
+    COMMENT 'Optional first accounting-significant date stated by the evidence. For a receipt this is normally its date; for a statement this is the period start. It is independent of start_amount_units.'
+    AFTER `currency_id`,
+  ADD COLUMN `start_amount_units` bigint(20) NULL DEFAULT NULL
+    COMMENT 'Optional first accounting-significant signed amount in currency_id native units. For a receipt this is normally its amount; for a statement this is the opening balance. It is independent of start_date.'
+    AFTER `start_date`,
+  ADD COLUMN `end_date` date NULL DEFAULT NULL
+    COMMENT 'Optional second accounting-significant date stated by evidence covering a period, normally a statement period end. It is independent of end_amount_units.'
+    AFTER `start_amount_units`,
+  ADD COLUMN `end_amount_units` bigint(20) NULL DEFAULT NULL
+    COMMENT 'Optional second accounting-significant signed amount in currency_id native units, normally a statement closing balance. It is independent of end_date.'
+    AFTER `end_date`,
+  ADD KEY `accounting_evidence_files_currency_IDX` (`currency_id`),
+  ADD CONSTRAINT `accounting_evidence_files_currency_FK`
+    FOREIGN KEY (`currency_id`) REFERENCES `currencies` (`currency_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT;
+
+-- end migration 0020
+
 -- migration 0019: durable-statement-evidence
 -- writer downtime: schedule maintenance; the new tables and foreign keys take metadata locks.
 -- deployment order: apply before deploying direct statement-PDF upload or statement-job tools.

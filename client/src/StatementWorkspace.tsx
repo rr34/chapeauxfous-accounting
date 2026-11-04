@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadEvidenceFile, uploadStatementPdf } from "./api";
 import { unitsToDecimal } from "./money";
 import type { Account, BalanceAssertion, StatementImportJob } from "./types";
@@ -50,6 +50,8 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [handoffCopied, setHandoffCopied] = useState(false);
+  const copiedResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const account = postable.find((candidate) => candidate.id === Number(accountId));
   const suspense = postable.find((candidate) => candidate.suspense
     && candidate.currencyId === account?.currencyId && candidate.id !== account?.id);
@@ -58,6 +60,18 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const latestAssertion = assertions.filter((assertion) => assertion.accountId === account?.id)
     .sort((left, right) => right.date.localeCompare(left.date))[0];
   const activeStatementJob = statementJobs.find((job) => job.status !== "committed") ?? null;
+  const evidenceSignificance = activeStatementJob == null ? [] : [
+    activeStatementJob.evidenceFile.startDate == null && activeStatementJob.evidenceFile.startAmountUnits == null
+      ? null : `Start ${activeStatementJob.evidenceFile.startDate ?? "date not found"}${
+        activeStatementJob.evidenceFile.startAmountUnits == null || activeStatementJob.evidenceFile.scale == null
+          ? "" : ` · ${unitsToDecimal(activeStatementJob.evidenceFile.startAmountUnits,
+            activeStatementJob.evidenceFile.scale)} ${activeStatementJob.evidenceFile.currencyCode ?? ""}`}`,
+    activeStatementJob.evidenceFile.endDate == null && activeStatementJob.evidenceFile.endAmountUnits == null
+      ? null : `End ${activeStatementJob.evidenceFile.endDate ?? "date not found"}${
+        activeStatementJob.evidenceFile.endAmountUnits == null || activeStatementJob.evidenceFile.scale == null
+          ? "" : ` · ${unitsToDecimal(activeStatementJob.evidenceFile.endAmountUnits,
+            activeStatementJob.evidenceFile.scale)} ${activeStatementJob.evidenceFile.currencyCode ?? ""}`}`,
+  ].filter((value): value is string => value != null);
 
   useEffect(() => {
     if (initialAccountId != null) setAccountId(String(initialAccountId));
@@ -66,6 +80,14 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   useEffect(() => {
     setDesignationId("");
   }, [accountId]);
+
+  useEffect(() => () => {
+    if (copiedResetTimer.current != null) clearTimeout(copiedResetTimer.current);
+  }, []);
+
+  useEffect(() => {
+    setHandoffCopied(false);
+  }, [activeStatementJob?.id]);
 
   async function loadStatementJobs() {
     if (!account) { setStatementJobs([]); return; }
@@ -123,8 +145,15 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     if (!activeStatementJob || !suspense) return;
     try {
       await navigator.clipboard.writeText(activeStatementJob.copiedPrompt);
+      setHandoffCopied(true);
+      if (copiedResetTimer.current != null) clearTimeout(copiedResetTimer.current);
+      copiedResetTimer.current = setTimeout(() => {
+        setHandoffCopied(false);
+        copiedResetTimer.current = null;
+      }, 3000);
       setNotice("Agent handoff copied. Paste it into your agent; the agent will retrieve the complete PDF from Accounting.");
     } catch {
+      setHandoffCopied(false);
       setError("Clipboard access was blocked. Copy the statement job reference manually.");
     }
   }
@@ -191,6 +220,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         </>}
         {activeStatementJob && <div className="statement-file"><strong>{activeStatementJob.evidenceFile.fileName}</strong>
           <span>{activeStatementJob.status.replaceAll("_", " ")} · {activeStatementJob.evidenceFile.sha256}</span>
+          {evidenceSignificance.map((value) => <span key={value}>{value}</span>)}
           <button type="button" className="link-button" onClick={() => void downloadEvidenceFile(
             activeStatementJob.evidenceFile.downloadPath
               ?? `/api/evidence-files/${activeStatementJob.evidenceFile.id}/content`,
@@ -215,14 +245,18 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
 
         <h3>3. Continue in your agent</h3>
         <ol className="statement-agent-questions">
-          <li>Beginning balance and date, distinguishing period start from an explicit end-of-day balance date.</li>
-          <li>Ending balance and its date.</li>
+          <li>Statement start date, determined independently.</li>
+          <li>Opening balance, determined independently.</li>
+          <li>Statement end date, determined independently.</li>
+          <li>Closing balance, determined independently.</li>
           <li>Every dated line item, signed by its effect on the displayed balance.</li>
           <li>All available text for every line item.</li>
         </ol>
         <p className="muted">No category guessing happens during intake. Each unknown counterline remains an open question in the suspense account for later matching or classification.</p>
-        <button type="button" className="primary" disabled={!activeStatementJob || !suspense || Boolean(busy)}
-          onClick={() => void copyAgentHandoff()}>Copy agent handoff</button>
+        <button type="button" className={`primary handoff-copy${handoffCopied ? " copied" : ""}`}
+          disabled={!activeStatementJob || !suspense || Boolean(busy)}
+          onClick={() => void copyAgentHandoff()} aria-live="polite">
+          {handoffCopied ? "✓ Copied to clipboard" : "Copy agent handoff"}</button>
         {activeStatementJob && activeStatementJob.status !== "committed" && <button type="button" className="secondary"
           disabled={Boolean(busy)} onClick={() => void restartStatementJob()}>
           {busy === "restart" ? "Restarting…" : "Restart from original PDF"}</button>}

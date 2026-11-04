@@ -103,6 +103,8 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .statement-workspace label { display: block; margin: .4rem 0; }
 .statement-workspace input[type=file] { margin-top: .3rem; }
 .statement-workspace .secondary, .statement-workspace .primary { width: auto; margin-top: .4rem; }
+.statement-workspace .handoff-copy { min-width: 180px; transition: background-color .15s ease, box-shadow .15s ease; }
+.statement-workspace .handoff-copy.copied { background: #4e8a57; box-shadow: 0 0 0 3px #dcebdd; }
 .statement-file, .statement-sample, .statement-review { margin: .75rem 0; border-radius: 8px; background: #f2f5f0; padding: .7rem; font-size: .77rem; }
 .statement-file { display: grid; gap: .35rem; overflow-wrap: anywhere; }
 .statement-sample > div { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .3rem; color: #526158; }

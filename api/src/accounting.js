@@ -174,9 +174,14 @@ export async function listAccountLedger(pool, personId, accountId) {
   if (lineItemIds.length) {
     const [evidenceRows] = await pool.query(
       `SELECT liel.line_item_id, ef.evidence_file_id, ef.original_file_name,
-              ef.media_type, ef.byte_size, ef.sha256, liel.evidence_role, liel.source_record_id
+              ef.media_type, ef.byte_size, ef.sha256,
+              ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
+              ef.currency_id, ec.CurrencyAbbreviation AS evidence_currency_code,
+              ec.scale AS evidence_currency_scale,
+              liel.evidence_role, liel.source_record_id
          FROM line_item_evidence_links liel
          JOIN accounting_evidence_files ef ON ef.evidence_file_id = liel.evidence_file_id
+         LEFT JOIN currencies ec ON ec.currency_id = ef.currency_id
         WHERE ef.owner_person_id = ?
           AND liel.line_item_id IN (${lineItemIds.map(() => "?").join(", ")})
         ORDER BY liel.line_item_id, ef.evidence_file_id`,
@@ -189,6 +194,14 @@ export async function listAccountLedger(pool, personId, accountId) {
         id: Number(evidence.evidence_file_id), fileName: String(evidence.original_file_name),
         mediaType: String(evidence.media_type), byteSize: Number(evidence.byte_size),
         sha256: `sha256:${String(evidence.sha256)}`, role: String(evidence.evidence_role),
+        startDate: evidence.start_date == null ? null : String(evidence.start_date),
+        startAmountUnits: evidence.start_amount_units == null ? null : String(evidence.start_amount_units),
+        endDate: evidence.end_date == null ? null : String(evidence.end_date),
+        endAmountUnits: evidence.end_amount_units == null ? null : String(evidence.end_amount_units),
+        currencyId: evidence.currency_id == null ? null : Number(evidence.currency_id),
+        currencyCode: evidence.evidence_currency_code == null
+          ? null : String(evidence.evidence_currency_code).trim(),
+        scale: evidence.evidence_currency_scale == null ? null : Number(evidence.evidence_currency_scale),
         sourceRecordId: evidence.source_record_id == null ? null : String(evidence.source_record_id),
         downloadPath: `/api/evidence-files/${evidence.evidence_file_id}/content`,
       });

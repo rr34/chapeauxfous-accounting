@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  bindStatementImportPreview,
   createStatementImportFromPdf,
   restartStatementImportJob,
   sendEvidenceFileContent,
@@ -27,7 +28,9 @@ function statementPool() {
         if (!row) {
           row = { evidence_file_id: state.nextEvidenceId++, owner_person_id: owner,
             original_file_name: fileName, media_type: mediaType, byte_size: byteSize,
-            sha256, storage_key: storageKey, created_at: "2026-11-04 12:00:00.000000" };
+            sha256, storage_key: storageKey, currency_id: null,
+            start_date: null, start_amount_units: null, end_date: null, end_amount_units: null,
+            created_at: "2026-11-04 12:00:00.000000" };
           state.evidence.set(row.evidence_file_id, row);
         }
         return [{ insertId: row.evidence_file_id }];
@@ -47,7 +50,10 @@ function statementPool() {
         if (!job || job.owner_person_id !== owner) return [[]];
         const evidence = state.evidence.get(job.evidence_file_id);
         return [[{ ...job, ...evidence, evidence_created_at: evidence.created_at,
-          AccountName: "Checking", CurrencyAbbreviation: "USD", scale: 2 }]];
+          account_currency_id: 1, AccountName: "Checking", CurrencyAbbreviation: "USD", scale: 2,
+          evidence_currency_id: evidence.currency_id,
+          evidence_currency_code: evidence.currency_id == null ? null : "USD",
+          evidence_currency_scale: evidence.currency_id == null ? null : 2 }]];
       }
       if (sql.includes("FROM accounting_evidence_files")) {
         const [id, owner] = params;
@@ -65,6 +71,22 @@ function statementPool() {
         const [id, owner] = params;
         const job = state.jobs.get(id);
         if (job?.owner_person_id === owner) job.job_status = "processing";
+        return [{ affectedRows: job ? 1 : 0 }];
+      }
+      if (sql.includes("UPDATE accounting_evidence_files")) {
+        const [startDate, startAmountUnits, endDate, endAmountUnits, currencyId, evidenceFileId, owner] = params;
+        const evidence = state.evidence.get(Number(evidenceFileId));
+        if (evidence?.owner_person_id === owner) Object.assign(evidence, {
+          start_date: startDate, start_amount_units: startAmountUnits,
+          end_date: endDate, end_amount_units: endAmountUnits, currency_id: currencyId,
+        });
+        return [{ affectedRows: evidence ? 1 : 0 }];
+      }
+      if (sql.includes("SET job_status = 'preview_ready'")) {
+        const [importPlanId, canonicalArtifactId, id, owner] = params;
+        const job = state.jobs.get(id);
+        if (job?.owner_person_id === owner) Object.assign(job, { job_status: "preview_ready",
+          import_plan_id: importPlanId, canonical_artifact_id: canonicalArtifactId });
         return [{ affectedRows: job ? 1 : 0 }];
       }
       if (sql.includes("DELETE FROM accounting_statement_import_jobs")) {
@@ -149,4 +171,32 @@ test("statement processing is serial per owner", async (t) => {
   await assert.rejects(startStatementImportJob({ pool, personId: 7, statementImportJobId: second.id }),
     (error) => error.code === "STATEMENT_PROCESSING_SERIAL_CONFLICT"
       && error.details.activeJobId === first.id);
+});
+
+test("binding a statement preview stores each evidence significance field independently", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+  const pool = statementPool();
+  const created = await createStatementImportFromPdf({ pool, evidenceRoot, personId: 7, accountId: 34,
+    fileName: "independent.pdf", mediaType: "application/pdf",
+    bytes: Buffer.from("%PDF-1.4\nstatement\n%%EOF", "ascii") });
+  await startStatementImportJob({ pool, personId: 7, statementImportJobId: created.id });
+  const saved = await bindStatementImportPreview({ pool, personId: 7, statementImportJobId: created.id,
+    importPlanId: "11111111-1111-4111-8111-111111111111",
+    canonicalArtifactId: "22222222-2222-4222-8222-222222222222",
+    evidenceMetadata: {
+      startDate: "2026-10-01", startAmountUnits: null,
+      endDate: null, endAmountUnits: "12345", currencyId: 1,
+    } });
+  assert.equal(saved.status, "preview_ready");
+  assert.deepEqual({
+    startDate: saved.evidenceFile.startDate,
+    startAmountUnits: saved.evidenceFile.startAmountUnits,
+    endDate: saved.evidenceFile.endDate,
+    endAmountUnits: saved.evidenceFile.endAmountUnits,
+    currencyId: saved.evidenceFile.currencyId,
+  }, {
+    startDate: "2026-10-01", startAmountUnits: null,
+    endDate: null, endAmountUnits: "12345", currencyId: 1,
+  });
 });

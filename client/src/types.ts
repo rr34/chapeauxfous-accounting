@@ -52,6 +52,13 @@ export type EvidenceFile = {
   mediaType: string;
   byteSize: number;
   sha256: string;
+  startDate: string | null;
+  startAmountUnits: string | null;
+  endDate: string | null;
+  endAmountUnits: string | null;
+  currencyId: number | null;
+  currencyCode: string | null;
+  scale: number | null;
   role?: string;
   sourceRecordId?: string | null;
   downloadPath?: string;
@@ -68,6 +75,7 @@ export type StatementImportJob = {
     id: number;
     sourceRef: string;
     displayName: string;
+    currencyId: number;
     currencyCode: string;
     scale: number;
   };
