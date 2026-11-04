@@ -1293,19 +1293,19 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(oneSidedPreview.structuredContent.import.completionNote,
     /visible in the account register for Wallet.*No transactions have been posted/i);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /Beginning: January 1, 2026 — \$100\.00/);
+    /\*\*Beginning:\*\* January 1, 2026 — \$100\.00/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /Ending: January 31, 2026 — \$87\.50/);
+    /\*\*Ending:\*\* January 31, 2026 — \$87\.50/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /Transactions found: 1/);
+    /\*\*Transactions found:\*\* 1/);
   assert.doesNotMatch(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /opening balance.*recorded as known/i);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /closing balance of \$87\.50 will be recorded as known for January 31, 2026/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /resulting ending balance is \$87\.50, which matches the ending balance shown on the statement/);
+    /resulting ending balance is \$87\.50, which \*\*matches\*\* the ending balance shown on the statement/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /Nothing has been posted yet\. Approve this import\?$/);
+    /Nothing has been posted yet\. \*\*Approve this import\?\*\*$/);
   assert.doesNotMatch(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /line item|included|excluded/i);
   const statementCommit = await client.callTool({

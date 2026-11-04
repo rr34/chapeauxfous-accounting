@@ -2382,13 +2382,13 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           const isEndOfDateEntry = lastEntryByDate.get(entry.date) === entry.lineItemId;
           const showAddKnownBalance = isEndOfDateEntry && !assertionDates.has(entry.date)
             && !account.placeholder && !account.archivedAt;
+          const reconciliationStatusLabel = row.reconciledLineCount === row.currentAccountLineCount
+            ? `Reconciled${row.reconciledThrough ? ` through ${formatRegisterDate(row.reconciledThrough)}` : ""}`
+            : `${row.reconciledLineCount} of ${row.currentAccountLineCount} account postings reconciled`;
           const reconciliationIndicator = row.reconciledLineCount > 0 && <span
             className={`register-reconciliation-status ${row.reconciledLineCount === row.currentAccountLineCount ? "complete" : "partial"}`}
-            title={row.reconciledLineCount === row.currentAccountLineCount
-              ? `Reconciled${row.reconciledThrough ? ` through ${formatRegisterDate(row.reconciledThrough)}` : ""}`
-              : `${row.reconciledLineCount} of ${row.currentAccountLineCount} account postings reconciled`}>
+            role="img" aria-label={reconciliationStatusLabel} title={reconciliationStatusLabel}>
             <span aria-hidden="true">{row.reconciledLineCount === row.currentAccountLineCount ? "✓" : "◐"}</span>
-            {row.reconciledLineCount === row.currentAccountLineCount ? "Reconciled" : "Partial"}
           </span>;
           const knownBalanceAction = (showAddKnownBalance || reconciliationIndicator) && <div
             className="register-known-balance-cell">

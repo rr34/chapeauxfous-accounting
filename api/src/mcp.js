@@ -424,13 +424,13 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
     : closingUnits == null ? "not found"
       : `date not found — ${displayNativeAmount(closingUnits, account.currencyCode, account.scale)}`;
   const lines = [
-    `Statement preview ready for ${accountDisplayName}.`,
+    `**Statement preview ready for ${accountDisplayName}.**`,
     "",
-    `Beginning: ${beginning}`,
-    `Ending: ${ending}`,
-    `Transactions found: ${preview.submittedTransactionCount}`,
+    `**Beginning:** ${beginning}`,
+    `**Ending:** ${ending}`,
+    `**Transactions found:** ${preview.submittedTransactionCount}`,
     "",
-    "On approval:",
+    "**On approval:**",
     `- ${preview.wouldCreateTransactionCount} new transaction${preview.wouldCreateTransactionCount === 1 ? "" : "s"} will be added.`,
   ];
   const alreadyAccountedFor = (preview.excludedTransactionCount ?? 0)
@@ -464,12 +464,12 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
     const resulting = displayNativeAmount(resultingEndingUnits, account.currencyCode, account.scale);
     const statementEnding = displayNativeAmount(closingUnits, account.currencyCode, account.scale);
     lines.push("", coverage.balanced
-      ? `Balance check: With this preview applied, the resulting ending balance is ${resulting}, which matches the ending balance shown on the statement.`
-      : `Balance check: With this preview applied, the resulting ending balance is ${resulting}, which does not match the ending balance of ${statementEnding} shown on the statement.`);
+      ? `**Balance check:** With this preview applied, the resulting ending balance is ${resulting}, which **matches** the ending balance shown on the statement.`
+      : `**Balance check:** With this preview applied, the resulting ending balance is ${resulting}, which **does not match** the ending balance of ${statementEnding} shown on the statement.`);
   } else {
-    lines.push("", "Balance check: An ending-balance match could not be verified from the available statement evidence.");
+    lines.push("", "**Balance check:** An ending-balance match **could not be verified** from the available statement evidence.");
   }
-  lines.push("", "Nothing has been posted yet. Approve this import?");
+  lines.push("", "Nothing has been posted yet. **Approve this import?**");
   return lines.join("\n");
 }
 
