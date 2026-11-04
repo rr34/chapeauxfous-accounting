@@ -309,13 +309,13 @@ test("the MCP exposes scoped tool and object contracts", async () => {
           status: 400, details: { currencyCode: "USD" } });
       return { ...transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
         importPlanId: "55555555-5555-4555-8555-555555555555", transactionCount: input.lines.length }),
-        balanceAssertions: input.knownBalanceAssertions.map((assertion, index) => ({
-          assertionId: index === 0 ? 12 : null,
+        balanceAssertions: input.knownBalanceAssertions.map((assertion) => ({
+          assertionId: null,
           accountId: assertion.accountId,
           balanceDate: assertion.balanceDate,
           sourceKnownBalanceUnits: assertion.knownBalanceUnits,
-          storedKnownBalanceUnits: index === 0 ? assertion.knownBalanceUnits : null,
-          status: index === 0 ? "preserved" : "planned",
+          storedKnownBalanceUnits: null,
+          status: "planned",
         })),
         questionSummary: { openQuestionCount: input.lines.length,
           byAudience: { [input.questionAudience]: input.lines.length },
@@ -375,13 +375,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
         sourceSystem: statement ? "single_account_statement" : "source_app" }),
         ...(statement ? {
           balanceAssertions: [
-            { assertionId: 12, accountId: 10, balanceDate: "2025-12-31",
-              sourceKnownBalanceUnits: "10000", storedKnownBalanceUnits: "10000", status: "created" },
             { assertionId: 13, accountId: 10, balanceDate: "2026-01-31",
               sourceKnownBalanceUnits: "8750", storedKnownBalanceUnits: "8750", status: "created" },
           ],
           statementEvidence: { statementImportJobId: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
-            evidenceFileId: 81, lineItemLinkCount: 1, balanceAssertionLinkCount: 2 },
+            evidenceFileId: 81, lineItemLinkCount: 1, balanceAssertionLinkCount: 1 },
         } : {}),
         committed: true, alreadyCommitted: false,
         expiresAt: "2026-08-25T18:42:00.000Z", previewDigest: `sha256:${"b".repeat(64)}`,
@@ -1142,7 +1140,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(Object.hasOwn(statementGuide.structuredContent.orderedQuestions[0].answerShape,
     "balance_date_meaning"), false);
   assert.match(statementGuide.structuredContent.rules.join(" "),
-    /opening balance always applies at the beginning.*previous calendar day/i);
+    /never saves an opening balance.*only a closing date and closing balance can create one/i);
   const statementJobObjects = await client.callTool({
     name: "list_statement_import_job_objects", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
@@ -1300,8 +1298,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     /Ending: January 31, 2026 — \$87\.50/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /Transactions found: 1/);
-  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
-    /opening balance of \$100\.00 is already recorded as known for December 31, 2025/);
+  assert.doesNotMatch(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /opening balance.*recorded as known/i);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
     /closing balance of \$87\.50 will be recorded as known for January 31, 2026/);
   assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
@@ -1315,7 +1313,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     arguments: { import_plan_id: "55555555-5555-4555-8555-555555555555" },
   });
   assert.equal(statementCommit.structuredContent.completionNote,
-    "Statement import succeeded. Added 1 new transaction. Recorded 2 new known balances. 1 imported transaction still needs a category. The original PDF remains linked as evidence.");
+    "Statement import succeeded. Added 1 new transaction. Recorded 1 new known balance. 1 imported transaction still needs a category. The original PDF remains linked as evidence.");
   assert.equal(statementCommit.structuredContent.import.completionNote,
     statementCommit.structuredContent.completionNote);
   assert.doesNotMatch(statementCommit.structuredContent.completionNote,
@@ -1331,7 +1329,6 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     lines: [{ externalId: "sha256:<digest>", transactionDate: "2026-01-05", description: "ACME",
       amountDecimal: "-12.5" }],
     knownBalanceAssertions: [
-      { accountId: 10, balanceDate: "2025-12-31", knownBalanceUnits: "10000" },
       { accountId: 10, balanceDate: "2026-01-31", knownBalanceUnits: "8750" },
     ],
     importReview: { accountId: 10, statementId: "bank-statement-2026-01", decisions: [{
@@ -1484,7 +1481,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.14.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.15.0");
 
   await handler.close();
 });

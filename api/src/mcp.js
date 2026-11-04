@@ -2436,7 +2436,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       },
       orderedQuestions: [
         { order: 1, key: "start_date",
-          prompt: "Determine the statement period start date independently of the opening balance. Extract the date wherever it appears. The opening balance always applies at the beginning of this date, and Accounting records it as a known end-of-day balance on the previous calendar day.",
+          prompt: "Determine the statement period start date independently of the opening balance. Extract the date wherever it appears. Accounting retains the start date and opening balance as statement evidence and uses them to validate movement, but never saves the opening balance as a ledger known-balance assertion.",
           answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
         { order: 2, key: "start_amount",
           prompt: "Determine the opening balance independently of the period start date. Extract the signed amount exactly even when it appears elsewhere in the document.",
@@ -2462,9 +2462,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
-        "A statement opening balance always applies at the beginning of the statement start date. Accounting records it as a known end-of-day balance on the previous calendar day.",
+        "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Never infer that one is absent merely because it is not physically adjacent to another.",
-        "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
+        "Each evidence value is optional and is retained independently. A closing balance assertion is created only when both the closing date and closing amount are available.",
         "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
         "Do not supply or choose a suspense account in the preview call. Accounting selects the one user-designated active, postable suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
         "The statement account and suspense account must be different accounts.",
@@ -2496,7 +2496,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       },
       orderedQuestions: [
         { order: 1, key: "start_date",
-          prompt: "Determine the statement period start date across the complete original PDF independently of the opening balance. Extract it wherever it appears. The opening balance always applies at the beginning of this date, and Accounting records it as a known end-of-day balance on the previous calendar day.",
+          prompt: "Determine the statement period start date across the complete original PDF independently of the opening balance. Extract it wherever it appears. Accounting retains the start date and opening balance as statement evidence and uses them to validate movement, but never saves the opening balance as a ledger known-balance assertion.",
           answerShape: { found: "boolean", value: "YYYY-MM-DD or null", available_text: "string or null" } },
         { order: 2, key: "start_amount",
           prompt: "Determine the opening balance across the complete original PDF independently of the period start date. Extract the signed amount exactly wherever it appears.",
@@ -2524,9 +2524,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text.",
-        "A statement opening balance always applies at the beginning of the statement start date. Accounting records it as a known end-of-day balance on the previous calendar day.",
+        "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Search the entire document for each one; do not require related values to be physically adjacent.",
-        "Each evidence value is optional and is retained independently. Accounting creates a balance assertion only when the required date, amount, and date meaning are all available.",
+        "Each evidence value is optional and is retained independently. A closing balance assertion is created only when both the closing date and closing amount are available.",
         "Do not supply or choose a suspense account. Accounting resolves its configured account internally.",
         "Create only a pending preview. Never commit without the user's later approval.",
       ],
@@ -2657,7 +2657,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     if (!account) throw Object.assign(new Error("Statement account not found."), {
       status: 404, code: "ACCOUNT_NOT_FOUND",
     });
-    const knownBalanceAssertions = [
+    const analysisBalanceAssertions = [
       ...(openingBalanceDate == null || openingBalanceDate === closingBalanceDate ? []
         : [{ accountId: account_id, balanceDate: openingBalanceDate,
         knownBalanceUnits: decimalToUnits(start_amount.value, account.scale) }]),
@@ -2665,6 +2665,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         : [{ accountId: account_id, balanceDate: closingBalanceDate,
           knownBalanceUnits: decimalToUnits(end_amount.value, account.scale) }]),
     ];
+    const knownBalanceAssertions = closingBalanceDate == null ? [] : [{
+      accountId: account_id,
+      balanceDate: closingBalanceDate,
+      knownBalanceUnits: decimalToUnits(end_amount.value, account.scale),
+    }];
     const rows = line_items.map((line) => ({
       externalId: `sha256:${createHash("sha256").update(`${statement_id}\u0000${line.source_record_id}`, "utf8").digest("hex")}`,
       transactionDate: line.transaction_date, description: line.available_text,
@@ -2676,7 +2681,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       openingBalanceDate: openingBalanceDate
         ?? previousCalendarDate(rows.map((line) => line.transactionDate).sort()[0]),
       closingBalanceDate: closingBalanceDate ?? rows.map((line) => line.transactionDate).sort().at(-1),
-      knownBalanceAssertions,
+      knownBalanceAssertions: analysisBalanceAssertions,
       observations: rows.map((line, index) => ({
         sourceDocumentId: statement_id, sourceRecordId: line_items[index].source_record_id,
         accountId: account_id, transactionDate: line.transactionDate, amountDecimal: line.amountDecimal,
@@ -2743,7 +2748,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement", {
     title: "Preview inline single-account statement",
-    description: "Submit the six independent determinations from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Evidence dates and balances are optional and independent. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    description: "Submit the six independent determinations from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Evidence dates and balances are optional and independent. Opening values remain evidence and reconciliation inputs only; only the closing date and closing balance may create a ledger known-balance assertion. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
@@ -2768,7 +2773,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement_artifact", {
     title: "Preview uploaded single-account statement",
-    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit the optional start date, opening balance, end date, and closing balance as separate determinations. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit the optional start date, opening balance, end date, and closing balance as separate determinations. Opening values remain evidence and reconciliation inputs only; only the closing date and closing balance may create a ledger known-balance assertion. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       artifact_id: z.string().trim().uuid(),
       statement_id: z.string().trim().min(1).max(128)
@@ -2812,7 +2817,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("submit_statement_import_job_artifact", {
     title: "Submit statement job extraction",
-    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. A successful ready result saves a pending, unposted preview in the account register and returns nextAction.instruction as the provider-written statement summary and exact confirmation question. Present that wording instead of internal line-item or include/exclude counts. The original PDF remains the evidence file; JSON Lines is disposable operational data.",
+    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. Opening values remain evidence and reconciliation inputs only; only the closing date and closing balance may create a ledger known-balance assertion. A successful ready result saves a pending, unposted preview in the account register and returns nextAction.instruction as the provider-written statement summary and exact confirmation question. Present that wording instead of internal line-item or include/exclude counts. The original PDF remains the evidence file; JSON Lines is disposable operational data.",
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
