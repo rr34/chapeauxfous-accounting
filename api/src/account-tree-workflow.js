@@ -83,7 +83,10 @@ export function accountTreeReadyWorkflow(result) {
   };
 }
 
-export function transactionPreviewWorkflow(result, { reviewDestination = null } = {}) {
+export function transactionPreviewWorkflow(result, {
+  reviewDestination = null,
+  confirmationInstruction = null,
+} = {}) {
   if (result.readyToCommit && result.importPlanId) {
     const destination = reviewDestination == null ? null : {
       surface: "account_register",
@@ -103,7 +106,7 @@ export function transactionPreviewWorkflow(result, { reviewDestination = null } 
       requiredAction: "REQUEST_USER_CONFIRMATION",
       nextAction: {
         type: "request_user_confirmation",
-        instruction: `${savedMessage} Review the proposed rows${destination == null ? "" : " there"}, including ${result.excludedTransactionCount ?? 0} temporarily excluded transaction${(result.excludedTransactionCount ?? 0) === 1 ? "" : "s"}. Then ask: Commit these import settings now? Approval will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
+        instruction: confirmationInstruction ?? `${savedMessage} Review the proposed rows${destination == null ? "" : " there"}, including ${result.excludedTransactionCount ?? 0} temporarily excluded transaction${(result.excludedTransactionCount ?? 0) === 1 ? "" : "s"}. Then ask: Commit these import settings now? Approval will create ${result.wouldCreateTransactionCount} transactions and ${result.wouldCreateLineItemCount} line items; ${result.wouldReuseTransactionCount} transactions and ${result.wouldReuseLineItemCount} line items will be reused${result.balanceAssertions?.some((item) => item.status === "planned")
           ? `; ${result.balanceAssertions.filter((item) => item.status === "planned").length} known balances will be saved`
           : ""}${result.balanceAssertions?.some((item) => item.status === "preserved"
             && item.storedKnownBalanceUnits !== item.sourceKnownBalanceUnits)

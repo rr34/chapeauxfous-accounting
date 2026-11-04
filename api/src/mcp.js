@@ -388,6 +388,120 @@ function previousCalendarDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
+const calendarMonths = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+
+function displayCalendarDate(value) {
+  const [year, month, day] = String(value).split("-").map(Number);
+  return `${calendarMonths[month - 1]} ${day}, ${year}`;
+}
+
+function displayNativeAmount(units, currencyCode, scale) {
+  const value = BigInt(units);
+  const sign = value < 0n ? "-" : "";
+  const digits = (value < 0n ? -value : value).toString().padStart(scale + 1, "0");
+  const whole = scale === 0 ? digits : digits.slice(0, -scale);
+  const fraction = scale === 0 ? "" : digits.slice(-scale);
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const amount = `${sign}${grouped}${fraction ? `.${fraction}` : ""}`;
+  return currencyCode === "USD"
+    ? `${sign}$${grouped}${fraction ? `.${fraction}` : ""}`
+    : `${currencyCode} ${amount}`;
+}
+
+function statementConfirmationInstruction({ account, accountDisplayName, startDate, startAmount,
+  endDate, endAmount, openingBalanceDate, closingBalanceDate, analysis, preview }) {
+  const openingUnits = startAmount.found ? decimalToUnits(startAmount.value, account.scale) : null;
+  const closingUnits = endAmount.found ? decimalToUnits(endAmount.value, account.scale) : null;
+  const beginning = startDate.found
+    ? `${displayCalendarDate(startDate.value)}${openingUnits == null ? " — balance not found"
+      : ` — ${displayNativeAmount(openingUnits, account.currencyCode, account.scale)}`}`
+    : openingUnits == null ? "not found"
+      : `date not found — ${displayNativeAmount(openingUnits, account.currencyCode, account.scale)}`;
+  const ending = endDate.found
+    ? `${displayCalendarDate(endDate.value)}${closingUnits == null ? " — balance not found"
+      : ` — ${displayNativeAmount(closingUnits, account.currencyCode, account.scale)}`}`
+    : closingUnits == null ? "not found"
+      : `date not found — ${displayNativeAmount(closingUnits, account.currencyCode, account.scale)}`;
+  const lines = [
+    `Statement preview ready for ${accountDisplayName}.`,
+    "",
+    `Beginning: ${beginning}`,
+    `Ending: ${ending}`,
+    `Transactions found: ${preview.submittedTransactionCount}`,
+    "",
+    "On approval:",
+    `- ${preview.wouldCreateTransactionCount} new transaction${preview.wouldCreateTransactionCount === 1 ? "" : "s"} will be added.`,
+  ];
+  const alreadyAccountedFor = (preview.excludedTransactionCount ?? 0)
+    + preview.wouldReuseTransactionCount;
+  if (alreadyAccountedFor) {
+    lines.push(`- ${alreadyAccountedFor} statement transaction${alreadyAccountedFor === 1 ? " is" : "s are"} already accounted for and will not be added again.`);
+  }
+  const assertionByDate = new Map((preview.balanceAssertions ?? [])
+    .map((assertion) => [assertion.balanceDate, assertion]));
+  for (const [label, balanceDate, amountUnits] of [
+    ["opening", openingBalanceDate, openingUnits],
+    ["closing", closingBalanceDate, closingUnits],
+  ]) {
+    if (balanceDate == null || amountUnits == null) continue;
+    const assertion = assertionByDate.get(balanceDate);
+    const amount = displayNativeAmount(amountUnits, account.currencyCode, account.scale);
+    const effective = displayCalendarDate(balanceDate);
+    if (assertion?.status === "planned") {
+      lines.push(`- The ${label} balance of ${amount} will be recorded as known for ${effective}.`);
+    } else if (assertion?.status === "preserved"
+        && assertion.storedKnownBalanceUnits === assertion.sourceKnownBalanceUnits) {
+      lines.push(`- The ${label} balance of ${amount} is already recorded as known for ${effective}.`);
+    } else if (assertion?.status === "preserved") {
+      lines.push(`- The existing known ${label} balance for ${effective} differs from the statement and will not be overwritten.`);
+    }
+  }
+  const coverage = analysis.coverage?.find((item) => item.accountId === account.id);
+  if (coverage?.residualAfterProposedUnits != null && closingUnits != null) {
+    const residual = BigInt(coverage.residualAfterProposedUnits);
+    const resultingEndingUnits = BigInt(closingUnits) - residual * BigInt(normalBalanceSign(account.type));
+    const resulting = displayNativeAmount(resultingEndingUnits, account.currencyCode, account.scale);
+    const statementEnding = displayNativeAmount(closingUnits, account.currencyCode, account.scale);
+    lines.push("", coverage.balanced
+      ? `Balance check: With this preview applied, the resulting ending balance is ${resulting}, which matches the ending balance shown on the statement.`
+      : `Balance check: With this preview applied, the resulting ending balance is ${resulting}, which does not match the ending balance of ${statementEnding} shown on the statement.`);
+  } else {
+    lines.push("", "Balance check: An ending-balance match could not be verified from the available statement evidence.");
+  }
+  lines.push("", "Nothing has been posted yet. Approve this import?");
+  return lines.join("\n");
+}
+
+function statementJobMetadata(job) {
+  const { download: _download, ...metadata } = job;
+  return metadata;
+}
+
+function statementJobObject(job) {
+  return {
+    objectType: job.objectType,
+    id: job.id,
+    sourceRef: job.sourceRef,
+    displayName: job.displayName,
+    status: job.status,
+    sourceDocumentId: job.sourceDocumentId,
+    createdAt: job.createdAt,
+    account: {
+      objectType: job.account.objectType,
+      id: job.account.id,
+      sourceRef: job.account.sourceRef,
+      displayName: job.account.displayName,
+    },
+    evidenceFile: {
+      objectType: job.evidenceFile.objectType,
+      id: job.evidenceFile.id,
+      sourceRef: job.evidenceFile.sourceRef,
+      displayName: job.evidenceFile.displayName,
+    },
+  };
+}
+
 function transactionDeletionStatusRecovery(result, deletionPlanId) {
   if (!["expired", "invalidated"].includes(result.status)) return result;
   return {
@@ -971,6 +1085,22 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     method: z.literal("GET"), endpointPath: z.string().startsWith("/mcp/evidence-files/"),
     acceptsByteRanges: z.literal(true),
   });
+  const statementAccountReferenceSchema = z.object({
+    objectType: z.literal("accounting.account"), id: z.number().int().positive(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+  });
+  const statementEvidenceReferenceSchema = z.object({
+    objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+  });
+  const statementImportJobObjectSchema = z.object({
+    objectType: z.literal("accounting.statement_import_job"), id: z.string().uuid(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+    status: z.enum(["ready", "processing", "preview_ready", "committed"]),
+    sourceDocumentId: z.string().regex(/^sha256:[0-9a-f]{64}$/), createdAt: z.string().min(1),
+    account: statementAccountReferenceSchema,
+    evidenceFile: statementEvidenceReferenceSchema,
+  });
   const statementImportJobSchema = z.object({
     objectType: z.literal("accounting.statement_import_job"), id: z.string().uuid(),
     sourceRef: z.string().min(1), displayName: z.string().min(1),
@@ -985,10 +1115,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     sourceDocumentId: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     importPlanId: z.string().uuid().nullable(), canonicalArtifactId: z.string().uuid().nullable(),
     createdAt: z.string().min(1), updatedAt: z.string().min(1), committedAt: z.string().nullable(),
-    download: statementDownloadSchema, copiedPrompt: z.string().min(1),
+    copiedPrompt: z.string().min(1),
   });
   const statementImportJobObjectOutput = successOutputSchema({
-    objects: z.array(statementImportJobSchema), resultMetadata: resultMetadataSchema,
+    objects: z.array(statementImportJobObjectSchema), resultMetadata: resultMetadataSchema,
   });
   const statementImportJobOutput = successOutputSchema({ job: statementImportJobSchema });
   const statementJobGuideShape = {
@@ -998,6 +1128,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   };
   const statementImportJobStartOutput = successOutputSchema({
     job: statementImportJobSchema,
+    download: statementDownloadSchema,
     extraction: z.object(statementJobGuideShape),
     effectReceipt: effectReceiptSchema,
   });
@@ -2377,7 +2508,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("list_statement_import_job_objects", {
     title: "Resolve statement import job",
-    description: "Canonical owner-scoped resolver for one copied accounting://statement-import-jobs/{id} reference. Supply exactly the UUID from that reference. Do not resolve or provide an account: the job already owns its exact account binding. Results contain metadata and stable references, not PDF bytes.",
+    description: "Canonical owner-scoped resolver for one copied accounting://statement-import-jobs/{id} reference. Supply exactly the UUID from that reference. Do not resolve or provide an account: the job already owns its exact account binding. The compact result contains job identity, status, and related object references only; it does not advertise PDF byte access. After resolution, call start_statement_import_job directly to begin processing.",
     inputSchema: z.object({
       statement_import_job_id: z.string().trim().uuid()
         .describe("Exact UUID copied from accounting://statement-import-jobs/{id}."),
@@ -2396,8 +2527,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     const page = await accounting.listStatementImportJobObjectsPage(pool, personId, {
       statementImportJobId: statement_import_job_id, limit: 1,
     });
-    return { objects: page.objects,
-      resultMetadata: pageMetadata(page.objects, page.nextCursor, "statement-import-jobs") };
+    const objects = page.objects.map(statementJobObject);
+    return { objects,
+      resultMetadata: pageMetadata(objects, page.nextCursor, "statement-import-jobs") };
   }));
 
   registerTool("list_evidence_file_objects", {
@@ -2426,7 +2558,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("get_statement_import_job", {
     title: "Read statement import job",
-    description: "Read one already-identified statement job, its bound account, immutable PDF metadata, and authenticated same-origin ranged-download descriptor. The descriptor identifies the complete original application/pdf; the tool result contains no PDF bytes or extracted text.",
+    description: "Inspect the current metadata and status of one already-identified statement job without starting or continuing its processing. Do not select this tool in the normal initial processing path: after resolution, call start_statement_import_job directly. This read returns no PDF download descriptor; an idempotent start call is the sole way to obtain or regain the authenticated byte-access contract.",
     inputSchema: { statement_import_job_id: z.string().trim().uuid() },
     outputSchema: statementImportJobOutput,
     annotations: readOnly,
@@ -2435,8 +2567,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id" }],
     }),
   }, async ({ statement_import_job_id }) => safeToolResult(async () => ({
-    job: await accounting.getStatementImportJob({ pool, personId,
-      statementImportJobId: statement_import_job_id }),
+    job: statementJobMetadata(await accounting.getStatementImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id })),
   })));
 
   registerTool("start_statement_import_job", {
@@ -2452,7 +2584,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, async ({ statement_import_job_id }) => safeToolResult(async () => {
     const { job, transitioned } = await accounting.startStatementImportJob({ pool, personId,
       statementImportJobId: statement_import_job_id });
-    return { job, extraction: await statementJobExtractionGuide(job.account.id),
+    return { job: statementJobMetadata(job), download: job.download,
+      extraction: await statementJobExtractionGuide(job.account.id),
       effectReceipt: effectReceipt("start_statement_import_job", { statement_import_job_id },
         transitioned ? "updated" : "unchanged", [
           { type: "statement_import_job", id: statement_import_job_id },
@@ -2551,7 +2684,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     });
     const accountDisplayName = accountPathContext(accounts, { includeArchived: true })
       .find((item) => item.accountId === account_id)?.fullName ?? account.name;
-    const imported = transactionPreviewWorkflow(await accounting.previewSingleAccountStatementImport({
+    const preview = await accounting.previewSingleAccountStatementImport({
       pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
       valuationCurrencyCode: account.currencyCode,
       questionAudience: "human", lines: reviewedRows,
@@ -2573,7 +2706,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           };
         }),
       },
-    }), { reviewDestination: { accountId: account_id, accountDisplayName } });
+    });
+    const imported = transactionPreviewWorkflow(preview, {
+      reviewDestination: { accountId: account_id, accountDisplayName },
+      confirmationInstruction: statementConfirmationInstruction({
+        account, accountDisplayName, startDate: start_date, startAmount: start_amount,
+        endDate: end_date, endAmount: end_amount, openingBalanceDate, closingBalanceDate,
+        analysis, preview,
+      }),
+    });
     return { ...imported, import: imported };
   };
   const statementImportFailureOptions = (retryTool) => ({ retryTool, preserveEntireBatch: true,
@@ -2585,7 +2726,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement", {
     title: "Preview inline single-account statement",
-    description: "Submit the six independent determinations from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Evidence dates and balances are optional and independent. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question; do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
+    description: "Submit the six independent determinations from start_single_account_statement_import when the bounded line records are already present directly in the interaction. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then applies matching known-balance checkpoint, duplicate, and small-exclusion analysis. Evidence dates and balances are optional and independent. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       statement_id: z.string().trim().min(1).max(128)
         .describe("Stable attachment identifier or SHA-256 supplied by the agent host; reuse it for the same file."),
@@ -2610,7 +2751,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("import_single_account_statement_artifact", {
     title: "Preview uploaded single-account statement",
-    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit the optional start date, opening balance, end date, and closing balance as separate determinations. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Complete ingestion does not require a row dump in chat: present compact counts, balance findings, exclusions, and open questions plus the exact confirmation question. Do not run an LLM deduplication pass.",
+    description: "Consume one complete, verified canonical JSON Lines artifact produced from the selected statement and create a fresh preview without copying every row into model context. Submit the optional start date, opening balance, end date, and closing balance as separate determinations. Accounting—not the caller—selects the one designated active suspense account for the statement currency, then performs known-balance checkpoint, duplicate, and small-exclusion analysis. Uploading the artifact alone is not a prepared import. Only a ready result with an importPlanId means a preview was saved; it appears in the named account register as pending and not posted. On error, explicitly report that no preview exists. Present nextAction.instruction as the statement summary and exact confirmation question; do not replace it with internal line-item or include/exclude counts, and do not enumerate every row unless the user asks. Do not run an LLM deduplication pass.",
     inputSchema: {
       artifact_id: z.string().trim().uuid(),
       statement_id: z.string().trim().min(1).max(128)
@@ -2654,7 +2795,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("submit_statement_import_job_artifact", {
     title: "Submit statement job extraction",
-    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. A successful ready result saves a pending, unposted preview in the account register and returns the one confirmation handoff. The original PDF remains the evidence file; JSON Lines is disposable operational data.",
+    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. A successful ready result saves a pending, unposted preview in the account register and returns nextAction.instruction as the provider-written statement summary and exact confirmation question. Present that wording instead of internal line-item or include/exclude counts. The original PDF remains the evidence file; JSON Lines is disposable operational data.",
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
@@ -2728,7 +2869,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     })();
     return {
       ...visiblePreview,
-      job: savedJob,
+      job: statementJobMetadata(savedJob),
       effectReceipt: effectReceipt("submit_statement_import_job_artifact",
         { statement_import_job_id, artifact_id, source_sha256: job.evidenceFile.sha256 }, "created", [
           { type: "statement_import_job", id: statement_import_job_id },

@@ -308,6 +308,14 @@ test("the MCP exposes scoped tool and object contracts", async () => {
           status: 400, details: { currencyCode: "USD" } });
       return { ...transactionImportFixture({ status: "ready", readyToCommit: true, ledgerChanged: false,
         importPlanId: "55555555-5555-4555-8555-555555555555", transactionCount: input.lines.length }),
+        balanceAssertions: input.knownBalanceAssertions.map((assertion, index) => ({
+          assertionId: index === 0 ? 12 : null,
+          accountId: assertion.accountId,
+          balanceDate: assertion.balanceDate,
+          sourceKnownBalanceUnits: assertion.knownBalanceUnits,
+          storedKnownBalanceUnits: index === 0 ? assertion.knownBalanceUnits : null,
+          status: index === 0 ? "preserved" : "planned",
+        })),
         questionSummary: { openQuestionCount: input.lines.length,
           byAudience: { [input.questionAudience]: input.lines.length },
           bySuspenseAccount: { "Assets:Ask Human": input.lines.length } } };
@@ -336,10 +344,20 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       const ledgerCandidates = input.observations[0]?.sourceDocumentId === "candidate-overlap"
         ? [{ observationId: observations[0].id, candidates: [{ transactionId: 42,
           classification: "possible_duplicate" }] }] : [];
+      const opening = input.knownBalanceAssertions.find((item) => item.balanceDate === input.openingBalanceDate);
+      const closing = input.knownBalanceAssertions.find((item) => item.balanceDate === input.closingBalanceDate);
+      const proposedUnits = observations.reduce((sum, item) => sum + BigInt(Math.round(Number(item.amountDecimal) * 100)), 0n);
+      const requiredUnits = opening && closing
+        ? BigInt(closing.knownBalanceUnits) - BigInt(opening.knownBalanceUnits) : null;
+      const residualUnits = requiredUnits == null ? null : requiredUnits - proposedUnits;
       return { observations, proposedNewObservationIds: observations.map((item) => item.id),
         duplicateAnalysis: { unresolvedCandidateCount: ledgerCandidates.length, ledgerCandidates, inputCandidates: [],
           exactLedgerDuplicateObservationIds: [], ambiguousExactLedgerObservationIds: [],
-          exactInputDuplicateObservationIds: [] }, coverage: [] };
+          exactInputDuplicateObservationIds: [] },
+        coverage: requiredUnits == null ? [] : [{ accountId: 10, accountFullName: "Wallet",
+          currencyCode: "USD", scale: 2, requiredRemainingUnits: requiredUnits.toString(),
+          allExtractedObservationUnits: proposedUnits.toString(), proposedNewObservationUnits: proposedUnits.toString(),
+          residualAfterProposedUnits: residualUnits.toString(), balanced: residualUnits === 0n }] };
     },
     async reconcileAccountThroughDate(input) {
       reconciledAccount = input;
@@ -753,6 +771,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     /statement uploaded to Accounting.*start_statement_import_job.*complete immutable original PDF/s);
   assert.match(transactionCapability.guidance,
     /Route every file listing movements for one named account through accounting\.reconciliation/);
+  assert.match(referenceRateCapability.guidance,
+    /call start_statement_import_job directly; do not insert get_statement_import_job/);
   assert.match(transactionCapability.attachmentHints.join(" "),
     /transaction CSV.*start_single_account_statement_import.*do not create a generic transaction import job/);
   assert.match(transactionCapability.attachmentHints.join(" "), /accounting\.accounts\.active_paths.*resolve its full path and currency once/);
@@ -768,10 +788,14 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     /Do not use it for a bank, card, exchange, wallet, brokerage.*use start_single_account_statement_import/s);
   assert.match(tools.tools.find((tool) => tool.name === "start_single_account_statement_import").description,
     /CSV transaction list.*known balance.*instead of get_transaction_import_schema/s);
+  assert.match(tools.tools.find((tool) => tool.name === "get_statement_import_job").description,
+    /Do not select this tool in the normal initial processing path.*returns no PDF download descriptor/s);
+  assert.match(tools.tools.find((tool) => tool.name === "start_statement_import_job").description,
+    /return the exact original-PDF download descriptor.*exact replay.*safe/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
-    /compact counts.*do not enumerate every row/s);
+    /Present nextAction\.instruction.*do not replace it with internal line-item or include\/exclude counts.*do not enumerate every row/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact").description,
-    /without copying every row into model context.*compact counts/s);
+    /without copying every row into model context.*Present nextAction\.instruction/s);
   assert.match(tools.tools.find((tool) => tool.name === "retry_transaction_import_exception").description,
     /every row of a one-account statement failed.*stop repairing that generic job row by row/s);
   assert.match(accountingToolDescriptions.get_transaction_import_schema.summary,
@@ -1109,8 +1133,14 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(resolvedStatementJobOptions, {
     statementImportJobId: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", limit: 1,
   });
-  assert.equal(statementJobObjects.structuredContent.objects[0].evidenceFile.mediaType, "application/pdf");
-  assert.equal(statementJobObjects.structuredContent.objects[0].download.acceptsByteRanges, true);
+  assert.deepEqual(statementJobObjects.structuredContent.objects[0].account, {
+    objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10", displayName: "Wallet",
+  });
+  assert.deepEqual(statementJobObjects.structuredContent.objects[0].evidenceFile, {
+    objectType: "accounting.evidence_file", id: 81,
+    sourceRef: "accounting://evidence-files/81", displayName: "statement.pdf",
+  });
+  assert.equal(Object.hasOwn(statementJobObjects.structuredContent.objects[0], "download"), false);
   const invalidStatementJobResolution = await client.callTool({
     name: "list_statement_import_job_objects", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", account_id: 10,
@@ -1124,14 +1154,16 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
   });
   assert.equal(readStatementJob.structuredContent.job.account.id, 10);
-  assert.equal(readStatementJob.structuredContent.job.download.mediaType, "application/pdf");
+  assert.equal(readStatementJob.structuredContent.job.evidenceFile.mediaType, "application/pdf");
+  assert.equal(Object.hasOwn(readStatementJob.structuredContent.job, "download"), false);
   const startedStatementJob = await client.callTool({
     name: "start_statement_import_job", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
     },
   });
   assert.equal(startedStatementJob.structuredContent.job.status, "processing");
-  assert.equal(startedStatementJob.structuredContent.job.download.endpointPath,
+  assert.equal(Object.hasOwn(startedStatementJob.structuredContent.job, "download"), false);
+  assert.equal(startedStatementJob.structuredContent.download.endpointPath,
     "/mcp/evidence-files/81/content");
   assert.match(startedStatementJob.structuredContent.extraction.rules.join(" "),
     /complete original PDF.*(?:omit|preselect) pages/s);
@@ -1246,6 +1278,22 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   });
   assert.match(oneSidedPreview.structuredContent.import.completionNote,
     /visible in the account register for Wallet.*No transactions have been posted/i);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /Beginning: January 1, 2026 — \$100\.00/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /Ending: January 31, 2026 — \$87\.50/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /Transactions found: 1/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /opening balance of \$100\.00 is already recorded as known for December 31, 2025/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /closing balance of \$87\.50 will be recorded as known for January 31, 2026/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /resulting ending balance is \$87\.50, which matches the ending balance shown on the statement/);
+  assert.match(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /Nothing has been posted yet\. Approve this import\?$/);
+  assert.doesNotMatch(oneSidedPreview.structuredContent.import.nextAction.instruction,
+    /line item|included|excluded/i);
   assert.deepEqual(savedStatementBalances, []);
   assert.deepEqual({ ...oneSidedImport, lines: oneSidedImport.lines.map((line) => ({ ...line,
     externalId: line.externalId.replace(/^sha256:[0-9a-f]{64}$/, "sha256:<digest>") })),
