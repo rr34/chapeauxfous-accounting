@@ -307,6 +307,7 @@ export const statementObservationAnalysisSchema = z.object({
     currencyCode: z.string().min(1),
     scale: z.number().int().min(0).max(18),
     transactionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    outsideBalanceInterval: z.boolean(),
     occurredAt: z.string().datetime().nullable(),
     amountDecimal: z.string().min(1),
     amountUnits: z.string().regex(/^-?\d+$/),

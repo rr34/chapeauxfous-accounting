@@ -341,7 +341,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
         currencyId: 1, currencyCode: "USD", scale: 2 };
     },
     async analyzeStatementObservations(input) {
-      const observations = input.observations.map((item, index) => ({ ...item, id: `observation-${index + 1}` }));
+      const observations = input.observations.map((item, index) => ({
+        ...item,
+        id: `observation-${index + 1}`,
+        outsideBalanceInterval: item.transactionDate <= input.openingBalanceDate
+          || item.transactionDate > input.closingBalanceDate,
+      }));
       const ledgerCandidates = input.observations[0]?.sourceDocumentId === "candidate-overlap"
         ? [{ observationId: observations[0].id, candidates: [{ transactionId: 42,
           classification: "possible_duplicate" }] }] : [];
@@ -351,7 +356,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       const requiredUnits = opening && closing
         ? BigInt(closing.knownBalanceUnits) - BigInt(opening.knownBalanceUnits) : null;
       const residualUnits = requiredUnits == null ? null : requiredUnits - proposedUnits;
-      return { observations, proposedNewObservationIds: observations.map((item) => item.id),
+      return { observations,
+        reconciliation: { interval: { openingBalanceDate: input.openingBalanceDate,
+          closingBalanceDate: input.closingBalanceDate } },
+        proposedNewObservationIds: observations.map((item) => item.id),
         duplicateAnalysis: { unresolvedCandidateCount: ledgerCandidates.length, ledgerCandidates, inputCandidates: [],
           exactLedgerDuplicateObservationIds: [], ambiguousExactLedgerObservationIds: [],
           exactInputDuplicateObservationIds: [] },
@@ -1253,6 +1261,24 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   });
   assert.equal(possibleDuplicate.structuredContent.readyToCommit, true);
   assert.match(oneSidedImport.lines[0].questionPrompt, /possible duplicate ledger transaction 42/);
+
+  const outsideIntervalDate = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "outside-interval-date", account_id: 10,
+      start_date: { found: true, value: "2026-01-02" },
+      start_amount: { found: true, value: "100.00" },
+      end_date: { found: true, value: "2026-01-31" },
+      end_amount: { found: true, value: "87.50" },
+      line_items: [{ source_record_id: "row-before-period", transaction_date: "2026-01-01",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(outsideIntervalDate.structuredContent.readyToCommit, true);
+  assert.match(oneSidedImport.lines[0].questionPrompt,
+    /printed transaction date 2026-01-01, outside the statement balance interval/);
+  assert.doesNotMatch(oneSidedImport.lines[0].questionPrompt, /posting date/);
 
   const missingDesignation = await client.callTool({
     name: "import_single_account_statement",

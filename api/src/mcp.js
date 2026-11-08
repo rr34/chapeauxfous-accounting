@@ -2697,11 +2697,19 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .map((item) => [item.observationId, item.candidates]));
     const reviewedRows = rows.map((line, index) => {
       const observationId = analysis.observations[index].id;
+      const observation = analysis.observations[index];
       const decision = decisionsByObservation.get(observationId);
       const possible = candidatesByObservation.get(observationId) ?? [];
       const possibleTransactionIds = [...new Set(possible.map((candidate) => candidate.transactionId))];
-      return { ...line, ...(decision?.decision === "include" && possibleTransactionIds.length ? {
-        questionPrompt: `Review possible duplicate ledger transaction${possibleTransactionIds.length === 1 ? "" : "s"} ${possibleTransactionIds.join(", ")} for source row ${JSON.stringify(line_items[index].source_record_id)}. Confirm whether this is a distinct entry, then identify or match its other side.`,
+      const reviewPrompts = [];
+      if (observation.outsideBalanceInterval) {
+        reviewPrompts.push(`Source row ${JSON.stringify(line_items[index].source_record_id)} has printed transaction date ${observation.transactionDate}, outside the statement balance interval ${analysis.reconciliation.interval.openingBalanceDate} through ${analysis.reconciliation.interval.closingBalanceDate}. Confirm that this row belongs to this statement`);
+      }
+      if (decision?.decision === "include" && possibleTransactionIds.length) {
+        reviewPrompts.push(`Review possible duplicate ledger transaction${possibleTransactionIds.length === 1 ? "" : "s"} ${possibleTransactionIds.join(", ")} and confirm whether this is a distinct entry`);
+      }
+      return { ...line, ...(reviewPrompts.length ? {
+        questionPrompt: `${reviewPrompts.join(". ")}. Then identify or match its other side.`,
       } : {}) };
     });
     const accountDisplayName = accountPathContext(accounts, { includeArchived: true })

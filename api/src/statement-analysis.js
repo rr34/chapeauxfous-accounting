@@ -370,11 +370,8 @@ export async function analyzeStatementObservations({ pool, personId, observation
     if (amountUnits === "0") throw applicationError(`Observation ${index + 1} has no account movement.`, 400,
       "ZERO_STATEMENT_OBSERVATION_AMOUNT", { sourceDocumentId, sourceRecordId });
     const transactionDate = calendarDate(item?.transactionDate);
-    if (transactionDate <= reconciliation.interval.openingBalanceDate
-        || transactionDate > reconciliation.interval.closingBalanceDate) {
-      throw applicationError(`Observation ${index + 1} is outside the balance-assertion interval.`, 400,
-        "STATEMENT_OBSERVATION_OUTSIDE_INTERVAL", { sourceDocumentId, sourceRecordId, transactionDate });
-    }
+    const outsideBalanceInterval = transactionDate <= reconciliation.interval.openingBalanceDate
+      || transactionDate > reconciliation.interval.closingBalanceDate;
     return {
       id: observationId(sourceDocumentId, sourceRecordId),
       sourceDocumentId,
@@ -385,6 +382,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
       currencyCode: account.currencyCode,
       scale: account.scale,
       transactionDate,
+      outsideBalanceInterval,
       occurredAt: optionalTimestamp(item?.occurredAt),
       amountDecimal: String(item?.amountDecimal).trim(),
       amountUnits,
@@ -492,6 +490,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
       "Multiple existing exact-source matches are a ledger ambiguity and are never automatically excluded.",
       "Same date and amount without stable source identity is a candidate for review, not proof of duplication.",
       "When importing one-sided rows, retain non-exact same-account ledger candidates as review questions on suspense lines.",
+      "A printed transaction date outside the balance interval remains included in statement arithmetic and becomes a human review question.",
       "Preserve source-reference conflicts and transfer ambiguity for later matching; do not guess a final counteraccount during intake.",
       "Report known-balance coverage when available, but missing or mismatched balances do not block transaction assembly.",
     ],

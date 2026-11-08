@@ -113,6 +113,18 @@ test("statement rows are ready to assemble when known balances are absent or do 
   assert.equal(mismatch.readyForTransactionAssembly, true);
 });
 
+test("printed transaction dates outside the balance interval remain reviewable arithmetic evidence", async () => {
+  const result = await analyzeStatementObservations({
+    pool: analysisPool(), personId: 7,
+    observations: [{ ...pairedObservations[0], transactionDate: "2026-07-31" }],
+    openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  });
+  assert.equal(result.observations[0].outsideBalanceInterval, true);
+  assert.equal(result.importDecisions[0].decision, "include");
+  assert.equal(result.coverage[0].balanced, true);
+  assert.equal(result.readyForTransactionAssembly, true);
+});
+
 test("known balance and nearby ledger evidence select the duplicate that closes the residual", async () => {
   const observations = [
     { sourceDocumentId: "bank-august", sourceRecordId: "row-1", accountId: 10,
