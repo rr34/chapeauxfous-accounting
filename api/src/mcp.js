@@ -2465,7 +2465,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Never infer that one is absent merely because it is not physically adjacent to another.",
         "Each evidence value is optional and is retained independently. A closing balance assertion is created only when both the closing date and closing amount are available.",
-        "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; rows on or before that date default to Imported exclude in the review.",
+        "A previously saved known balance that still matches the recorded account balance is a verified checkpoint; in-window rows on or before that date default to Imported exclude in the review. Outside-window rows remain included for review.",
         "Do not supply or choose a suspense account in the preview call. Accounting selects the one user-designated active, postable suspense account in this currency. If none is designated, mark an existing postable account with update_account before importing.",
         "The statement account and suspense account must be different accounts.",
       ],
@@ -3516,7 +3516,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("analyze_statement_observations", {
     title: "Analyze extracted statement observations",
-    description: "Analyze format-neutral statement rows. The latest matching known-balance checkpoint makes rows on or before it default to exclude. Then Accounting ranks stable references, exact amounts within two days, transfer candidates, and small exclusion combinations against known balances. It returns reviewable include/exclude decisions; missing or mismatched balances do not block import.",
+    description: "Analyze format-neutral statement rows. The latest matching known-balance checkpoint makes in-window rows on or before it default to exclude; outside-window rows remain included for review. Then Accounting ranks stable references, exact amounts within two days, transfer candidates, and small exclusion combinations against known balances. It returns reviewable include/exclude decisions; missing or mismatched balances do not block import.",
     inputSchema: {
       opening_balance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
         .describe("End-of-day date immediately before the first included transaction; an assertion need not exist."),

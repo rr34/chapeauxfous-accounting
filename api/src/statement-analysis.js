@@ -171,14 +171,15 @@ function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, r
   const checkpointByAccount = new Map(balanceCheckpoints.map((checkpoint) => [checkpoint.accountId, checkpoint]));
   const decisions = new Map(observations.map((observation) => {
     const checkpoint = checkpointByAccount.get(observation.accountId);
-    const coveredByCheckpoint = checkpoint != null && observation.transactionDate <= checkpoint.date;
+    const coveredByCheckpoint = checkpoint != null && !observation.outsideBalanceInterval
+      && observation.transactionDate <= checkpoint.date;
     const exactDuplicate = exactExcludedIds.has(observation.id);
     return [observation.id, {
       observationId: observation.id,
       decision: coveredByCheckpoint || exactDuplicate ? "exclude" : "include",
       confidence: coveredByCheckpoint ? "verified_checkpoint" : exactDuplicate ? "certain" : "tentative",
       reason: coveredByCheckpoint
-        ? `The recorded balance already matches the known balance through ${checkpoint.date}; rows on or before that date are presumed already recorded.`
+        ? `The recorded balance already matches the known balance through ${checkpoint.date}; in-window rows on or before that date are presumed already recorded.`
         : exactDuplicate
           ? "A stable source identity already exists in the ledger or elsewhere in this statement batch."
           : "No conclusive duplicate evidence was found.",
@@ -484,7 +485,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
     readyForTransactionAssembly: observations.length > 0,
     rules: [
       "Stable source-reference matches are excluded as ledger duplicates.",
-      "A matching recorded and known balance is a verified checkpoint; statement rows on or before its date default to excluded before duplicate matching and balance solving.",
+      "A matching recorded and known balance is a verified checkpoint; in-window statement rows on or before its date default to excluded before duplicate matching and balance solving. Outside-window rows remain included for review.",
       "An exact same-account amount within two days is ranked as a probable duplicate; known-balance subset solving can select the uniquely supported exclusion.",
       "Known-balance solving tests the smallest combinations of up to three rows and leaves equally supported solutions for user review.",
       "Multiple existing exact-source matches are a ledger ambiguity and are never automatically excluded.",

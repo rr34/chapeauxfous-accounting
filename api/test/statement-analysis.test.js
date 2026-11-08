@@ -114,11 +114,18 @@ test("statement rows are ready to assemble when known balances are absent or do 
 });
 
 test("printed transaction dates outside the balance interval remain reviewable arithmetic evidence", async () => {
+  const openingCheckpoint = {
+    account_balance_assertion_id: 69, account_id: 10, balance_date: "2026-08-01",
+    known_balance_units: "2000000", calculated_balance_units: "2000000",
+    AccountName: "Coinbase BTC", AccountType: "asset", account_currency_id: 2,
+    CurrencyAbbreviation: "BTC", scale: 8,
+  };
   const result = await analyzeStatementObservations({
-    pool: analysisPool(), personId: 7,
+    pool: analysisPool({ balanceAssertions: [openingCheckpoint] }), personId: 7,
     observations: [{ ...pairedObservations[0], transactionDate: "2026-07-31" }],
     openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
   });
+  assert.deepEqual(result.balanceCheckpoints.map((item) => item.date), ["2026-08-01"]);
   assert.equal(result.observations[0].outsideBalanceInterval, true);
   assert.equal(result.importDecisions[0].decision, "include");
   assert.equal(result.coverage[0].balanced, true);
