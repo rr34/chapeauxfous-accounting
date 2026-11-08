@@ -2048,7 +2048,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       ...imported,
       ...accountAssertions.map((assertion) => ({ kind: "assertion" as const,
         date: assertion.date, order: assertion.id, assertion })),
-    ].sort((left, right) => left.date.localeCompare(right.date) || left.order - right.order);
+    ].sort((left, right) => left.date.localeCompare(right.date)
+      || Number(left.kind === "assertion") - Number(right.kind === "assertion")
+      || left.order - right.order);
     let projectedBalance = 0n;
     const withBalances = chronological.map((row) => {
       if (row.kind === "assertion") return row;
