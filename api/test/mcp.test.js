@@ -1357,7 +1357,12 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     knownBalanceAssertions: [
       { accountId: 10, balanceDate: "2026-01-31", knownBalanceUnits: "8750" },
     ],
-    importReview: { accountId: 10, statementId: "bank-statement-2026-01", decisions: [{
+    importReview: { accountId: 10, statementId: "bank-statement-2026-01",
+      statementSummaryBasis: {
+        beginningDate: "2026-01-01", beginningAmountUnits: "10000",
+        endingDate: "2026-01-31", endingAmountUnits: "8750",
+        balanceBaselineUnits: "10000", currencyCode: "USD", scale: 2, balanceSign: 1,
+      }, decisions: [{
       externalId: "sha256:<digest>", decision: "include", confidence: "tentative",
       reason: "No conclusive duplicate evidence was found.", sourceRecordId: "row-1",
       matchedTransactionIds: [],

@@ -122,6 +122,24 @@ export type TransactionImportReview = {
   accountId: number;
   statementId: string;
   sourceSystem: string;
+  statementSummary: {
+    beginningDate: string | null;
+    beginningAmountUnits: string | null;
+    endingDate: string | null;
+    endingAmountUnits: string | null;
+    currencyCode: string;
+    scale: number;
+    transactionsFound: number;
+    newTransactionCount: number;
+    existingTransactionCount: number;
+    excludedTransactionCount: number;
+    closingBalanceStatus: "planned" | "preserved_matching" | "preserved_conflicting" | "none";
+    balanceCheck: {
+      status: "matches" | "mismatch" | "unverified";
+      resultingEndingUnits: string | null;
+      statementEndingUnits: string | null;
+    };
+  } | null;
   includedCount: number;
   excludedCount: number;
   rows: Array<{

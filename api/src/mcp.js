@@ -433,10 +433,12 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
     "**On approval:**",
     `- ${preview.wouldCreateTransactionCount} new transaction${preview.wouldCreateTransactionCount === 1 ? "" : "s"} will be added.`,
   ];
-  const alreadyAccountedFor = (preview.excludedTransactionCount ?? 0)
-    + preview.wouldReuseTransactionCount;
-  if (alreadyAccountedFor) {
-    lines.push(`- ${alreadyAccountedFor} statement transaction${alreadyAccountedFor === 1 ? " is" : "s are"} already accounted for and will not be added again.`);
+  const excluded = preview.excludedTransactionCount ?? 0;
+  if (excluded) {
+    lines.push(`- ${excluded} statement transaction${excluded === 1 ? " is" : "s are"} marked for exclusion and will not be added.`);
+  }
+  if (preview.wouldReuseTransactionCount) {
+    lines.push(`- ${preview.wouldReuseTransactionCount} statement transaction${preview.wouldReuseTransactionCount === 1 ? " is" : "s are"} already in the ledger and will not be added again.`);
   }
   const assertionByDate = new Map((preview.balanceAssertions ?? [])
     .map((assertion) => [assertion.balanceDate, assertion]));
@@ -504,8 +506,8 @@ function statementJobObject(job) {
 
 function statementCommitCompletionNote(result) {
   const createdTransactions = result.createdTransactionCount ?? 0;
-  const alreadyAccountedFor = (result.reusedTransactionCount ?? 0)
-    + (result.excludedTransactionCount ?? 0);
+  const reused = result.reusedTransactionCount ?? 0;
+  const excluded = result.excludedTransactionCount ?? 0;
   const createdBalances = (result.balanceAssertions ?? [])
     .filter((assertion) => assertion.status === "created").length;
   const existingBalances = (result.balanceAssertions ?? [])
@@ -516,9 +518,13 @@ function statementCommitCompletionNote(result) {
   sentences.push(createdTransactions
     ? `Added ${createdTransactions} new transaction${createdTransactions === 1 ? "" : "s"}.`
     : "No new transactions were added.");
-  if (alreadyAccountedFor) {
-    sentences.push(`${alreadyAccountedFor} statement transaction${alreadyAccountedFor === 1
-      ? " was already accounted for and was" : "s were already accounted for and were"} not added again.`);
+  if (excluded) {
+    sentences.push(`${excluded} statement transaction${excluded === 1
+      ? " was marked for exclusion and was" : "s were marked for exclusion and were"} not added.`);
+  }
+  if (reused) {
+    sentences.push(`${reused} statement transaction${reused === 1
+      ? " was already in the ledger and was" : "s were already in the ledger and were"} not added again.`);
   }
   if (createdBalances) {
     sentences.push(`Recorded ${createdBalances} new known balance${createdBalances === 1 ? "" : "s"}.`);
@@ -1190,11 +1196,29 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const countMapSchema = z.record(z.string(), z.number().int().nonnegative());
   const importIssueSchema = z.object({ code: z.string().min(1), message: z.string().min(1), details: z.json().optional() });
+  const statementReviewSummarySchema = z.object({
+    beginningDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    beginningAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
+    endingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    endingAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
+    currencyCode: z.string().min(1), scale: z.number().int().min(0).max(18),
+    transactionsFound: z.number().int().nonnegative(),
+    newTransactionCount: z.number().int().nonnegative(),
+    existingTransactionCount: z.number().int().nonnegative(),
+    excludedTransactionCount: z.number().int().nonnegative(),
+    closingBalanceStatus: z.enum(["planned", "preserved_matching", "preserved_conflicting", "none"]),
+    balanceCheck: z.object({
+      status: z.enum(["matches", "mismatch", "unverified"]),
+      resultingEndingUnits: z.string().regex(/^-?\d+$/).nullable(),
+      statementEndingUnits: z.string().regex(/^-?\d+$/).nullable(),
+    }),
+  });
   const transactionImportSummarySchema = z.object({
     transactionsCreated: z.number().int().nonnegative(), transactionsReused: z.number().int().nonnegative(),
     transactionsExcluded: z.number().int().nonnegative().optional(),
     lineItemsCreated: z.number().int().nonnegative(), lineItemsReused: z.number().int().nonnegative(),
     rejectedTransactions: z.number().int().nonnegative(),
+    statementSummary: statementReviewSummarySchema.nullable().optional(),
   });
   const reconciliationValidationSchema = z.object({
     passed: z.boolean(),
@@ -2714,6 +2738,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     });
     const accountDisplayName = accountPathContext(accounts, { includeArchived: true })
       .find((item) => item.accountId === account_id)?.fullName ?? account.name;
+    const coverage = analysis.coverage?.find((item) => item.accountId === account_id);
+    const balanceSign = Number(normalBalanceSign(account.type));
+    let balanceBaselineUnits = null;
+    if (coverage?.residualAfterProposedUnits != null && end_amount.found) {
+      const closingUnits = BigInt(decimalToUnits(end_amount.value, account.scale));
+      const resultingEndingUnits = closingUnits
+        - BigInt(coverage.residualAfterProposedUnits) * BigInt(balanceSign);
+      balanceBaselineUnits = (resultingEndingUnits
+        - BigInt(coverage.proposedNewObservationUnits) * BigInt(balanceSign)).toString();
+    }
     const preview = await accounting.previewSingleAccountStatementImport({
       pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
       valuationCurrencyCode: account.currencyCode,
@@ -2724,6 +2758,17 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         statementId: statement_id,
         ...(statement_import_job_id == null ? {} : { statementJobId: statement_import_job_id }),
         ...(evidence_file_id == null ? {} : { evidenceFileId: evidence_file_id }),
+        statementSummaryBasis: {
+          beginningDate: start_date.found ? start_date.value : null,
+          beginningAmountUnits: start_amount.found
+            ? decimalToUnits(start_amount.value, account.scale) : null,
+          endingDate: end_date.found ? end_date.value : null,
+          endingAmountUnits: end_amount.found ? decimalToUnits(end_amount.value, account.scale) : null,
+          balanceBaselineUnits,
+          currencyCode: account.currencyCode,
+          scale: account.scale,
+          balanceSign,
+        },
         decisions: rows.map((line, index) => {
           const decision = decisionsByObservation.get(analysis.observations[index].id);
           return {

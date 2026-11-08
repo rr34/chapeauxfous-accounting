@@ -1978,6 +1978,14 @@ function formatImportReviewExpiry(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function statementSummaryDateAmount(date: string | null, amountUnits: string | null,
+  currencyCode: string, scale: number) {
+  const formattedDate = date == null ? "not found" : formatRegisterDate(date);
+  const formattedAmount = amountUnits == null ? "balance not found"
+    : `${unitsToDecimal(amountUnits, scale)} ${currencyCode}`;
+  return `${formattedDate} — ${formattedAmount}`;
+}
+
 function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token, onShowAll,
   onImportStatement, openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
@@ -2105,7 +2113,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   }
 
   async function acceptImportReview(review: TransactionImportReview) {
-    if (!window.confirm(`Accept these import settings? ${review.includedCount} transaction${review.includedCount === 1 ? "" : "s"} will be added and ${review.excludedCount} will remain excluded.`)) return;
+    const newCount = review.statementSummary?.newTransactionCount ?? review.includedCount;
+    const excludedCount = review.statementSummary?.excludedTransactionCount ?? review.excludedCount;
+    const existingCount = review.statementSummary?.existingTransactionCount ?? 0;
+    if (!window.confirm(`Accept these import settings? ${newCount} transaction${newCount === 1 ? "" : "s"} will be added, ${excludedCount} will remain marked for exclusion${existingCount ? `, and ${existingCount} ${existingCount === 1 ? "is" : "are"} already in the ledger` : ""}.`)) return;
     setImportReviewBusy(review.importPlanId); setImportReviewError("");
     try {
       await api(`/accounts/${account.id}/import-reviews/${review.importPlanId}/accept`,
@@ -2262,7 +2273,24 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       </div></div>
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
       <div><strong>Pending statement import · not posted</strong>
-        <small>{review.rows.length} proposed rows ({review.includedCount} included · {review.excludedCount} excluded) · {importReviewDateRange(review)}</small>
+        {review.statementSummary ? <div className="register-import-summary">
+          <span><b>Beginning</b>{statementSummaryDateAmount(review.statementSummary.beginningDate,
+            review.statementSummary.beginningAmountUnits, review.statementSummary.currencyCode,
+            review.statementSummary.scale)}</span>
+          <span><b>Ending</b>{statementSummaryDateAmount(review.statementSummary.endingDate,
+            review.statementSummary.endingAmountUnits, review.statementSummary.currencyCode,
+            review.statementSummary.scale)}</span>
+          <span><b>Transactions found</b>{review.statementSummary.transactionsFound}</span>
+          <span><b>On acceptance</b>{review.statementSummary.newTransactionCount} new · {review.statementSummary.excludedTransactionCount} marked for exclusion{review.statementSummary.existingTransactionCount
+            ? ` · ${review.statementSummary.existingTransactionCount} already in the ledger` : ""}</span>
+          <span><b>Closing known balance</b>{review.statementSummary.closingBalanceStatus === "planned"
+            ? "Will be recorded" : review.statementSummary.closingBalanceStatus === "preserved_matching"
+              ? "Already recorded" : review.statementSummary.closingBalanceStatus === "preserved_conflicting"
+                ? "Existing known balance differs and will not be overwritten" : "Not available"}</span>
+          <span className={`register-import-balance-check ${review.statementSummary.balanceCheck.status}`}><b>Balance check</b>{review.statementSummary.balanceCheck.status === "unverified"
+            ? "Could not be verified"
+            : `${unitsToDecimal(review.statementSummary.balanceCheck.resultingEndingUnits ?? "0", review.statementSummary.scale)} ${review.statementSummary.currencyCode} ${review.statementSummary.balanceCheck.status === "matches" ? "matches" : `does not match ${unitsToDecimal(review.statementSummary.balanceCheck.statementEndingUnits ?? "0", review.statementSummary.scale)} ${review.statementSummary.currencyCode}`}`}</span>
+        </div> : <small>{review.rows.length} proposed rows ({review.includedCount} included · {review.excludedCount} excluded) · {importReviewDateRange(review)}</small>}
         <small>Saved in this account register. Review the highlighted rows below, then accept to post them. Expires {formatImportReviewExpiry(review.expiresAt)}.</small></div>
       <button type="button" className="primary" disabled={importReviewBusy !== ""}
         onClick={() => void acceptImportReview(review)}>

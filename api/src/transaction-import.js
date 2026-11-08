@@ -196,8 +196,86 @@ function normalizeImportReview(review, transactions) {
       reason: "No conclusive duplicate evidence was found.", sourceRecordId: null, matchedTransactionIds: [],
     });
   }
-  return { accountId, statementId, statementJobId, evidenceFileId,
+  const suppliedBasis = review.statementSummaryBasis;
+  let statementSummaryBasis = null;
+  if (suppliedBasis != null) {
+    const dateOrNull = (value, field) => {
+      if (value == null) return null;
+      const normalized = String(value).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+        throw importError(`${field} must be YYYY-MM-DD or null.`, "INVALID_IMPORT_REVIEW");
+      }
+      return normalized;
+    };
+    const unitsOrNull = (value, field) => {
+      if (value == null) return null;
+      const normalized = String(value).trim();
+      if (!/^-?\d+$/.test(normalized)) {
+        throw importError(`${field} must be integer native units or null.`, "INVALID_IMPORT_REVIEW");
+      }
+      return normalized;
+    };
+    const scale = Number(suppliedBasis.scale);
+    const balanceSign = Number(suppliedBasis.balanceSign);
+    if (!Number.isInteger(scale) || scale < 0 || scale > 18 || ![-1, 1].includes(balanceSign)) {
+      throw importError("Statement review currency scale and balance sign are invalid.", "INVALID_IMPORT_REVIEW");
+    }
+    statementSummaryBasis = {
+      beginningDate: dateOrNull(suppliedBasis.beginningDate, "statement beginning date"),
+      beginningAmountUnits: unitsOrNull(suppliedBasis.beginningAmountUnits, "statement beginning amount"),
+      endingDate: dateOrNull(suppliedBasis.endingDate, "statement ending date"),
+      endingAmountUnits: unitsOrNull(suppliedBasis.endingAmountUnits, "statement ending amount"),
+      balanceBaselineUnits: unitsOrNull(suppliedBasis.balanceBaselineUnits, "statement balance baseline"),
+      currencyCode: limitedRequiredText(suppliedBasis.currencyCode, "statement currency code", 32),
+      scale,
+      balanceSign,
+    };
+  }
+  return { accountId, statementId, statementJobId, evidenceFileId, statementSummaryBasis,
     decisions: [...byExternalId.values()] };
+}
+
+function statementReviewSummary(normalized, entries, balanceAssertions) {
+  const basis = normalized.importReview?.statementSummaryBasis;
+  if (basis == null) return null;
+  const planned = entries.filter((entry) => entry.status === "planned");
+  const existing = entries.filter((entry) => entry.status === "existing");
+  const excluded = entries.filter((entry) => entry.status === "excluded");
+  let resultingEndingUnits = null;
+  let balanceStatus = "unverified";
+  if (basis.balanceBaselineUnits != null && basis.endingAmountUnits != null) {
+    const proposedMovement = planned.reduce((sum, entry) => {
+      const statementLine = entry.resolved?.lineItems.find((line) => line.accountId === normalized.importReview.accountId);
+      return sum + BigInt(statementLine?.amountUnits ?? "0");
+    }, 0n);
+    resultingEndingUnits = (BigInt(basis.balanceBaselineUnits)
+      + proposedMovement * BigInt(basis.balanceSign)).toString();
+    balanceStatus = resultingEndingUnits === basis.endingAmountUnits ? "matches" : "mismatch";
+  }
+  const closingAssertion = basis.endingDate == null ? null
+    : balanceAssertions.find((assertion) => assertion.balanceDate === basis.endingDate) ?? null;
+  const closingBalanceStatus = closingAssertion == null ? "none"
+    : closingAssertion.status === "planned" ? "planned"
+      : closingAssertion.storedKnownBalanceUnits === closingAssertion.sourceKnownBalanceUnits
+        ? "preserved_matching" : "preserved_conflicting";
+  return {
+    beginningDate: basis.beginningDate,
+    beginningAmountUnits: basis.beginningAmountUnits,
+    endingDate: basis.endingDate,
+    endingAmountUnits: basis.endingAmountUnits,
+    currencyCode: basis.currencyCode,
+    scale: basis.scale,
+    transactionsFound: normalized.transactions.length,
+    newTransactionCount: planned.length,
+    existingTransactionCount: existing.length,
+    excludedTransactionCount: excluded.length,
+    closingBalanceStatus,
+    balanceCheck: {
+      status: balanceStatus,
+      resultingEndingUnits,
+      statementEndingUnits: basis.endingAmountUnits,
+    },
+  };
 }
 
 function normalizeReconciliation(reconciliation) {
@@ -902,6 +980,7 @@ export async function previewTransactionImport({ pool, personId, sourceSystem, t
       lineItemsCreated: preview.wouldCreateLineItemCount,
       lineItemsReused: preview.wouldReuseLineItemCount,
       rejectedTransactions: preview.rejectedTransactionCount,
+      statementSummary: statementReviewSummary(normalized, entries, balanceAssertions),
     };
     const previewHash = payloadHash(JSON.stringify(preview));
     await connection.query(
@@ -983,6 +1062,7 @@ function importReviewView(normalized, plan) {
       })),
     };
   });
+  const storedSummary = parsePlanJson(plan.summary_json, "summary");
   return {
     importPlanId: String(plan.import_plan_id),
     previewDigest: `sha256:${String(plan.preview_sha256)}`,
@@ -990,6 +1070,7 @@ function importReviewView(normalized, plan) {
     accountId: review.accountId,
     statementId: review.statementId,
     sourceSystem: normalized.sourceSystem,
+    statementSummary: storedSummary.statementSummary ?? null,
     rows,
     includedCount: rows.filter((row) => row.decision === "include").length,
     excludedCount: rows.filter((row) => row.decision === "exclude").length,
@@ -1003,7 +1084,7 @@ export async function listAccountTransactionImportReviews({ pool, personId, acco
   }
   return withPoolTransaction(pool, async (connection) => {
     const [rows] = await connection.query(
-      `SELECT import_plan_id, source_system, payload_sha256, preview_sha256, payload_json, expires_at
+      `SELECT import_plan_id, source_system, payload_sha256, preview_sha256, payload_json, summary_json, expires_at
          FROM accounting_import_plans
         WHERE owner_person_id = ? AND import_kind = 'transactions' AND plan_status = 'ready'
           AND expires_at > UTC_TIMESTAMP(6)
@@ -1084,6 +1165,7 @@ export async function updateTransactionImportReviewDecision({ pool, personId, im
       lineItemsCreated: preview.wouldCreateLineItemCount,
       lineItemsReused: preview.wouldReuseLineItemCount,
       rejectedTransactions: preview.rejectedTransactionCount,
+      statementSummary: statementReviewSummary(normalized, entries, balanceAssertions),
     };
     const payloadJson = JSON.stringify(normalized);
     const previewHash = payloadHash(JSON.stringify(preview));
@@ -1095,7 +1177,8 @@ export async function updateTransactionImportReviewDecision({ pool, personId, im
         resolvedPlanId, personId],
     );
     return importReviewView(normalized, { ...plan, payload_json: payloadJson,
-      payload_sha256: payloadHash(payloadJson), preview_sha256: previewHash });
+      payload_sha256: payloadHash(payloadJson), preview_sha256: previewHash,
+      summary_json: JSON.stringify(transactionSummaryValue) });
   });
 }
 

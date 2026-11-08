@@ -508,13 +508,25 @@ test("account review lists plan rows and a user toggle changes the atomic commit
   const transactions = importedTransactions();
   const preview = await previewTransactionImport({
     pool, personId: 7, sourceSystem: "single_account_statement", transactions,
+    knownBalanceAssertions: [{ accountId: 11, balanceDate: "2026-02-28", knownBalanceUnits: "8766" }],
     importReview: { accountId: 11, statementId: "statement-toggle", decisions: transactions.map((transaction) => ({
       externalId: transaction.externalId, decision: "include", sourceRecordId: transaction.externalId,
-    })) },
+    })), statementSummaryBasis: {
+      beginningDate: "2026-01-01", beginningAmountUnits: "20000",
+      endingDate: "2026-02-28", endingAmountUnits: "8766",
+      balanceBaselineUnits: "20000", currencyCode: "USD", scale: 2, balanceSign: 1,
+    } },
   });
   const listed = await listAccountTransactionImportReviews({ pool, personId: 7, accountId: 11 });
   assert.equal(listed.length, 1);
   assert.equal(listed[0].includedCount, 2);
+  assert.deepEqual(listed[0].statementSummary, {
+    beginningDate: "2026-01-01", beginningAmountUnits: "20000",
+    endingDate: "2026-02-28", endingAmountUnits: "8766", currencyCode: "USD", scale: 2,
+    transactionsFound: 2, newTransactionCount: 2, existingTransactionCount: 0,
+    excludedTransactionCount: 0, closingBalanceStatus: "planned",
+    balanceCheck: { status: "matches", resultingEndingUnits: "8766", statementEndingUnits: "8766" },
+  });
 
   const changed = await updateTransactionImportReviewDecision({
     pool, personId: 7, accountId: 11, importPlanId: preview.importPlanId,
@@ -522,6 +534,10 @@ test("account review lists plan rows and a user toggle changes the atomic commit
   });
   assert.equal(changed.includedCount, 1);
   assert.equal(changed.excludedCount, 1);
+  assert.equal(changed.statementSummary.newTransactionCount, 1);
+  assert.equal(changed.statementSummary.excludedTransactionCount, 1);
+  assert.deepEqual(changed.statementSummary.balanceCheck,
+    { status: "mismatch", resultingEndingUnits: "10000", statementEndingUnits: "8766" });
   assert.notEqual(changed.previewDigest, preview.previewDigest);
 
   await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
