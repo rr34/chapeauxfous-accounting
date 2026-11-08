@@ -73,7 +73,7 @@ test("only a stable matching source reference is automatically excluded as an ex
   assert.equal(result.coverage[0].balanced, true);
 });
 
-test("same-account amount within two days is marked as a probable duplicate", async () => {
+test("a unique same-account exact amount within one day defaults to excluded", async () => {
   const existingRows = [{ transaction_id: 82, TransactionDate: "2026-08-18",
     TransactionState: "posted", transaction_description: "Another merchant",
     transaction_source_system: "manual", transaction_source_id: "unrelated",
@@ -85,7 +85,42 @@ test("same-account amount within two days is marked as a probable duplicate", as
   });
   assert.equal(result.duplicateAnalysis.ledgerCandidates[0].candidates[0].classification, "probable_duplicate");
   assert.equal(result.duplicateAnalysis.unresolvedCandidateCount, 1);
+  assert.equal(result.importDecisions[0].decision, "exclude");
+  assert.equal(result.importDecisions[0].confidence, "probable");
+  assert.match(result.importDecisions[0].reason, /exact amount within one day/);
   assert.equal(result.readyForTransactionAssembly, true);
+});
+
+test("a unique exact amount two or three days away defaults to excluded with a date warning", async () => {
+  const existingRows = [{ transaction_id: 83, TransactionDate: "2026-08-15",
+    TransactionState: "posted", transaction_description: "Another merchant",
+    transaction_source_system: "manual", transaction_source_id: null,
+    line_item_id: 503, amount_units: "-1010000", line_memo: null,
+    line_source_id: null, account_id: 10 }];
+  const result = await analyzeStatementObservations({
+    pool: analysisPool({ existingRows }), personId: 7,
+    observations: [pairedObservations[0]], openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  });
+  assert.equal(result.importDecisions[0].decision, "exclude");
+  assert.equal(result.importDecisions[0].confidence, "probable");
+  assert.match(result.importDecisions[0].reason, /^Possible duplicate—verify date\./);
+});
+
+test("multiple same-account exact-amount matches remain included for user review", async () => {
+  const existingRows = [84, 85].map((transactionId, index) => ({
+    transaction_id: transactionId, TransactionDate: `2026-08-${17 + index}`,
+    TransactionState: "posted", transaction_description: `Possible match ${index + 1}`,
+    transaction_source_system: "manual", transaction_source_id: null,
+    line_item_id: 504 + index, amount_units: "-1010000", line_memo: null,
+    line_source_id: null, account_id: 10,
+  }));
+  const result = await analyzeStatementObservations({
+    pool: analysisPool({ existingRows }), personId: 7,
+    observations: [pairedObservations[0]], openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  });
+  assert.equal(result.importDecisions[0].decision, "include");
+  assert.equal(result.importDecisions[0].confidence, "tentative");
+  assert.deepEqual([...result.importDecisions[0].matchedTransactionIds].sort((left, right) => left - right), [84, 85]);
 });
 
 test("statement rows are ready to assemble when known balances are absent or do not match", async () => {

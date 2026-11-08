@@ -174,14 +174,28 @@ function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, r
     const coveredByCheckpoint = checkpoint != null && !observation.outsideBalanceInterval
       && observation.transactionDate <= checkpoint.date;
     const exactDuplicate = exactExcludedIds.has(observation.id);
+    const exactAmountCandidates = (candidatesByObservation.get(observation.id) ?? [])
+      .filter((candidate) => candidate.reasons.includes("exact_native_amount"));
+    const exactAmountTransactionIds = [...new Set(exactAmountCandidates.map((candidate) => candidate.transactionId))];
+    const uniqueExactAmountCandidate = exactAmountTransactionIds.length === 1
+      ? exactAmountCandidates.find((candidate) => candidate.transactionId === exactAmountTransactionIds[0])
+      : null;
+    const uniqueExactAmountDistance = uniqueExactAmountCandidate == null ? null
+      : daysApart(observation.transactionDate, uniqueExactAmountCandidate.existing.transactionDate);
+    const suggestedDuplicate = uniqueExactAmountCandidate != null && uniqueExactAmountDistance <= 3;
     return [observation.id, {
       observationId: observation.id,
-      decision: coveredByCheckpoint || exactDuplicate ? "exclude" : "include",
-      confidence: coveredByCheckpoint ? "verified_checkpoint" : exactDuplicate ? "certain" : "tentative",
+      decision: coveredByCheckpoint || exactDuplicate || suggestedDuplicate ? "exclude" : "include",
+      confidence: coveredByCheckpoint ? "verified_checkpoint"
+        : exactDuplicate ? "certain" : suggestedDuplicate ? "probable" : "tentative",
       reason: coveredByCheckpoint
         ? `The recorded balance already matches the known balance through ${checkpoint.date}; in-window rows on or before that date are presumed already recorded.`
         : exactDuplicate
           ? "A stable source identity already exists in the ledger or elsewhere in this statement batch."
+          : suggestedDuplicate && uniqueExactAmountDistance <= 1
+            ? "A unique existing same-account transaction has the exact amount within one day."
+            : suggestedDuplicate
+              ? "Possible duplicate—verify date. A unique existing same-account transaction has the exact amount two or three days away."
           : "No conclusive duplicate evidence was found.",
       matchedTransactionIds: [...new Set((candidatesByObservation.get(observation.id) ?? [])
         .map((candidate) => candidate.transactionId))],
@@ -486,7 +500,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
     rules: [
       "Stable source-reference matches are excluded as ledger duplicates.",
       "A matching recorded and known balance is a verified checkpoint; in-window statement rows on or before its date default to excluded before duplicate matching and balance solving. Outside-window rows remain included for review.",
-      "An exact same-account amount within two days is ranked as a probable duplicate; known-balance subset solving can select the uniquely supported exclusion.",
+      "A unique existing same-account transaction with the exact amount within three days defaults to excluded for review; matches two or three days away explicitly ask the user to verify the date.",
       "Known-balance solving tests the smallest combinations of up to three rows and leaves equally supported solutions for user review.",
       "Multiple existing exact-source matches are a ledger ambiguity and are never automatically excluded.",
       "Same date and amount without stable source identity is a candidate for review, not proof of duplication.",
