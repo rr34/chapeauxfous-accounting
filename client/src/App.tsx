@@ -3052,7 +3052,7 @@ export default function App() {
     let ids: number[] = [];
     try {
       const stored = JSON.parse(localStorage.getItem(recentAccountsKey(user.personId)) ?? "[]");
-      if (Array.isArray(stored)) ids = stored.filter((id): id is number => Number.isInteger(id) && id > 0).slice(0, 5);
+      if (Array.isArray(stored)) ids = stored.filter((id): id is number => Number.isInteger(id) && id > 0).slice(0, 10);
     } catch {
       // Ignore malformed local history and rebuild it as accounts are visited.
     }
@@ -3074,7 +3074,7 @@ export default function App() {
     setRecentAccountState((current) => {
       const currentIds = current.personId === user.personId
         ? current.ids.filter((id) => accounts.some((candidate) => candidate.id === id)) : [];
-      const ids = [account.id, ...currentIds.filter((id) => id !== account.id)].slice(0, 5);
+      const ids = [account.id, ...currentIds.filter((id) => id !== account.id)].slice(0, 10);
       localStorage.setItem(recentAccountsKey(user.personId), JSON.stringify(ids));
       return { personId: user.personId, ids };
     });
