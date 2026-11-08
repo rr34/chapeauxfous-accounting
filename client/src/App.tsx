@@ -529,8 +529,9 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   }
 
   return <section className="accounts-view card">
-    <div className="section-heading"><div><p className="eyebrow">Accounting structure</p><h2>Chart of accounts</h2></div>
-      <button aria-label={showForm ? "Close new account form" : "Add account"} onClick={() => setShowForm(!showForm)}>＋</button></div>
+    <div className="accounts-view-actions">
+      <button aria-label={showForm ? "Close new account form" : "Add account"} onClick={() => setShowForm(!showForm)}>＋</button>
+    </div>
     <label className="account-filter">Filter accounts
       <input type="search" value={filter} placeholder="Type an account name, path, type, or currency…"
         onChange={(event) => setFilter(event.target.value)} />
