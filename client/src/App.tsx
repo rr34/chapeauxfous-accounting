@@ -529,13 +529,13 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   }
 
   return <section className="accounts-view card">
-    <div className="accounts-view-actions">
+    <div className="account-filter-row">
+      <label className="account-filter">Filter accounts
+        <input type="search" value={filter} placeholder="Type an account name, path, type, or currency…"
+          onChange={(event) => setFilter(event.target.value)} />
+      </label>
       <button aria-label={showForm ? "Close new account form" : "Add account"} onClick={() => setShowForm(!showForm)}>＋</button>
     </div>
-    <label className="account-filter">Filter accounts
-      <input type="search" value={filter} placeholder="Type an account name, path, type, or currency…"
-        onChange={(event) => setFilter(event.target.value)} />
-    </label>
     {showForm && <form className="compact-form" onSubmit={submit}>
       <input placeholder="Account name" value={name} onChange={(event) => setName(event.target.value)} />
       <input placeholder="Description (optional)" value={description} onChange={(event) => setDescription(event.target.value)} />
