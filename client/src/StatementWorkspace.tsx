@@ -30,11 +30,12 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : "The operation failed.";
 }
 
-export default function StatementWorkspace({ accounts, assertions, token, initialAccountId, onChanged }: {
+export default function StatementWorkspace({ accounts, assertions, token, initialAccountId, onAccountSelected, onChanged }: {
   accounts: Account[];
   assertions: BalanceAssertion[];
   token: string;
   initialAccountId: number | null;
+  onAccountSelected: (accountId: number) => void;
   onChanged: () => Promise<void>;
 }) {
   const paths = useMemo(() => fullPaths(accounts), [accounts]);
@@ -203,7 +204,11 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     <div className="statement-layout">
       <section className="statement-import-panel">
         <h3>Statement account</h3>
-        <label>Statement account<select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+        <label>Statement account<select value={accountId} onChange={(event) => {
+          const value = event.target.value;
+          setAccountId(value);
+          if (value) onAccountSelected(Number(value));
+        }}>
           <option value="">Choose account</option>
           {postable.map((candidate) => <option key={candidate.id} value={candidate.id}>
             {paths.get(candidate.id)} · {candidate.currencyCode}

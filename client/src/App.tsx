@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 const tokenKey = "cf-accounting-token";
+const recentAccountsKey = (personId: number) => `cf-accounting-recent-accounts-${personId}`;
 const today = () => new Date().toISOString().slice(0, 10);
 const currencyLabel = (currency: Currency) => currency.displayName === currency.code
   ? currency.code
@@ -278,12 +279,26 @@ function AccountCombobox({ value, choices, onChange, label, placeholder = "Type 
   </div>;
 }
 
-function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
+function AccountTree({ accounts, selectedAccountId, query, onSelect, onEdit }: {
   accounts: Account[]; selectedAccountId: number | null;
+  query: string;
   onSelect: (account: Account) => void; onEdit: (account: Account) => void;
 }) {
   const [expandedAccountIds, setExpandedAccountIds] = useState<Set<number>>(() => new Set());
   const tree = useMemo(() => buildAccountTree(accounts), [accounts]);
+  const normalizedQuery = query.trim().toLocaleLowerCase("en-US");
+  const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const visibleTree = useMemo(() => {
+    if (!normalizedQuery) return tree;
+    const filterNode = (node: AccountTreeNode): AccountTreeNode | null => {
+      const children = node.children.map(filterNode).filter((child): child is AccountTreeNode => child != null);
+      const searchable = [fullNames.get(node.id), fullNames.get(node.id)?.replaceAll(":", " "), node.name, node.description,
+        node.type, node.currencyCode, node.suspense ? "suspense" : null, node.placeholder ? "placeholder" : null]
+        .filter((value): value is string => Boolean(value)).join(" ").toLocaleLowerCase("en-US");
+      return searchable.includes(normalizedQuery) || children.length > 0 ? { ...node, children } : null;
+    };
+    return tree.map(filterNode).filter((node): node is AccountTreeNode => node != null);
+  }, [fullNames, normalizedQuery, tree]);
 
   function toggleExpanded(accountId: number) {
     setExpandedAccountIds((current) => {
@@ -296,7 +311,7 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
 
   function renderNode(node: AccountTreeNode, depth: number) {
     const hasChildren = node.children.length > 0;
-    const isExpanded = hasChildren && expandedAccountIds.has(node.id);
+    const isExpanded = hasChildren && (Boolean(normalizedQuery) || expandedAccountIds.has(node.id));
     return <div className="account-tree-item" key={node.id}>
       <div className="account-tree-row" style={{ paddingInlineStart: `${depth * 0.9}rem` }}>
         {hasChildren
@@ -332,7 +347,10 @@ function AccountTree({ accounts, selectedAccountId, onSelect, onEdit }: {
     <div className="account-list-heading" aria-hidden="true">
       <span>Account</span><span>Balance</span><span>Last reconciled</span>
     </div>
-    {tree.map((node) => renderNode(node, 0))}
+    {visibleTree.map((node) => renderNode(node, 0))}
+    {normalizedQuery && visibleTree.length === 0 && <p className="account-filter-empty">
+      No accounts match “{query.trim()}”.
+    </p>}
   </div>;
 }
 
@@ -497,6 +515,7 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   const [type, setType] = useState<Account["type"] | "">("");
   const [currencyId, setCurrencyId] = useState<number | "">("");
   const [parentAccountId, setParentAccountId] = useState("");
+  const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
 
@@ -512,6 +531,10 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
   return <section className="accounts-view card">
     <div className="section-heading"><div><p className="eyebrow">Accounting structure</p><h2>Chart of accounts</h2></div>
       <button aria-label={showForm ? "Close new account form" : "Add account"} onClick={() => setShowForm(!showForm)}>＋</button></div>
+    <label className="account-filter">Filter accounts
+      <input type="search" value={filter} placeholder="Type an account name, path, type, or currency…"
+        onChange={(event) => setFilter(event.target.value)} />
+    </label>
     {showForm && <form className="compact-form" onSubmit={submit}>
       <input placeholder="Account name" value={name} onChange={(event) => setName(event.target.value)} />
       <input placeholder="Description (optional)" value={description} onChange={(event) => setDescription(event.target.value)} />
@@ -529,7 +552,7 @@ function ChartOfAccounts({ accounts, currencies, selectedAccountId,
         onChange={(event) => setSuspense(event.target.checked)} />Use for unresolved imported entries in this currency</label>
       {error && <p className="error">{error}</p>}<button className="primary">Add account</button>
     </form>}
-    <AccountTree accounts={accounts} selectedAccountId={selectedAccountId}
+    <AccountTree accounts={accounts} selectedAccountId={selectedAccountId} query={filter}
       onSelect={onSelectAccount} onEdit={setEditingAccount} />
     {editingAccount && <AccountEditDialog key={editingAccount.id} account={editingAccount} accounts={accounts} currencies={currencies}
       token={token} onClose={() => setEditingAccount(null)} onChanged={onChanged} />}
@@ -2939,6 +2962,53 @@ function AgentAccessDialog({ loginToken, onClose }: { loginToken: string; onClos
   </div>;
 }
 
+function RecentAccountNav({ currentAccount, recentAccounts, accounts, active, onSelect }: {
+  currentAccount: Account;
+  recentAccounts: Account[];
+  accounts: Account[];
+  active: boolean;
+  onSelect: (account: Account) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const controlRef = useRef<HTMLDivElement>(null);
+  const paths = useMemo(() => accountFullNames(accounts), [accounts]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!controlRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  function choose(account: Account) {
+    setOpen(false);
+    onSelect(account);
+  }
+
+  return <div className={`recent-account-nav ${active ? "active" : ""}`} ref={controlRef}
+    onKeyDown={(event) => {
+      if (event.key === "Escape" && open) {
+        event.stopPropagation();
+        setOpen(false);
+      }
+    }}>
+    <button type="button" className="recent-account-current" aria-pressed={active}
+      title={`Return to ${paths.get(currentAccount.id) ?? currentAccount.name}`}
+      onClick={() => choose(currentAccount)}>← {currentAccount.name}</button>
+    <button type="button" className="recent-account-toggle" aria-label="Show recent accounts"
+      aria-expanded={open} onClick={() => setOpen((current) => !current)}>▾</button>
+    {open && <div className="recent-account-menu" role="menu">
+      <strong>Recent accounts</strong>
+      {recentAccounts.map((account) => <button type="button" role="menuitem" key={account.id}
+        className={account.id === currentAccount.id ? "selected" : ""} onClick={() => choose(account)}>
+        <span>{paths.get(account.id) ?? account.name}</span><small>{account.currencyCode}</small>
+      </button>)}
+    </div>}
+  </div>;
+}
+
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(tokenKey));
   const [user, setUser] = useState<User | null>(null);
@@ -2949,6 +3019,9 @@ export default function App() {
   const [importJobs, setImportJobs] = useState<TransactionImportJob[]>([]);
   const [selected, setSelected] = useState<TransactionDetail | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
+  const [recentAccountState, setRecentAccountState] = useState<{ personId: number | null; ids: number[] }>({
+    personId: null, ids: [],
+  });
   const [accountLedgerEntries, setAccountLedgerEntries] = useState<AccountLedgerEntry[]>([]);
   const [accountLedgerLoading, setAccountLedgerLoading] = useState(false);
   const [accountLedgerError, setAccountLedgerError] = useState("");
@@ -2971,6 +3044,21 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    if (!user) {
+      setRecentAccountState({ personId: null, ids: [] });
+      return;
+    }
+    let ids: number[] = [];
+    try {
+      const stored = JSON.parse(localStorage.getItem(recentAccountsKey(user.personId)) ?? "[]");
+      if (Array.isArray(stored)) ids = stored.filter((id): id is number => Number.isInteger(id) && id > 0).slice(0, 5);
+    } catch {
+      // Ignore malformed local history and rebuild it as accounts are visited.
+    }
+    setRecentAccountState({ personId: user.personId, ids });
+  }, [user?.personId]);
+
   function revealMainContent() {
     requestAnimationFrame(() => {
       const content = mainContentRef.current;
@@ -2980,8 +3068,20 @@ export default function App() {
     });
   }
 
-  function selectAccount(account: Account) {
+  function rememberAccount(account: Account) {
+    if (!user) return;
     setSelectedAccountId(account.id);
+    setRecentAccountState((current) => {
+      const currentIds = current.personId === user.personId
+        ? current.ids.filter((id) => accounts.some((candidate) => candidate.id === id)) : [];
+      const ids = [account.id, ...currentIds.filter((id) => id !== account.id)].slice(0, 5);
+      localStorage.setItem(recentAccountsKey(user.personId), JSON.stringify(ids));
+      return { personId: user.personId, ids };
+    });
+  }
+
+  function selectAccount(account: Account) {
+    rememberAccount(account);
     setWorkspaceView("account");
     if (window.location.hash === "#import-misfits") {
       window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
@@ -2990,7 +3090,6 @@ export default function App() {
   }
 
   function selectWorkspaceView(view: "chart" | "activity" | "misfits" | "statements") {
-    if (view !== "statements") setSelectedAccountId(null);
     setWorkspaceView(view);
     if (view === "misfits" && window.location.hash !== "#import-misfits") {
       window.history.pushState(null, "", "#import-misfits");
@@ -3013,7 +3112,6 @@ export default function App() {
       const misfits = window.location.hash === "#import-misfits";
       if (misfits) {
         setWorkspaceView("misfits");
-        setSelectedAccountId(null);
       } else {
         setWorkspaceView((current) => current === "misfits" ? "chart" : current);
       }
@@ -3066,6 +3164,7 @@ export default function App() {
   }
   function logout() {
     localStorage.removeItem(tokenKey); setToken(null); setUser(null); setSelectedAccountId(null);
+    setRecentAccountState({ personId: null, ids: [] });
     setImportJobs([]); setTransactions([]); setSelected(null); setWorkspaceView("chart");
     setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
     setOpenRegisterTransaction(null);
@@ -3104,6 +3203,9 @@ export default function App() {
   if (loading) return <div className="loading">Loading accounting…</div>;
   if (!token || !user) return <AuthScreen onAuthenticated={authenticated} />;
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
+  const recentAccounts = (recentAccountState.personId === user.personId ? recentAccountState.ids : [])
+    .map((id) => accounts.find((account) => account.id === id)).filter((account): account is Account => account != null);
+  const currentAccount = selectedAccount ?? recentAccounts[0] ?? null;
   const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
   return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <AppMenu open={showAppMenu} onToggle={() => setShowAppMenu((current) => !current)}
@@ -3113,15 +3215,17 @@ export default function App() {
       onSignOut={logout} /></div></header>
     <main className="workspace">
       <nav className="workspace-nav" aria-label="Accounting views">
+        {currentAccount && <RecentAccountNav currentAccount={currentAccount} recentAccounts={recentAccounts}
+          accounts={accounts} active={workspaceView === "account"} onSelect={selectAccount} />}
         <button className={workspaceView === "chart" ? "active" : ""} aria-pressed={workspaceView === "chart"}
           onClick={() => selectWorkspaceView("chart")}>Chart of accounts</button>
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
-        <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
-          onClick={() => selectWorkspaceView("misfits")}>Import misfits
-          {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
         <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
           onClick={() => selectWorkspaceView("statements")}>Statements &amp; questions</button>
+        <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
+          onClick={() => selectWorkspaceView("misfits")}>Import issues
+          {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
       </nav>
       <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>
         {workspaceView === "chart"
@@ -3131,7 +3235,10 @@ export default function App() {
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
           : workspaceView === "statements"
           ? <StatementWorkspace accounts={accounts} assertions={assertions} token={token}
-              initialAccountId={selectedAccountId} onChanged={refresh} />
+              initialAccountId={selectedAccountId} onAccountSelected={(accountId) => {
+                const account = accounts.find((candidate) => candidate.id === accountId);
+                if (account) rememberAccount(account);
+              }} onChanged={refresh} />
           : workspaceView === "account" && selectedAccount
           ? <AccountRegister account={selectedAccount} accounts={accounts} currencies={currencies}
               entries={accountLedgerEntries} assertions={assertions}
