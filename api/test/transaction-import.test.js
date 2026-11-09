@@ -544,6 +544,32 @@ test("account review lists plan rows and a user toggle changes the atomic commit
   assert.deepEqual(pool.state.transactions.map((transaction) => transaction.source_id), ["source-tx-2"]);
 });
 
+test("statement arithmetic remains verifiable when the beginning amount has no date", async () => {
+  const pool = memoryPool();
+  const transactions = importedTransactions();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_statement", transactions,
+    importReview: { accountId: 11, statementId: "statement-undated-opening",
+      decisions: transactions.map((transaction) => ({
+        externalId: transaction.externalId, decision: "include", sourceRecordId: transaction.externalId,
+      })), statementSummaryBasis: {
+        beginningDate: null, beginningAmountUnits: "20000",
+        endingDate: "2026-02-28", endingAmountUnits: "8766",
+        balanceBaselineUnits: null, currencyCode: "USD", scale: 2, balanceSign: 1,
+      } },
+  });
+  const listed = await listAccountTransactionImportReviews({ pool, personId: 7, accountId: 11 });
+  assert.deepEqual(listed[0].statementSummary.balanceCheck,
+    { status: "matches", resultingEndingUnits: "8766", statementEndingUnits: "8766" });
+
+  const changed = await updateTransactionImportReviewDecision({
+    pool, personId: 7, accountId: 11, importPlanId: preview.importPlanId,
+    externalId: "source-tx-1", decision: "exclude",
+  });
+  assert.deepEqual(changed.statementSummary.balanceCheck,
+    { status: "matches", resultingEndingUnits: "8766", statementEndingUnits: "8766" });
+});
+
 test("transaction import preserves distinct per-line exchange rates", async () => {
   const pool = memoryPool();
   const transactions = [{

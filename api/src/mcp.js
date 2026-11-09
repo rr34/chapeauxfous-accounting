@@ -468,6 +468,17 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
     lines.push("", coverage.balanced
       ? `**Balance check:** With this preview applied, the resulting ending balance is ${resulting}, which **matches** the ending balance shown on the statement.`
       : `**Balance check:** With this preview applied, the resulting ending balance is ${resulting}, which **does not match** the ending balance of ${statementEnding} shown on the statement.`);
+  } else if (openingUnits != null && closingUnits != null && Array.isArray(analysis.observations)) {
+    const statementMovementUnits = analysis.observations.reduce(
+      (sum, observation) => sum + BigInt(observation.amountUnits), 0n,
+    );
+    const resultingEndingUnits = BigInt(openingUnits)
+      + statementMovementUnits * BigInt(normalBalanceSign(account.type));
+    const resulting = displayNativeAmount(resultingEndingUnits, account.currencyCode, account.scale);
+    const statementEnding = displayNativeAmount(closingUnits, account.currencyCode, account.scale);
+    lines.push("", resultingEndingUnits === BigInt(closingUnits)
+      ? `**Balance check:** The beginning balance plus all statement movements is ${resulting}, which **matches** the ending balance shown on the statement.`
+      : `**Balance check:** The beginning balance plus all statement movements is ${resulting}, which **does not match** the ending balance of ${statementEnding} shown on the statement.`);
   } else {
     lines.push("", "**Balance check:** An ending-balance match **could not be verified** from the available statement evidence.");
   }

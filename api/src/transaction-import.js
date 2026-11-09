@@ -251,6 +251,14 @@ function statementReviewSummary(normalized, entries, balanceAssertions) {
     resultingEndingUnits = (BigInt(basis.balanceBaselineUnits)
       + proposedMovement * BigInt(basis.balanceSign)).toString();
     balanceStatus = resultingEndingUnits === basis.endingAmountUnits ? "matches" : "mismatch";
+  } else if (basis.beginningAmountUnits != null && basis.endingAmountUnits != null) {
+    const statementMovement = entries.reduce((sum, entry) => {
+      const statementLine = entry.resolved?.lineItems.find((line) => line.accountId === normalized.importReview.accountId);
+      return sum + BigInt(statementLine?.amountUnits ?? "0");
+    }, 0n);
+    resultingEndingUnits = (BigInt(basis.beginningAmountUnits)
+      + statementMovement * BigInt(basis.balanceSign)).toString();
+    balanceStatus = resultingEndingUnits === basis.endingAmountUnits ? "matches" : "mismatch";
   }
   const closingAssertion = basis.endingDate == null ? null
     : balanceAssertions.find((assertion) => assertion.balanceDate === basis.endingDate) ?? null;

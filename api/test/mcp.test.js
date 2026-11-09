@@ -344,6 +344,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       const observations = input.observations.map((item, index) => ({
         ...item,
         id: `observation-${index + 1}`,
+        amountUnits: String(Math.round(Number(item.amountDecimal) * 100)),
         outsideBalanceInterval: item.transactionDate <= input.openingBalanceDate
           || item.transactionDate > input.closingBalanceDate,
       }));
@@ -1247,6 +1248,25 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   });
   assert.equal(noStatementBalances.structuredContent.readyToCommit, true);
   assert.deepEqual(oneSidedImport.knownBalanceAssertions, []);
+
+  const undatedOpeningBalance = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "undated-opening-balance", account_id: 10,
+      start_date: { found: false, value: null },
+      start_amount: { found: true, value: "100.00" },
+      end_date: { found: true, value: "2026-01-31" },
+      end_amount: { found: true, value: "87.50" },
+      line_items: [{ source_record_id: "row-1", transaction_date: "2026-01-05",
+        available_text: "ACME", amount_decimal: "-12.50" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(undatedOpeningBalance.structuredContent.readyToCommit, true);
+  assert.match(undatedOpeningBalance.structuredContent.nextAction.instruction,
+    /beginning balance plus all statement movements is \$87\.50, which \*\*matches\*\*/i);
+  assert.doesNotMatch(undatedOpeningBalance.structuredContent.nextAction.instruction,
+    /could not be verified/i);
 
   const zeroStatementLine = await client.callTool({
     name: "import_single_account_statement",
