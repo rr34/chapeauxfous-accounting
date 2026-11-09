@@ -34,6 +34,26 @@ test("one-sided statement lines compile into cleared authoritative lines and one
   ]);
 });
 
+test("zero-amount statement lines retain both the authoritative and suspense sides", () => {
+  const compiled = compileSingleAccountStatementImport({
+    accounts, accountId: 2, valuationCurrencyCode: "USD",
+    questionAudience: "Accountant",
+    lines: [{ externalId: "statement-row-zero", transactionDate: "2026-09-28",
+      description: "Interest Charge on Balance Transfers", amountDecimal: "0.00", valueDecimal: "0.00" }],
+  });
+  assert.deepEqual(compiled.transactions[0].lineItems, [
+    { externalId: "statement-row-zero", accountFullName: "Assets:Checking",
+      amountDecimal: "0.00", valueDecimal: "0.00", memo: undefined,
+      reconciliationState: "cleared" },
+    { externalId: null, accountFullName: "Assets:Ask Human",
+      amountDecimal: "0.00", valueDecimal: "0.00", memo: undefined,
+      reconciliationState: "unreconciled", question: {
+        audience: "accountant",
+        prompt: "What evidence identifies the other side of \"Interest Charge on Balance Transfers\"? Check for a matching imported account entry, including near matches affected by fees.",
+      } },
+  ]);
+});
+
 test("one-sided import asks for designation when the currency has no suspense account", () => {
   assert.throws(() => compileSingleAccountStatementImport({
     accounts: accounts.map((account) => ({ ...account, suspense: false })),

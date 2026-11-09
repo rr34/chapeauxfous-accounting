@@ -73,6 +73,49 @@ test("only a stable matching source reference is automatically excluded as an ex
   assert.equal(result.coverage[0].balanced, true);
 });
 
+test("zero-amount rows remain included despite checkpoints and unrelated nearby zero rows", async () => {
+  const checkpoint = {
+    account_balance_assertion_id: 69, account_id: 10, balance_date: "2026-08-15",
+    known_balance_units: "2000000", calculated_balance_units: "2000000",
+    AccountName: "Coinbase BTC", AccountType: "asset", account_currency_id: 2,
+    CurrencyAbbreviation: "BTC", scale: 8,
+  };
+  const existingRows = [{ transaction_id: 86, TransactionDate: "2026-08-14",
+    TransactionState: "posted", transaction_description: "Unrelated zero placeholder",
+    transaction_source_system: "manual", transaction_source_id: "different-source",
+    line_item_id: 506, amount_units: "0", line_memo: null,
+    line_source_id: "different-line", account_id: 10 }];
+  const result = await analyzeStatementObservations({
+    pool: analysisPool({ remainingCoinbase: "0", existingRows, balanceAssertions: [checkpoint] }), personId: 7,
+    observations: [{ sourceDocumentId: "bank-august", sourceRecordId: "zero-interest", accountId: 10,
+      transactionDate: "2026-08-14", amountDecimal: "0.00000000",
+      description: "Interest Charge on Balance Transfers", reference: "zero-interest" }],
+    openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  });
+  assert.equal(result.observations[0].amountUnits, "0");
+  assert.deepEqual(result.duplicateAnalysis.ledgerCandidates, []);
+  assert.equal(result.importDecisions[0].decision, "include");
+  assert.equal(result.coverage[0].proposedNewObservationUnits, "0");
+});
+
+test("a zero-amount row is excluded when its stable source identity was already imported", async () => {
+  const existingRows = [{ transaction_id: 87, TransactionDate: "2026-08-14",
+    TransactionState: "posted", transaction_description: "Interest Charge on Balance Transfers",
+    transaction_source_system: "single_account_statement", transaction_source_id: "statement-transaction",
+    line_item_id: 507, amount_units: "0", line_memo: null,
+    line_source_id: "zero-interest", account_id: 10 }];
+  const result = await analyzeStatementObservations({
+    pool: analysisPool({ remainingCoinbase: "0", existingRows }), personId: 7,
+    observations: [{ sourceDocumentId: "bank-august", sourceRecordId: "zero-interest", accountId: 10,
+      transactionDate: "2026-08-14", amountDecimal: "0.00000000",
+      description: "Interest Charge on Balance Transfers", reference: "zero-interest" }],
+    openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  });
+  assert.equal(result.duplicateAnalysis.ledgerCandidates[0].candidates[0].classification,
+    "exact_source_duplicate");
+  assert.equal(result.importDecisions[0].decision, "exclude");
+});
+
 test("a unique same-account exact amount within one day defaults to excluded", async () => {
   const existingRows = [{ transaction_id: 82, TransactionDate: "2026-08-18",
     TransactionState: "posted", transaction_description: "Another merchant",

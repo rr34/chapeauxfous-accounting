@@ -1191,6 +1191,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "/mcp/evidence-files/81/content");
   assert.match(startedStatementJob.structuredContent.extraction.rules.join(" "),
     /complete original PDF.*(?:omit|preselect) pages/s);
+  assert.match(startedStatementJob.structuredContent.extraction.rules.join(" "),
+    /including zero-amount line items such as \$0\.00.*balanced statement-and-suspense transaction/);
   assert.equal(startedStatementJob.structuredContent.extraction.artifactUpload.transportId,
     "statement_import_job");
   const missingStatementBalance = await client.callTool({
@@ -1245,6 +1247,25 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   });
   assert.equal(noStatementBalances.structuredContent.readyToCommit, true);
   assert.deepEqual(oneSidedImport.knownBalanceAssertions, []);
+
+  const zeroStatementLine = await client.callTool({
+    name: "import_single_account_statement",
+    arguments: {
+      statement_id: "zero-statement-line", account_id: 10,
+      start_date: { found: false, value: null },
+      start_amount: { found: false, value: null },
+      end_date: { found: false, value: null },
+      end_amount: { found: false, value: null },
+      line_items: [{ source_record_id: "zero-interest", transaction_date: "2026-09-28",
+        available_text: "Interest Charge on Balance Transfers", amount_decimal: "0.00" }],
+      dry_run: true,
+    },
+  });
+  assert.equal(zeroStatementLine.structuredContent.readyToCommit, true);
+  assert.deepEqual(oneSidedImport.lines.map(({ transactionDate, description, amountDecimal }) => ({
+    transactionDate, description, amountDecimal,
+  })), [{ transactionDate: "2026-09-28",
+    description: "Interest Charge on Balance Transfers", amountDecimal: "0" }]);
 
   const possibleDuplicate = await client.callTool({
     name: "import_single_account_statement",

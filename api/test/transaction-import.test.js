@@ -881,6 +881,26 @@ test("transaction import accepts a zero-value commodity quantity adjustment", as
   assert.deepEqual(pool.state.rates, []);
 });
 
+test("transaction import retains a balanced native-currency zero transaction", async () => {
+  const pool = memoryPool();
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_statement", transactions: [{
+      externalId: "zero-interest", transactionDate: "2026-09-28",
+      description: "Interest Charge on Balance Transfers", valuationCurrencyCode: "USD",
+      lineItems: [
+        { externalId: "zero-interest", accountFullName: "Assets:Checking", amountDecimal: "0.00" },
+        { externalId: null, accountFullName: "Expenses:Food", amountDecimal: "0.00" },
+      ],
+    }],
+  });
+
+  assert.equal(preview.readyToCommit, true);
+  assert.equal(preview.rejectedTransactionCount, 0);
+  await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
+  assert.deepEqual(pool.state.lineItems.map((line) => [line.amount_units, line.value_units]),
+    [["0", "0"], ["0", "0"]]);
+});
+
 test("transaction commit persists plan invalidation after an integrity failure", async () => {
   const pool = memoryPool();
   const preview = await previewTransactionImport({

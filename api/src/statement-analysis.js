@@ -76,11 +76,12 @@ function matchingReference(observation, candidate) {
 
 function candidateFor(observation, row) {
   const amountMatches = BigInt(observation.amountUnits) === BigInt(row.amount_units);
+  const amountSupportsHeuristicMatch = amountMatches && BigInt(observation.amountUnits) !== 0n;
   const referenceMatches = matchingReference(observation, row);
   const dateDistanceDays = daysApart(observation.transactionDate, row.TransactionDate);
   const descriptionSimilarity = similarity(`${observation.description ?? ""} ${observation.reference ?? ""}`,
     `${row.transaction_description ?? ""} ${row.line_memo ?? ""}`);
-  if (!referenceMatches && (!amountMatches || dateDistanceDays > 3)) return null;
+  if (!referenceMatches && (!amountSupportsHeuristicMatch || dateDistanceDays > 3)) return null;
   const reasons = ["same_account"];
   let score = 10;
   if (referenceMatches) { score += 60; reasons.push("matching_source_reference"); }
@@ -98,10 +99,10 @@ function candidateFor(observation, row) {
   } else if (referenceMatches && (!amountMatches || dateDistanceDays > 3)) {
     classification = "source_reference_conflict";
     recommendation = "do_not_import_until_resolved";
-  } else if (amountMatches && dateDistanceDays === 0 && descriptionSimilarity >= 0.35) {
+  } else if (amountSupportsHeuristicMatch && dateDistanceDays === 0 && descriptionSimilarity >= 0.35) {
     classification = "strong_duplicate_candidate";
     recommendation = "review_candidate";
-  } else if (amountMatches && dateDistanceDays <= 2) {
+  } else if (amountSupportsHeuristicMatch && dateDistanceDays <= 2) {
     classification = "probable_duplicate";
     recommendation = "exclude_when_balance_or_text_corroborates";
     reasons.push("exact_amount_within_two_days");
@@ -171,7 +172,8 @@ function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, r
   const checkpointByAccount = new Map(balanceCheckpoints.map((checkpoint) => [checkpoint.accountId, checkpoint]));
   const decisions = new Map(observations.map((observation) => {
     const checkpoint = checkpointByAccount.get(observation.accountId);
-    const coveredByCheckpoint = checkpoint != null && !observation.outsideBalanceInterval
+    const coveredByCheckpoint = BigInt(observation.amountUnits) !== 0n
+      && checkpoint != null && !observation.outsideBalanceInterval
       && observation.transactionDate <= checkpoint.date;
     const exactDuplicate = exactExcludedIds.has(observation.id);
     const exactAmountCandidates = (candidatesByObservation.get(observation.id) ?? [])
@@ -206,7 +208,7 @@ function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, r
   for (const account of reconciliation.accounts) {
     if (account.remainingLineItemMovementUnits == null) continue;
     const included = observations.filter((item) => item.accountId === account.accountId
-      && decisions.get(item.id).decision === "include");
+      && BigInt(item.amountUnits) !== 0n && decisions.get(item.id).decision === "include");
     const proposed = included.reduce((sum, item) => sum + BigInt(item.amountUnits), 0n);
     const targetExclusion = proposed - BigInt(account.remainingLineItemMovementUnits);
     if (targetExclusion === 0n) continue;
@@ -254,9 +256,10 @@ function inputDuplicateCandidates(observations) {
     for (let rightIndex = leftIndex + 1; rightIndex < observations.length; rightIndex += 1) {
       const left = observations[leftIndex];
       const right = observations[rightIndex];
-      if (left.sourceDocumentId === right.sourceDocumentId || left.accountId !== right.accountId
-          || left.amountUnits !== right.amountUnits || daysApart(left.transactionDate, right.transactionDate) > 1) continue;
       const sameReference = normalize(left.reference) && normalize(left.reference) === normalize(right.reference);
+      if (left.sourceDocumentId === right.sourceDocumentId || left.accountId !== right.accountId
+          || left.amountUnits !== right.amountUnits || daysApart(left.transactionDate, right.transactionDate) > 1
+          || (BigInt(left.amountUnits) === 0n && !sameReference)) continue;
       const descriptionSimilarity = similarity(left.description, right.description);
       const exact = Boolean(sameReference);
       candidates.push({
@@ -280,7 +283,9 @@ function transferCandidates(observations) {
       const left = observations[leftIndex];
       const right = observations[rightIndex];
       if (left.sourceDocumentId === right.sourceDocumentId || left.accountId === right.accountId
-          || left.currencyId !== right.currencyId || (BigInt(left.amountUnits) < 0n) === (BigInt(right.amountUnits) < 0n)) continue;
+          || left.currencyId !== right.currencyId || BigInt(left.amountUnits) === 0n
+          || BigInt(right.amountUnits) === 0n
+          || (BigInt(left.amountUnits) < 0n) === (BigInt(right.amountUnits) < 0n)) continue;
       const dateDistanceDays = daysApart(left.transactionDate, right.transactionDate);
       const sameReference = normalize(left.reference) && normalize(left.reference) === normalize(right.reference);
       const timestampDistanceSeconds = left.occurredAt && right.occurredAt
@@ -382,8 +387,6 @@ export async function analyzeStatementObservations({ pool, personId, observation
       throw applicationError(`Observation ${index + 1} has an invalid amount: ${error.message}.`, 400,
         "INVALID_STATEMENT_OBSERVATION_AMOUNT", { sourceDocumentId, sourceRecordId });
     }
-    if (amountUnits === "0") throw applicationError(`Observation ${index + 1} has no account movement.`, 400,
-      "ZERO_STATEMENT_OBSERVATION_AMOUNT", { sourceDocumentId, sourceRecordId });
     const transactionDate = calendarDate(item?.transactionDate);
     const outsideBalanceInterval = transactionDate <= reconciliation.interval.openingBalanceDate
       || transactionDate > reconciliation.interval.closingBalanceDate;
@@ -499,6 +502,7 @@ export async function analyzeStatementObservations({ pool, personId, observation
     readyForTransactionAssembly: observations.length > 0,
     rules: [
       "Stable source-reference matches are excluded as ledger duplicates.",
+      "Zero-amount statement rows remain included as ledger evidence unless their stable source identity proves they were already imported; amount-only, checkpoint, balance-solving, and transfer heuristics do not exclude or match them.",
       "A matching recorded and known balance is a verified checkpoint; in-window statement rows on or before its date default to excluded before duplicate matching and balance solving. Outside-window rows remain included for review.",
       "A unique existing same-account transaction with the exact amount within three days defaults to excluded for review; matches two or three days away explicitly ask the user to verify the date.",
       "Known-balance solving tests the smallest combinations of up to three rows and leaves equally supported solutions for user review.",

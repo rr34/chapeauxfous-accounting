@@ -402,14 +402,15 @@ export const singleAccountStatementImportCanonicalJsonSchema = Object.freeze({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: SINGLE_ACCOUNT_STATEMENT_IMPORT_SCHEMA_URI,
   title: "Canonical single-account statement line record",
-  description: "One dated signed movement from a statement for one already-selected account.",
+  description: "One dated signed movement or retained zero-amount line from a statement for one already-selected account.",
   type: "object",
   additionalProperties: false,
   required: ["source_record_id", "transaction_date", "amount_decimal", "available_text"],
   properties: {
     source_record_id: { type: "string", minLength: 1, maxLength: 96 },
     transaction_date: { type: "string", format: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-    amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128 },
+    amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128,
+      description: "Signed statement-balance change; zero retains the printed line without changing the balance." },
     available_text: { type: ["string", "null"], maxLength: 16000 },
   },
 });

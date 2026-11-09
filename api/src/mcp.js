@@ -2472,7 +2472,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           prompt: "Determine the closing balance independently of the period end date. Extract the signed amount exactly even when it appears elsewhere in the document.",
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
         { order: 5, key: "line_items",
-          prompt: "What are all line items into or out of this account? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
+          prompt: "What are all line items shown for this account? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.",
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
         { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text from the document without inventing a category.",
@@ -2485,7 +2485,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       rules: [
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
-        "Preserve every printed amount and all useful transaction text.",
+        "Preserve every printed amount and all useful transaction text, including zero-amount line items such as $0.00. Accounting retains each zero-amount row as a balanced statement-and-suspense transaction with no balance effect.",
         "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Never infer that one is absent merely because it is not physically adjacent to another.",
         "Each evidence value is optional and is retained independently. A closing balance assertion is created only when both the closing date and closing amount are available.",
@@ -2532,7 +2532,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           prompt: "Determine the closing balance across the complete original PDF independently of the period end date. Extract the signed amount exactly wherever it appears.",
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
         { order: 5, key: "line_items",
-          prompt: "What are all line items into or out of this account across the complete PDF? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it.",
+          prompt: "What are all line items shown for this account across the complete PDF? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.",
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
         { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text without inventing a category.",
@@ -2547,7 +2547,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document.",
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
-        "Preserve every printed amount and all useful transaction text.",
+        "Preserve every printed amount and all useful transaction text, including zero-amount line items such as $0.00. Accounting retains each zero-amount row as a balanced statement-and-suspense transaction with no balance effect.",
         "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
         "Start date, opening balance, end date, and closing balance are four independent determinations. Search the entire document for each one; do not require related values to be physically adjacent.",
         "Each evidence value is optional and is retained independently. A closing balance assertion is created only when both the closing date and closing amount are available.",
@@ -2664,7 +2664,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .describe("Stable row identifier within this statement; reuse it when the same attachment is processed again."),
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
-      .describe("Signed change to the displayed statement balance: positive increases it and negative decreases it."),
+      .describe("Signed change to the displayed statement balance: positive increases it, negative decreases it, and zero retains an informational statement line without changing the balance."),
     available_text: z.string().trim().max(16000).nullable()
       .describe("All useful transaction text copied from the document, or null when the row has none."),
   }).strict();

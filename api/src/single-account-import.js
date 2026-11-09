@@ -33,16 +33,9 @@ function decimalText(value, field) {
   return text;
 }
 
-function signedDecimal(value, field) {
+function negateDecimal(value, field) {
   const text = decimalText(value, field);
-  if (/^[+-]?0+(?:\.0+)?$/.test(text)) {
-    throw workflowError(`${field} must contain nonzero account movement.`, "ZERO_STATEMENT_LINE_AMOUNT");
-  }
-  return text;
-}
-
-function negateDecimal(value, field, { allowZero = false } = {}) {
-  const text = allowZero ? decimalText(value, field) : signedDecimal(value, field);
+  if (/^[+-]?0+(?:\.0+)?$/.test(text)) return text.replace(/^[+-]/, "");
   if (text.startsWith("-")) return text.slice(1);
   if (text.startsWith("+")) return `-${text.slice(1)}`;
   return `-${text}`;
@@ -98,7 +91,7 @@ export function compileSingleAccountStatementImport({
   const audience = requiredText(questionAudience, "question_audience", 50).toLocaleLowerCase("en-US");
   const transactions = lines.map((line, index) => {
     const externalId = requiredText(line?.externalId, `lines[${index}].external_id`, 128);
-    const amountDecimal = signedDecimal(line?.amountDecimal, `lines[${index}].amount_decimal`);
+    const amountDecimal = decimalText(line?.amountDecimal, `lines[${index}].amount_decimal`);
     const valueDecimal = line?.valueDecimal == null ? null
       : decimalText(line.valueDecimal, `lines[${index}].value_decimal`);
     const description = String(line?.description ?? "").trim() || null;
@@ -123,7 +116,7 @@ export function compileSingleAccountStatementImport({
           accountFullName: paths.get(suspenseAccount.id),
           amountDecimal: negateDecimal(amountDecimal, `lines[${index}].amount_decimal`),
           valueDecimal: valueDecimal == null ? null
-            : negateDecimal(valueDecimal, `lines[${index}].value_decimal`, { allowZero: true }),
+            : negateDecimal(valueDecimal, `lines[${index}].value_decimal`),
           memo: line?.memo,
           reconciliationState: "unreconciled",
           question: { audience, prompt },
