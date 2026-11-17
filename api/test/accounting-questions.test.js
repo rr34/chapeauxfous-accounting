@@ -7,6 +7,7 @@ import {
   listAccountingQuestionsPage,
   normalizeAccountingQuestion,
   resolveAccountingQuestion,
+  resolveAccountingQuestions,
 } from "../src/accounting-questions.js";
 
 function questionPool() {
@@ -183,4 +184,33 @@ test("an unresolved suspense line cannot be reassigned across currencies", async
   const { pool } = questionPool();
   await assert.rejects(resolveAccountingQuestion({ pool, personId: 7, lineItemId: 101,
     targetAccountId: 40 }), (error) => error.code === "QUESTION_TARGET_CURRENCY_MISMATCH");
+});
+
+test("a batch resolution reclassifies selected suspense lines through one validated workflow", async () => {
+  const { state, pool } = questionPool();
+  state.lines[0].amount_units = "1750";
+  state.lines[0].value_units = "1750";
+  state.lines.push({ line_item_id: 102, transaction_id: 5, amount_units: "-500", value_units: "-500",
+    memo: "Second unclassified line", account_id: 20, reconciliation_state: "unreconciled", reconciled_at: null });
+  const questionTags = [
+    [accountingQuestionTagKeys.status, "open"],
+    [accountingQuestionTagKeys.audience, "accountant"],
+    [accountingQuestionTagKeys.prompt, "What caused the second amount?"],
+  ];
+  for (const [key, value] of questionTags) {
+    const tag = { tag_id: state.nextTagId++, owner_person_id: 7, tag_key: key, tag_value: value };
+    state.tags.push(tag);
+    state.joins.push({ line_item_id: 102, tag_id: tag.tag_id });
+  }
+
+  const result = await resolveAccountingQuestions({ pool, personId: 7, lineItemIds: [102, 101, 102],
+    targetAccountId: 30, resolution: "Reviewed as one similar group" });
+
+  assert.equal(result.submittedCount, 2);
+  assert.equal(result.changedCount, 2);
+  assert.equal(result.unchangedCount, 0);
+  assert.deepEqual(result.questions.map((question) => question.lineItemId), [101, 102]);
+  assert.equal(state.lines.find((line) => line.line_item_id === 101).account_id, 30);
+  assert.equal(state.lines.find((line) => line.line_item_id === 102).account_id, 30);
+  assert.equal(result.questions.every((question) => question.resolution === "Reviewed as one similar group"), true);
 });

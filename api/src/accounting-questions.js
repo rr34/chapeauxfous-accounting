@@ -248,57 +248,91 @@ export async function openAccountingQuestion({ pool, personId, lineItemId, audie
   });
 }
 
+async function resolveAccountingQuestionWithConnection(connection, { personId, lineItemId, targetAccountId,
+  resolution }) {
+  const line = await requireOwnedPostedLine(connection, personId, lineItemId);
+  const status = await currentQuestionStatus(connection, personId, lineItemId);
+  if (status == null) throw questionError("Accounting question not found.", "ACCOUNTING_QUESTION_NOT_FOUND", undefined, 404);
+  if (line.reconciliation_state === "reconciled") {
+    throw questionError("A reconciled account line is immutable; resolve the question on its suspense counterline.",
+      "RECONCILED_LINE_IMMUTABLE", { lineItemId }, 409);
+  }
+  if (status === "resolved") {
+    const question = await getAccountingQuestion(connection, personId, lineItemId);
+    if (question.targetAccountId !== targetAccountId) {
+      throw questionError("This question was already resolved to a different account.",
+        "ACCOUNTING_QUESTION_RESOLUTION_CONFLICT", {
+          lineItemId, existingTargetAccountId: question.targetAccountId, requestedTargetAccountId: targetAccountId,
+        }, 409);
+    }
+    return { question, changed: false };
+  }
+  const [targets] = await connection.query(
+    `SELECT account_id, account_currency_id, is_placeholder, archived_at
+         FROM accounts WHERE account_id = ? AND owner_person_id = ?
+         FOR UPDATE`,
+    [targetAccountId, personId],
+  );
+  const target = targets[0];
+  if (!target) throw questionError("Target account not found.", "ACCOUNT_NOT_FOUND", undefined, 404);
+  if (targetAccountId === Number(line.account_id)) {
+    throw questionError("Choose a final account different from the current suspense account.",
+      "QUESTION_TARGET_IS_SUSPENSE_ACCOUNT");
+  }
+  if (Boolean(target.is_placeholder) || target.archived_at != null) {
+    throw questionError("The target account must be active and postable.", "QUESTION_TARGET_NOT_POSTABLE");
+  }
+  if (Number(target.account_currency_id) !== Number(line.account_currency_id)) {
+    throw questionError("The target account must use the same currency as the suspense line so its proven amount and value remain unchanged.",
+      "QUESTION_TARGET_CURRENCY_MISMATCH", { lineItemId, targetAccountId });
+  }
+  await connection.query("UPDATE line_items SET account_id = ? WHERE line_item_id = ?", [targetAccountId, lineItemId]);
+  await connection.query(
+    "UPDATE transactions SET UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
+    [Number(line.transaction_id), personId],
+  );
+  await replaceQuestionTag(connection, personId, lineItemId, accountingQuestionTagKeys.status, "resolved");
+  await replaceQuestionTag(connection, personId, lineItemId, accountingQuestionTagKeys.resolution, resolution);
+  await replaceQuestionTag(connection, personId, lineItemId, accountingQuestionTagKeys.resolvedAt,
+    new Date().toISOString());
+  await replaceQuestionTag(connection, personId, lineItemId, accountingQuestionTagKeys.targetAccountId,
+    String(targetAccountId));
+  await validateTransaction(connection, Number(line.transaction_id), personId, { lock: true });
+  return { question: await getAccountingQuestion(connection, personId, lineItemId), changed: true };
+}
+
 export async function resolveAccountingQuestion({ pool, personId, lineItemId, targetAccountId, resolution = null }) {
   const id = positiveId(lineItemId, "Question line item ID");
   const targetId = positiveId(targetAccountId, "Target account ID");
   const note = limitedText(resolution, "Resolution", 16000, { required: false });
+  return withPoolTransaction(pool, async (connection) =>
+    resolveAccountingQuestionWithConnection(connection, {
+      personId, lineItemId: id, targetAccountId: targetId, resolution: note,
+    }));
+}
+
+export async function resolveAccountingQuestions({ pool, personId, lineItemIds, targetAccountId,
+  resolution = null }) {
+  if (!Array.isArray(lineItemIds) || lineItemIds.length === 0 || lineItemIds.length > 500) {
+    throw questionError("Choose between 1 and 500 accounting questions.", "INVALID_ACCOUNTING_QUESTION_BATCH");
+  }
+  const ids = [...new Set(lineItemIds.map((lineItemId) => positiveId(lineItemId,
+    "Question line item ID")))].sort((left, right) => left - right);
+  const targetId = positiveId(targetAccountId, "Target account ID");
+  const note = limitedText(resolution, "Resolution", 16000, { required: false });
   return withPoolTransaction(pool, async (connection) => {
-    const line = await requireOwnedPostedLine(connection, personId, id);
-    const status = await currentQuestionStatus(connection, personId, id);
-    if (status == null) throw questionError("Accounting question not found.", "ACCOUNTING_QUESTION_NOT_FOUND", undefined, 404);
-    if (line.reconciliation_state === "reconciled") {
-      throw questionError("A reconciled account line is immutable; resolve the question on its suspense counterline.",
-        "RECONCILED_LINE_IMMUTABLE", { lineItemId: id }, 409);
+    const results = [];
+    for (const lineItemId of ids) {
+      results.push(await resolveAccountingQuestionWithConnection(connection, {
+        personId, lineItemId, targetAccountId: targetId, resolution: note,
+      }));
     }
-    if (status === "resolved") {
-      const question = await getAccountingQuestion(connection, personId, id);
-      if (question.targetAccountId !== targetId) {
-        throw questionError("This question was already resolved to a different account.",
-          "ACCOUNTING_QUESTION_RESOLUTION_CONFLICT", {
-            lineItemId: id, existingTargetAccountId: question.targetAccountId, requestedTargetAccountId: targetId,
-          }, 409);
-      }
-      return { question, changed: false };
-    }
-    const [targets] = await connection.query(
-      `SELECT account_id, account_currency_id, is_placeholder, archived_at
-         FROM accounts WHERE account_id = ? AND owner_person_id = ?
-         FOR UPDATE`,
-      [targetId, personId],
-    );
-    const target = targets[0];
-    if (!target) throw questionError("Target account not found.", "ACCOUNT_NOT_FOUND", undefined, 404);
-    if (targetId === Number(line.account_id)) {
-      throw questionError("Choose a final account different from the current suspense account.",
-        "QUESTION_TARGET_IS_SUSPENSE_ACCOUNT");
-    }
-    if (Boolean(target.is_placeholder) || target.archived_at != null) {
-      throw questionError("The target account must be active and postable.", "QUESTION_TARGET_NOT_POSTABLE");
-    }
-    if (Number(target.account_currency_id) !== Number(line.account_currency_id)) {
-      throw questionError("The target account must use the same currency as the suspense line so its proven amount and value remain unchanged.",
-        "QUESTION_TARGET_CURRENCY_MISMATCH", { lineItemId: id, targetAccountId: targetId });
-    }
-    await connection.query("UPDATE line_items SET account_id = ? WHERE line_item_id = ?", [targetId, id]);
-    await connection.query(
-      "UPDATE transactions SET UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
-      [Number(line.transaction_id), personId],
-    );
-    await replaceQuestionTag(connection, personId, id, accountingQuestionTagKeys.status, "resolved");
-    await replaceQuestionTag(connection, personId, id, accountingQuestionTagKeys.resolution, note);
-    await replaceQuestionTag(connection, personId, id, accountingQuestionTagKeys.resolvedAt, new Date().toISOString());
-    await replaceQuestionTag(connection, personId, id, accountingQuestionTagKeys.targetAccountId, String(targetId));
-    await validateTransaction(connection, Number(line.transaction_id), personId, { lock: true });
-    return { question: await getAccountingQuestion(connection, personId, id), changed: true };
+    return {
+      targetAccountId: targetId,
+      submittedCount: ids.length,
+      changedCount: results.filter((result) => result.changed).length,
+      unchangedCount: results.filter((result) => !result.changed).length,
+      questions: results.map((result) => result.question),
+    };
   });
 }

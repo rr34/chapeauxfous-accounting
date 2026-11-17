@@ -1,6 +1,7 @@
 import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
+import { descriptionFamily } from "./description-family";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
@@ -1986,6 +1987,13 @@ type AccountRegisterRow =
 type RegisterSortKey = "date" | "description" | "thisAccount" | "runningBalance"
   | "knownBalance" | "splitAccounts" | "otherAmounts";
 type RegisterSort = { key: RegisterSortKey; direction: "asc" | "desc" };
+type RegisterAccountingQuestion = { lineItemId: number };
+type SuspenseReviewGroup = {
+  id: string;
+  splitAccountLabel: string;
+  descriptionFamily: string;
+  rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
+};
 
 const registerSortCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 
@@ -1995,11 +2003,13 @@ function registerRowDescription(row: AccountRegisterRow) {
   return row.entry.description || "Untitled transaction";
 }
 
-function registerRowSplitAccounts(row: AccountRegisterRow, accountId: number) {
+function registerRowSplitAccounts(row: AccountRegisterRow, accountId: number,
+  accountNames: Map<number, string> | null = null) {
   if (row.kind === "assertion") return null;
   const names = row.kind === "import"
     ? row.row.otherLines.map((line) => line.accountFullName)
-    : row.entry.splits.filter((split) => split.accountId !== accountId).map((split) => split.accountName);
+    : row.entry.splits.filter((split) => split.accountId !== accountId)
+      .map((split) => accountNames?.get(split.accountId) ?? split.accountName);
   const uniqueNames = [...new Set(names)].sort((left, right) => registerSortCollator.compare(left, right));
   return uniqueNames.length === 0 ? null : uniqueNames.join("\u0000");
 }
@@ -2015,10 +2025,10 @@ function registerRowOtherAmounts(row: AccountRegisterRow, accountId: number) {
 }
 
 function registerRowSortValue(row: AccountRegisterRow, key: RegisterSortKey,
-  account: Account): string | bigint | number | null {
+  account: Account, accountNames: Map<number, string>): string | bigint | number | null {
   if (key === "date") return row.date;
   if (key === "description") return registerRowDescription(row);
-  if (key === "splitAccounts") return registerRowSplitAccounts(row, account.id);
+  if (key === "splitAccounts") return registerRowSplitAccounts(row, account.id, accountNames);
   if (key === "otherAmounts") return registerRowOtherAmounts(row, account.id);
   if (key === "thisAccount") {
     if (row.kind === "assertion") return null;
@@ -2044,9 +2054,9 @@ function compareRegisterSortValues(left: string | bigint | number | null,
 }
 
 function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow,
-  sort: RegisterSort, account: Account) {
-  const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account),
-    registerRowSortValue(right, sort.key, account), sort.direction);
+  sort: RegisterSort, account: Account, accountNames: Map<number, string>) {
+  const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account, accountNames),
+    registerRowSortValue(right, sort.key, account, accountNames), sort.direction);
   if (primary !== 0) return primary;
   if (sort.key !== "description") {
     const byDescription = registerSortCollator.compare(registerRowDescription(left), registerRowDescription(right));
@@ -2130,10 +2140,23 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [importReviews, setImportReviews] = useState<TransactionImportReview[]>([]);
   const [importReviewError, setImportReviewError] = useState("");
   const [importReviewBusy, setImportReviewBusy] = useState("");
+  const [suspenseReviewOpen, setSuspenseReviewOpen] = useState(false);
+  const [openSuspenseQuestions, setOpenSuspenseQuestions] = useState<RegisterAccountingQuestion[]>([]);
+  const [selectedSuspenseLineIds, setSelectedSuspenseLineIds] = useState<Set<number>>(() => new Set());
+  const [suspenseTargetAccountId, setSuspenseTargetAccountId] = useState("");
+  const [suspenseReviewBusy, setSuspenseReviewBusy] = useState("");
+  const [suspenseReviewError, setSuspenseReviewError] = useState("");
+  const [suspenseReviewNotice, setSuspenseReviewNotice] = useState("");
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
   const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
   const accountByFullName = useMemo(() => new Map(accounts.map((candidate) =>
     [fullAccountNames.get(candidate.id) ?? candidate.name, candidate])), [accounts, fullAccountNames]);
+  const suspenseTargetChoices = useMemo(() => accounts.filter((candidate) => !candidate.placeholder
+    && !candidate.archivedAt && candidate.currencyId === account.currencyId && candidate.id !== account.id)
+    .map((candidate) => ({ value: String(candidate.id),
+      label: fullAccountNames.get(candidate.id) ?? candidate.name, currencyCode: candidate.currencyCode }))
+    .sort((left, right) => registerSortCollator.compare(left.label, right.label)),
+  [account.currencyId, account.id, accounts, fullAccountNames]);
   const accountAssertions = useMemo(() => assertions.filter((assertion) => assertion.accountId === account.id), [account.id, assertions]);
   const projectedImportBalanceUnits = useMemo(() => (BigInt(account.balanceUnits)
     + importReviews.flatMap((review) => review.rows).filter((row) => row.decision === "include")
@@ -2180,15 +2203,136 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       projectedBalance += amount * (debitIncreasesAccount(account.type) ? 1n : -1n);
       return { ...row, projectedBalanceUnits: projectedBalance.toString() };
     }) as AccountRegisterRow[];
-    return withBalances.sort((left, right) => compareRegisterRows(left, right, registerSort, account));
-  }, [account, accountAssertions, entries, importReviews, registerSort]);
+    return withBalances.sort((left, right) =>
+      compareRegisterRows(left, right, registerSort, account, fullAccountNames));
+  }, [account, accountAssertions, entries, fullAccountNames, importReviews, registerSort]);
+
+  const openSuspenseQuestionIds = useMemo(() =>
+    new Set(openSuspenseQuestions.map((question) => question.lineItemId)), [openSuspenseQuestions]);
+  const suspenseReviewGroups = useMemo<SuspenseReviewGroup[]>(() => {
+    if (!suspenseReviewOpen) return [];
+    const groups = new Map<string, SuspenseReviewGroup>();
+    for (const row of registerRows) {
+      if (row.kind !== "entry" || !openSuspenseQuestionIds.has(row.entry.lineItemId)) continue;
+      const splitAccountLabel = (registerRowSplitAccounts(row, account.id, fullAccountNames) ?? "No split account")
+        .split("\u0000").join(" + ");
+      const family = descriptionFamily(registerRowDescription(row));
+      const id = `${splitAccountLabel.toLocaleLowerCase("en-US")}\u0000${family.key}`;
+      const group = groups.get(id) ?? { id, splitAccountLabel, descriptionFamily: family.label, rows: [] };
+      group.rows.push(row);
+      groups.set(id, group);
+    }
+    return [...groups.values()].sort((left, right) => {
+      const bySplit = registerSortCollator.compare(left.splitAccountLabel, right.splitAccountLabel);
+      return (registerSort.direction === "asc" ? bySplit : -bySplit)
+        || registerSortCollator.compare(left.descriptionFamily, right.descriptionFamily);
+    })
+      .map((group) => ({ ...group, rows: [...group.rows].sort((left, right) =>
+        right.date.localeCompare(left.date) || left.order - right.order) }));
+  }, [account.id, fullAccountNames, openSuspenseQuestionIds, registerRows,
+    registerSort.direction, suspenseReviewOpen]);
+  const displayedRegisterRows = suspenseReviewOpen
+    ? suspenseReviewGroups.flatMap((group) => group.rows) : registerRows;
+  const suspenseGroupStartByLineItemId = useMemo(() => new Map(suspenseReviewGroups
+    .filter((group) => group.rows.length > 0)
+    .map((group) => [group.rows[0].entry.lineItemId, group])), [suspenseReviewGroups]);
 
   const newRowsAtTop = registerSort.key === "date" && registerSort.direction === "desc";
 
   function changeRegisterSort(key: RegisterSortKey) {
+    if (suspenseReviewOpen && key !== "splitAccounts") {
+      setSuspenseReviewOpen(false);
+      setSelectedSuspenseLineIds(new Set());
+    }
     setRegisterSort((current) => current.key === key
       ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
       : { key, direction: "asc" });
+  }
+
+  async function loadOpenSuspenseQuestions() {
+    const questions: RegisterAccountingQuestion[] = [];
+    let cursor: string | null = null;
+    do {
+      const result: { questions: RegisterAccountingQuestion[]; nextCursor: string | null } = await api(
+        `/accounting-questions?status=open&accountId=${account.id}&limit=500${cursor
+          ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {}, token,
+      );
+      questions.push(...result.questions);
+      cursor = result.nextCursor;
+    } while (cursor);
+    return questions;
+  }
+
+  async function toggleSuspenseReview() {
+    if (suspenseReviewOpen) {
+      setSuspenseReviewOpen(false);
+      setSelectedSuspenseLineIds(new Set());
+      setSuspenseReviewError("");
+      setSuspenseReviewNotice("");
+      return;
+    }
+    setSuspenseReviewBusy("load"); setSuspenseReviewError(""); setSuspenseReviewNotice("");
+    try {
+      const questions = await loadOpenSuspenseQuestions();
+      setOpenSuspenseQuestions(questions);
+      setSelectedSuspenseLineIds(new Set());
+      setSuspenseTargetAccountId("");
+      setRegisterSort({ key: "splitAccounts", direction: "asc" });
+      setSuspenseReviewOpen(true);
+    } catch (nextError) {
+      setSuspenseReviewError(errorMessage(nextError));
+    } finally {
+      setSuspenseReviewBusy("");
+    }
+  }
+
+  function toggleSuspenseGroup(group: SuspenseReviewGroup) {
+    const ids = group.rows.map((row) => row.entry.lineItemId);
+    setSelectedSuspenseLineIds((current) => {
+      const next = new Set(current);
+      const allSelected = ids.every((lineItemId) => next.has(lineItemId));
+      for (const lineItemId of ids) {
+        if (allSelected) next.delete(lineItemId);
+        else next.add(lineItemId);
+      }
+      return next;
+    });
+  }
+
+  function toggleSuspenseLine(lineItemId: number) {
+    setSelectedSuspenseLineIds((current) => {
+      const next = new Set(current);
+      if (next.has(lineItemId)) next.delete(lineItemId);
+      else next.add(lineItemId);
+      return next;
+    });
+  }
+
+  async function assignSelectedSuspenseLines() {
+    const lineItemIds = [...selectedSuspenseLineIds].sort((left, right) => left - right);
+    const targetAccount = accounts.find((candidate) => String(candidate.id) === suspenseTargetAccountId);
+    if (!lineItemIds.length || !targetAccount) return;
+    const targetName = fullAccountNames.get(targetAccount.id) ?? targetAccount.name;
+    if (!window.confirm(`Assign ${lineItemIds.length} selected suspense line${lineItemIds.length === 1 ? "" : "s"} to ${targetName}? Only the suspense side of each balanced transaction will move.`)) return;
+    setSuspenseReviewBusy("assign"); setSuspenseReviewError(""); setSuspenseReviewNotice("");
+    try {
+      const result = await api<{ changedCount: number; unchangedCount: number }>(
+        "/accounting-questions/resolve-batch", {
+          method: "POST",
+          body: JSON.stringify({ lineItemIds, targetAccountId: targetAccount.id,
+            resolution: "User bulk-assigned this selection from the grouped suspense register." }),
+        }, token,
+      );
+      const resolvedIds = new Set(lineItemIds);
+      setOpenSuspenseQuestions((current) => current.filter((question) => !resolvedIds.has(question.lineItemId)));
+      setSelectedSuspenseLineIds(new Set());
+      setSuspenseReviewNotice(`${result.changedCount} suspense line${result.changedCount === 1 ? "" : "s"} assigned to ${targetName}${result.unchangedCount ? `; ${result.unchangedCount} already matched that assignment` : ""}.`);
+      await onChanged();
+    } catch (nextError) {
+      setSuspenseReviewError(errorMessage(nextError));
+    } finally {
+      setSuspenseReviewBusy("");
+    }
   }
 
   useEffect(() => {
@@ -2199,6 +2343,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     setReconcilingAssertionId(null); setReconciliationMessage(""); setReconciliationError("");
     setShowAccountEditor(false);
     setImportReviews([]); setImportReviewError(""); setImportReviewBusy("");
+    setSuspenseReviewOpen(false); setOpenSuspenseQuestions([]); setSelectedSuspenseLineIds(new Set());
+    setSuspenseTargetAccountId(""); setSuspenseReviewBusy(""); setSuspenseReviewError("");
+    setSuspenseReviewNotice("");
   }, [account.id]);
 
   useEffect(() => {
@@ -2417,6 +2564,33 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         onClick={() => void acceptImportReview(review)}>
         {importReviewBusy === review.importPlanId ? "Accepting…" : "Accept import settings"}</button>
     </div>)}
+    {account.suspense && <section className={`suspense-group-review ${suspenseReviewOpen ? "open" : ""}`}>
+      {!suspenseReviewOpen ? <><div><strong>Classify unresolved suspense lines in groups</strong>
+        <small>Group this register by split account, then description. Select a group and remove any exceptions before assigning it.</small></div>
+        <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+          onClick={() => void toggleSuspenseReview()}>
+          {suspenseReviewBusy === "load" ? "Loading questions…" : "Review groups"}</button></>
+      : <><div className="suspense-group-review-heading"><div><strong>Grouped by split account → similar description prefix</strong>
+        <small>{openSuspenseQuestions.length} unresolved line{openSuspenseQuestions.length === 1 ? "" : "s"} in {suspenseReviewGroups.length} group{suspenseReviewGroups.length === 1 ? "" : "s"}. Dates, reference IDs, and long number tokens are ignored for grouping; every original description remains visible below.</small></div>
+        <button type="button" className="link-button" disabled={Boolean(suspenseReviewBusy)}
+          onClick={() => void toggleSuspenseReview()}>Done</button></div>
+        <div className="suspense-bulk-actions">
+          <div><span>Destination account</span><AccountCombobox label="Destination account for selected suspense lines"
+            value={suspenseTargetAccountId} choices={suspenseTargetChoices}
+            onChange={setSuspenseTargetAccountId} placeholder="Type to filter accounts…" /></div>
+          <button type="button" className="primary"
+            disabled={selectedSuspenseLineIds.size === 0 || selectedSuspenseLineIds.size > 500
+              || !suspenseTargetAccountId || Boolean(suspenseReviewBusy)}
+            onClick={() => void assignSelectedSuspenseLines()}>
+            {suspenseReviewBusy === "assign" ? "Assigning…"
+              : `Assign ${selectedSuspenseLineIds.size || "selected"}`}</button>
+          <small>{selectedSuspenseLineIds.size > 500
+            ? "Choose no more than 500 lines at once."
+            : `${selectedSuspenseLineIds.size} selected`}</small>
+        </div></>}
+      {suspenseReviewNotice && <p className="suspense-review-notice" role="status">{suspenseReviewNotice}</p>}
+      {suspenseReviewError && <p className="error" role="alert">{suspenseReviewError}</p>}
+    </section>}
     {!account.placeholder && !account.archivedAt && <div className="register-known-balance-actions">
       <button type="button" className="link-button" onClick={addKnownBalanceForAnotherDate}>
         Add known balance for another date</button>
@@ -2436,8 +2610,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     {reconciliationMessage && <p className="register-reconciliation-message" aria-live="polite">{reconciliationMessage}</p>}
     {reconciliationError && <p className="error" aria-live="assertive">{reconciliationError}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
-      : !error && registerRows.length === 0 && !showNewTransaction
-      ? <p className="register-message">No posted transactions or known balances in this account.</p>
+      : !error && displayedRegisterRows.length === 0 && !showNewTransaction
+      ? <p className="register-message">{suspenseReviewOpen
+        ? "No open suspense questions remain in this account."
+        : "No posted transactions or known balances in this account."}</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
         <thead><tr>
           <RegisterSortHeader label="Date" sortKey="date" sort={registerSort} onSort={changeRegisterSort} />
@@ -2448,7 +2624,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Other accounts amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
         </tr></thead>
-        <tbody>{newRowsAtTop && newTransactionRows}{registerRows.map((row) => {
+        <tbody>{!suspenseReviewOpen && newRowsAtTop && newTransactionRows}{displayedRegisterRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
             return <Fragment key={`assertion-${assertion.id}`}><tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`}>
@@ -2542,6 +2718,21 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             .map((split) => [split.accountId, split.accountName])).values()];
           const counterpartLabel = counterpartNames.length === 0 ? "—"
             : counterpartNames.length === 1 ? counterpartNames[0] : "Split";
+          const suspenseGroup = suspenseGroupStartByLineItemId.get(entry.lineItemId);
+          const suspenseGroupLineIds = suspenseGroup?.rows.map((candidate) => candidate.entry.lineItemId) ?? [];
+          const suspenseGroupSelectedCount = suspenseGroupLineIds
+            .filter((lineItemId) => selectedSuspenseLineIds.has(lineItemId)).length;
+          const suspenseGroupHeader = suspenseGroup && <tr className="suspense-register-group-row">
+            <td colSpan={7}><div className="suspense-register-group-content"><div><div>
+              <strong>{suspenseGroup.splitAccountLabel}</strong>
+              <span>Similar description: {suspenseGroup.descriptionFamily}</span></div>
+              <small>{suspenseGroup.rows.length} unresolved line{suspenseGroup.rows.length === 1 ? "" : "s"}</small></div>
+              <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+                onClick={() => toggleSuspenseGroup(suspenseGroup)}>
+                {suspenseGroupSelectedCount === suspenseGroup.rows.length
+                  ? `Clear all ${suspenseGroup.rows.length}` : `Select all ${suspenseGroup.rows.length}`}</button>
+            </div></td>
+          </tr>;
           const expanded = view !== "basic";
           const isEndOfDateEntry = lastEntryByDate.get(entry.date) === entry.lineItemId;
           const showAddKnownBalance = isEndOfDateEntry && !assertionDates.has(entry.date)
@@ -2568,6 +2759,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
           if (selectedTransaction?.id === entry.transactionId) {
             return <Fragment key={entry.lineItemId}>
+              {suspenseGroupHeader}
               {newRowsAtTop && rowBalanceForm}
               <TransactionComposer key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
@@ -2583,6 +2775,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             </Fragment>;
           }
           return <Fragment key={entry.lineItemId}>
+            {suspenseGroupHeader}
             {newRowsAtTop && rowBalanceForm}
             <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""} ${view === "journal" ? "register-journal-header" : ""}`}
               tabIndex={0}
@@ -2596,8 +2789,14 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 aria-label={`Edit date for transaction ${entry.transactionId}`}
                 onClick={(event) => { event.stopPropagation(); void activateTransaction(entry, true); }}
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
-              <td className="register-description"><strong title={entry.description || "Untitled transaction"}>
-                {entry.description || "Untitled transaction"}</strong>
+              <td className="register-description"><div className="register-description-main">
+                {suspenseReviewOpen && <input type="checkbox"
+                  aria-label={`Select suspense line ${entry.lineItemId}: ${entry.description || "Untitled transaction"}`}
+                  checked={selectedSuspenseLineIds.has(entry.lineItemId)} disabled={Boolean(suspenseReviewBusy)}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={() => toggleSuspenseLine(entry.lineItemId)} />}
+                <strong title={entry.description || "Untitled transaction"}>
+                  {entry.description || "Untitled transaction"}</strong></div>
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}
                 {entry.evidenceFiles.map((evidence) => <button type="button" className="register-evidence-link"
                   key={evidence.id} onClick={(event) => {
@@ -2641,7 +2840,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               })}
             {!newRowsAtTop && rowBalanceForm}
           </Fragment>;
-        })}{!newRowsAtTop && newTransactionRows}</tbody>
+        })}{!suspenseReviewOpen && !newRowsAtTop && newTransactionRows}</tbody>
       </table></div>}
     {!showNewTransaction && !loading && !error && !account.placeholder && !account.archivedAt
       && <div className="register-actions"><button className="primary"

@@ -18,7 +18,9 @@ import { commitImportRestart, previewImportRestart } from "./import-restart.js";
 import { commitUserDeletion, getUserDataSummary, previewUserDeletion } from "./user-delete.js";
 import { TRANSACTION_IMPORT_HTTP_BODY_LIMIT } from "./transaction-import-limits.js";
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
-import { listAccountingQuestionsPage, resolveAccountingQuestion } from "./accounting-questions.js";
+import {
+  listAccountingQuestionsPage, resolveAccountingQuestion, resolveAccountingQuestions,
+} from "./accounting-questions.js";
 import {
   ARTIFACT_UPLOAD_MAX_CHUNK_BYTES, removeArtifactUpload, resolveArtifactUploadRoot,
 } from "./artifact-upload.js";
@@ -240,6 +242,12 @@ app.get("/api/accounting-questions", requireAuth, async (req, res, next) => {
     accountId: req.query.accountId ?? null, limit: req.query.limit ?? 100,
     afterLineItemId: req.query.cursor ?? null,
   })); } catch (error) { next(error); }
+});
+
+app.post("/api/accounting-questions/resolve-batch", requireAuth, async (req, res, next) => {
+  try { res.json(await resolveAccountingQuestions({ pool, personId: req.auth.personId,
+    lineItemIds: req.body?.lineItemIds, targetAccountId: req.body?.targetAccountId,
+    resolution: req.body?.resolution })); } catch (error) { next(error); }
 });
 
 app.post("/api/accounting-questions/:lineItemId/resolve", requireAuth, async (req, res, next) => {
