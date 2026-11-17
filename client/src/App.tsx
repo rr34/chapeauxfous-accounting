@@ -1983,6 +1983,95 @@ type AccountRegisterRow =
       row: TransactionImportReview["rows"][number]; amountUnits: string; projectedBalanceUnits: string }
   | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
 
+type RegisterSortKey = "date" | "description" | "thisAccount" | "runningBalance"
+  | "knownBalance" | "splitAccounts" | "otherAmounts";
+type RegisterSort = { key: RegisterSortKey; direction: "asc" | "desc" };
+
+const registerSortCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+
+function registerRowDescription(row: AccountRegisterRow) {
+  if (row.kind === "assertion") return "Known balance";
+  if (row.kind === "import") return row.row.description || "Imported transaction";
+  return row.entry.description || "Untitled transaction";
+}
+
+function registerRowSplitAccounts(row: AccountRegisterRow, accountId: number) {
+  if (row.kind === "assertion") return null;
+  const names = row.kind === "import"
+    ? row.row.otherLines.map((line) => line.accountFullName)
+    : row.entry.splits.filter((split) => split.accountId !== accountId).map((split) => split.accountName);
+  const uniqueNames = [...new Set(names)].sort((left, right) => registerSortCollator.compare(left, right));
+  return uniqueNames.length === 0 ? null : uniqueNames.join("\u0000");
+}
+
+function registerRowOtherAmounts(row: AccountRegisterRow, accountId: number) {
+  if (row.kind === "assertion") return null;
+  const values = row.kind === "import"
+    ? row.row.otherLines.map((line) => Number(line.amountDecimal))
+    : row.entry.splits.filter((split) => split.accountId !== accountId)
+      .map((split) => Number(unitsToDecimal(split.amountUnits, split.scale)));
+  if (values.length === 0 || values.some((value) => !Number.isFinite(value))) return null;
+  return values.reduce((total, value) => total + value, 0);
+}
+
+function registerRowSortValue(row: AccountRegisterRow, key: RegisterSortKey,
+  account: Account): string | bigint | number | null {
+  if (key === "date") return row.date;
+  if (key === "description") return registerRowDescription(row);
+  if (key === "splitAccounts") return registerRowSplitAccounts(row, account.id);
+  if (key === "otherAmounts") return registerRowOtherAmounts(row, account.id);
+  if (key === "thisAccount") {
+    if (row.kind === "assertion") return null;
+    const units = BigInt(row.kind === "entry" ? row.totalAmountUnits : row.amountUnits);
+    return units * (debitIncreasesAccount(account.type) ? 1n : -1n);
+  }
+  if (key === "knownBalance") return row.kind === "assertion" ? BigInt(row.assertion.knownBalanceUnits) : null;
+  return BigInt(row.kind === "assertion" ? row.assertion.calculatedBalanceUnits : row.projectedBalanceUnits);
+}
+
+function compareRegisterSortValues(left: string | bigint | number | null,
+  right: string | bigint | number | null,
+  direction: RegisterSort["direction"]) {
+  if (left == null || right == null) {
+    if (left == null && right == null) return 0;
+    return left == null ? 1 : -1;
+  }
+  const numeric = (typeof left === "bigint" && typeof right === "bigint")
+    || (typeof left === "number" && typeof right === "number");
+  const comparison = numeric ? left < right ? -1 : left > right ? 1 : 0
+    : registerSortCollator.compare(String(left), String(right));
+  return direction === "asc" ? comparison : -comparison;
+}
+
+function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow,
+  sort: RegisterSort, account: Account) {
+  const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account),
+    registerRowSortValue(right, sort.key, account), sort.direction);
+  if (primary !== 0) return primary;
+  if (sort.key !== "description") {
+    const byDescription = registerSortCollator.compare(registerRowDescription(left), registerRowDescription(right));
+    if (byDescription !== 0) return byDescription;
+  }
+  const byDate = right.date.localeCompare(left.date);
+  if (byDate !== 0) return byDate;
+  return left.order - right.order;
+}
+
+function RegisterSortHeader({ label, sortKey, sort, onSort }: {
+  label: string; sortKey: RegisterSortKey; sort: RegisterSort; onSort: (key: RegisterSortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const nextDirection = active && sort.direction === "asc" ? "descending" : "ascending";
+  return <th aria-sort={active ? sort.direction === "asc" ? "ascending" : "descending" : "none"}>
+    <button type="button" className="register-sort-button"
+      title={`Sort by ${label.toLocaleLowerCase()} ${nextDirection}`}
+      onClick={() => onSort(sortKey)}>
+      <span>{label}</span><span className={`register-sort-indicator ${active ? "active" : ""}`} aria-hidden="true">
+        {active ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</span>
+    </button>
+  </th>;
+}
+
 function formatRegisterDate(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return value;
@@ -2020,7 +2109,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   onTransactionCreated: () => Promise<void>; onChanged: () => Promise<void>;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
-  const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
+  const [registerSort, setRegisterSort] = useState<RegisterSort>({ key: "date", direction: "desc" });
   const [showNewTransaction, setShowNewTransaction] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionDetail | null>(null);
   const [selectedLineItemId, setSelectedLineItemId] = useState<number | null>(null);
@@ -2091,8 +2180,16 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       projectedBalance += amount * (debitIncreasesAccount(account.type) ? 1n : -1n);
       return { ...row, projectedBalanceUnits: projectedBalance.toString() };
     }) as AccountRegisterRow[];
-    return sortOrder === "recent" ? withBalances.reverse() : withBalances;
-  }, [account.type, account.scale, accountAssertions, entries, importReviews, sortOrder]);
+    return withBalances.sort((left, right) => compareRegisterRows(left, right, registerSort, account));
+  }, [account, accountAssertions, entries, importReviews, registerSort]);
+
+  const newRowsAtTop = registerSort.key === "date" && registerSort.direction === "desc";
+
+  function changeRegisterSort(key: RegisterSortKey) {
+    setRegisterSort((current) => current.key === key
+      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: "asc" });
+  }
 
   useEffect(() => {
     selectionRequest.current += 1;
@@ -2332,10 +2429,6 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
       <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
         onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
-      <button className="register-sort-control"
-        title={sortOrder === "recent" ? "Show oldest transactions first" : "Show recent transactions first"}
-        onClick={() => setSortOrder((current) => current === "recent" ? "oldest" : "recent")}>
-        {sortOrder === "recent" ? "Recent first ↓" : "Oldest first ↑"}</button>
     </div>
     {error && <p className="error">{error}</p>}
     {importReviewError && <p className="error" aria-live="assertive">{importReviewError}</p>}
@@ -2346,10 +2439,16 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       : !error && registerRows.length === 0 && !showNewTransaction
       ? <p className="register-message">No posted transactions or known balances in this account.</p>
       : !error && <div className="register-table-wrap"><table className="register-table">
-        <thead><tr><th>Date</th><th>Description</th><th>This account</th>
-          <th>Running balance</th><th>Known balance</th><th>Split account(s)</th>
-          <th>Other accounts amounts</th></tr></thead>
-        <tbody>{sortOrder === "recent" && newTransactionRows}{registerRows.map((row) => {
+        <thead><tr>
+          <RegisterSortHeader label="Date" sortKey="date" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Description" sortKey="description" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="This account" sortKey="thisAccount" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Running balance" sortKey="runningBalance" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Known balance" sortKey="knownBalance" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Other accounts amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
+        </tr></thead>
+        <tbody>{newRowsAtTop && newTransactionRows}{registerRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
             return <Fragment key={`assertion-${assertion.id}`}><tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`}>
@@ -2469,7 +2568,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
           if (selectedTransaction?.id === entry.transactionId) {
             return <Fragment key={entry.lineItemId}>
-              {sortOrder === "recent" && rowBalanceForm}
+              {newRowsAtTop && rowBalanceForm}
               <TransactionComposer key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
@@ -2480,11 +2579,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 onCancel={closeSelectedTransaction} onSaved={async () => {
                   await onTransactionCreated(); closeSelectedTransaction();
                 }} />
-              {sortOrder === "oldest" && rowBalanceForm}
+              {!newRowsAtTop && rowBalanceForm}
             </Fragment>;
           }
           return <Fragment key={entry.lineItemId}>
-            {sortOrder === "recent" && rowBalanceForm}
+            {newRowsAtTop && rowBalanceForm}
             <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""} ${view === "journal" ? "register-journal-header" : ""}`}
               tabIndex={0}
               onClick={() => void activateTransaction(entry)}
@@ -2540,9 +2639,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                     {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
                 </tr>;
               })}
-            {sortOrder === "oldest" && rowBalanceForm}
+            {!newRowsAtTop && rowBalanceForm}
           </Fragment>;
-        })}{sortOrder === "oldest" && newTransactionRows}</tbody>
+        })}{!newRowsAtTop && newTransactionRows}</tbody>
       </table></div>}
     {!showNewTransaction && !loading && !error && !account.placeholder && !account.archivedAt
       && <div className="register-actions"><button className="primary"
