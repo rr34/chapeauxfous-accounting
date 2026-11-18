@@ -1994,6 +1994,38 @@ type SuspenseReviewGroup = {
   descriptionFamily: string;
   rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
 };
+type PurchaseEvidenceJob = {
+  id: string;
+  sourceRef: string;
+  displayName: string;
+  status: "ready" | "processing" | "preview_ready" | "committed";
+  targetCount: number;
+  matchedCount: number;
+  unmatchedCount: number;
+  itemCount: number;
+  copiedPrompt: string;
+  updatedAt: string;
+  previewPurchases?: Array<{
+    targetLineItemId: number;
+    transactionDate: string;
+    transactionDescription: string | null;
+    merchant: string | null;
+    purchaseDate: string | null;
+    chargeAmountUnits: string;
+    taxAmountUnits: string;
+    sources: Array<{ kind: string; sourceRef: string; sourceRecordId: string | null; displayName: string | null }>;
+    items: Array<{
+      purchaseEvidenceItemId: number;
+      sourceItemId: string | null;
+      description: string;
+      quantityDecimal: string | null;
+      preTaxAmountUnits: string;
+      allocatedTaxAmountUnits: string;
+      finalAmountUnits: string;
+      resultingLineItemId: number | null;
+    }>;
+  }>;
+};
 
 const registerSortCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 
@@ -2147,6 +2179,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [suspenseReviewBusy, setSuspenseReviewBusy] = useState("");
   const [suspenseReviewError, setSuspenseReviewError] = useState("");
   const [suspenseReviewNotice, setSuspenseReviewNotice] = useState("");
+  const [purchaseEvidenceJobs, setPurchaseEvidenceJobs] = useState<PurchaseEvidenceJob[]>([]);
+  const [purchaseEvidenceCopiedJobId, setPurchaseEvidenceCopiedJobId] = useState<string | null>(null);
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
   const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
   const accountByFullName = useMemo(() => new Map(accounts.map((candidate) =>
@@ -2207,16 +2241,24 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       compareRegisterRows(left, right, registerSort, account, fullAccountNames));
   }, [account, accountAssertions, entries, fullAccountNames, importReviews, registerSort]);
 
+  const suspenseReviewRows = useMemo<Array<Extract<AccountRegisterRow, { kind: "entry" }>>>(() =>
+    entries.map((entry, order) => {
+      const totalAmountUnits = entry.debitUnits ?? (entry.creditUnits == null ? "0" : `-${entry.creditUnits}`);
+      return { kind: "entry", date: entry.date, order, entry, totalAmountUnits,
+        currentAccountLineCount: 1, reconciledLineCount: Number(entry.reconciliationState === "reconciled"),
+        reconciledThrough: entry.reconciledAt, projectedBalanceUnits: entry.runningBalanceUnits };
+    }), [entries]);
+
   const openSuspenseQuestionIds = useMemo(() =>
     new Set(openSuspenseQuestions.map((question) => question.lineItemId)), [openSuspenseQuestions]);
   const suspenseReviewGroups = useMemo<SuspenseReviewGroup[]>(() => {
     if (!suspenseReviewOpen) return [];
     const groups = new Map<string, SuspenseReviewGroup>();
-    for (const row of registerRows) {
-      if (row.kind !== "entry" || !openSuspenseQuestionIds.has(row.entry.lineItemId)) continue;
+    for (const row of suspenseReviewRows) {
+      if (!openSuspenseQuestionIds.has(row.entry.lineItemId)) continue;
       const splitAccountLabel = (registerRowSplitAccounts(row, account.id, fullAccountNames) ?? "No split account")
         .split("\u0000").join(" + ");
-      const family = descriptionFamily(registerRowDescription(row));
+      const family = descriptionFamily(row.entry.memo || registerRowDescription(row));
       const id = `${splitAccountLabel.toLocaleLowerCase("en-US")}\u0000${family.key}`;
       const group = groups.get(id) ?? { id, splitAccountLabel, descriptionFamily: family.label, rows: [] };
       group.rows.push(row);
@@ -2229,7 +2271,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     })
       .map((group) => ({ ...group, rows: [...group.rows].sort((left, right) =>
         right.date.localeCompare(left.date) || left.order - right.order) }));
-  }, [account.id, fullAccountNames, openSuspenseQuestionIds, registerRows,
+  }, [account.id, fullAccountNames, openSuspenseQuestionIds, suspenseReviewRows,
     registerSort.direction, suspenseReviewOpen]);
   const displayedRegisterRows = suspenseReviewOpen
     ? suspenseReviewGroups.flatMap((group) => group.rows) : registerRows;
@@ -2273,8 +2315,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     }
     setSuspenseReviewBusy("load"); setSuspenseReviewError(""); setSuspenseReviewNotice("");
     try {
-      const questions = await loadOpenSuspenseQuestions();
+      const [questions, jobsResult] = await Promise.all([
+        loadOpenSuspenseQuestions(),
+        api<{ jobs: PurchaseEvidenceJob[] }>(`/accounts/${account.id}/purchase-evidence-jobs?limit=25`, {}, token),
+      ]);
       setOpenSuspenseQuestions(questions);
+      setPurchaseEvidenceJobs(jobsResult.jobs);
       setSelectedSuspenseLineIds(new Set());
       setSuspenseTargetAccountId("");
       setRegisterSort({ key: "splitAccounts", direction: "asc" });
@@ -2335,6 +2381,82 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     }
   }
 
+  async function createPurchaseEvidenceForSelection() {
+    const lineItemIds = [...selectedSuspenseLineIds].sort((left, right) => left - right);
+    if (!lineItemIds.length) return;
+    setSuspenseReviewBusy("evidence-create"); setSuspenseReviewError(""); setSuspenseReviewNotice("");
+    try {
+      const result = await api<{ job: PurchaseEvidenceJob }>("/purchase-evidence-jobs", {
+        method: "POST", body: JSON.stringify({ lineItemIds }),
+      }, token);
+      setPurchaseEvidenceJobs((current) => [result.job, ...current]);
+      setPurchaseEvidenceCopiedJobId(null);
+      setSuspenseReviewNotice(`Purchase-evidence job saved here for ${result.job.targetCount} selected charge${result.job.targetCount === 1 ? "" : "s"}. Copy its handoff and paste it with selected receipt emails or attached exports.`);
+    } catch (nextError) {
+      setSuspenseReviewError(errorMessage(nextError));
+    } finally { setSuspenseReviewBusy(""); }
+  }
+
+  const activePurchaseEvidenceJobs = purchaseEvidenceJobs.filter((job) => job.status !== "committed");
+  const displayedPurchaseEvidenceJobs = activePurchaseEvidenceJobs.length
+    ? activePurchaseEvidenceJobs : purchaseEvidenceJobs.slice(0, 1);
+
+  async function refreshPurchaseEvidenceJob(job: PurchaseEvidenceJob) {
+    setSuspenseReviewBusy("evidence-refresh"); setSuspenseReviewError("");
+    try {
+      const result = await api<{ job: PurchaseEvidenceJob }>(
+        `/purchase-evidence-jobs/${job.id}`, {}, token);
+      setPurchaseEvidenceJobs((current) => [result.job,
+        ...current.filter((job) => job.id !== result.job.id)]);
+      setSuspenseReviewNotice(`Purchase evidence refreshed: ${result.job.matchedCount} matched, ${result.job.unmatchedCount} unmatched, ${result.job.itemCount} item line${result.job.itemCount === 1 ? "" : "s"}.`);
+    } catch (nextError) { setSuspenseReviewError(errorMessage(nextError)); }
+    finally { setSuspenseReviewBusy(""); }
+  }
+
+  async function copyPurchaseEvidenceHandoff(job: PurchaseEvidenceJob) {
+    try {
+      await navigator.clipboard.writeText(job.copiedPrompt);
+      setPurchaseEvidenceCopiedJobId(job.id);
+      setSuspenseReviewNotice("Agent handoff copied. Paste it into your agent with selected receipt emails, an Amazon export, saved order-history page, receipt archive, or other purchase evidence.");
+    } catch {
+      setPurchaseEvidenceCopiedJobId(null);
+      setSuspenseReviewError(`Clipboard access was blocked. Copy ${job.sourceRef} manually.`);
+    }
+  }
+
+  async function commitPurchaseEvidence(job: PurchaseEvidenceJob) {
+    if (job.status !== "preview_ready"
+      || !window.confirm(`Split ${job.matchedCount} matched suspense charge${job.matchedCount === 1 ? "" : "s"} into ${job.itemCount} tax-inclusive purchase line${job.itemCount === 1 ? "" : "s"}? Unmatched charges will remain unchanged.`)) return;
+    setSuspenseReviewBusy("evidence-commit"); setSuspenseReviewError("");
+    try {
+      const result = await api<{ job: PurchaseEvidenceJob; resultingItemCount: number }>(
+        `/purchase-evidence-jobs/${job.id}/commit`, { method: "POST", body: "{}" }, token);
+      setPurchaseEvidenceJobs((current) => [result.job,
+        ...current.filter((job) => job.id !== result.job.id)]);
+      setOpenSuspenseQuestions(await loadOpenSuspenseQuestions());
+      setSelectedSuspenseLineIds(new Set());
+      setSuspenseReviewNotice(`${result.job.matchedCount} matched charge${result.job.matchedCount === 1 ? "" : "s"} split into ${result.resultingItemCount} tax-inclusive purchase lines. Each line remains in this suspense register as its own classification question.`);
+      await onChanged();
+    } catch (nextError) { setSuspenseReviewError(errorMessage(nextError)); }
+    finally { setSuspenseReviewBusy(""); }
+  }
+
+  async function restartPurchaseEvidence(job: PurchaseEvidenceJob) {
+    if (job.status === "committed" || !window.confirm(
+      "Restart this purchase-evidence job? Accounting will retain the exact selected suspense rows but permanently remove the current derived artifact and pending receipt-item preview.",
+    )) return;
+    setSuspenseReviewBusy("evidence-restart"); setSuspenseReviewError("");
+    try {
+      const result = await api<{ job: PurchaseEvidenceJob }>(
+        `/purchase-evidence-jobs/${job.id}/restart`, { method: "POST", body: "{}" }, token);
+      setPurchaseEvidenceJobs((current) => [result.job,
+        ...current.filter((candidate) => candidate.id !== result.job.id)]);
+      setPurchaseEvidenceCopiedJobId(null);
+      setSuspenseReviewNotice("The derived purchase evidence was removed. The same selected suspense rows remain saved and the agent handoff is ready to run again.");
+    } catch (nextError) { setSuspenseReviewError(errorMessage(nextError)); }
+    finally { setSuspenseReviewBusy(""); }
+  }
+
   useEffect(() => {
     selectionRequest.current += 1;
     setSelectedTransaction(null); setSelectedLineItemId(null); setSelectingTransactionId(null); setSelectionError("");
@@ -2345,7 +2467,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     setImportReviews([]); setImportReviewError(""); setImportReviewBusy("");
     setSuspenseReviewOpen(false); setOpenSuspenseQuestions([]); setSelectedSuspenseLineIds(new Set());
     setSuspenseTargetAccountId(""); setSuspenseReviewBusy(""); setSuspenseReviewError("");
-    setSuspenseReviewNotice("");
+    setSuspenseReviewNotice(""); setPurchaseEvidenceJobs([]); setPurchaseEvidenceCopiedJobId(null);
   }, [account.id]);
 
   useEffect(() => {
@@ -2587,7 +2709,58 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <small>{selectedSuspenseLineIds.size > 500
             ? "Choose no more than 500 lines at once."
             : `${selectedSuspenseLineIds.size} selected`}</small>
-        </div></>}
+        </div>
+        <div className="purchase-evidence-actions">
+          <div><strong>Need receipts before classifying?</strong>
+            <small>Save the exact selection as an Accounting job, then let the agent match connected receipt emails or attached exports. Accounting checks the amount, allocates receipt tax, and prepares item-level suspense splits.</small></div>
+          <button type="button" className="secondary"
+            disabled={selectedSuspenseLineIds.size === 0 || selectedSuspenseLineIds.size > 500
+              || Boolean(suspenseReviewBusy)} onClick={() => void createPurchaseEvidenceForSelection()}>
+            {suspenseReviewBusy === "evidence-create" ? "Saving evidence job…"
+              : `Collect evidence for ${selectedSuspenseLineIds.size || "selected"}`}</button>
+        </div>
+        {displayedPurchaseEvidenceJobs.map((job) => <div className="purchase-evidence-job" key={job.id}>
+          <div><strong>Purchase evidence · {job.status.replaceAll("_", " ")}</strong>
+            <small>{job.targetCount} selected · {job.matchedCount} matched · {job.unmatchedCount} unmatched · {job.itemCount} item lines</small>
+            <code>{job.sourceRef}</code></div>
+          {job.previewPurchases && job.previewPurchases.length > 0 && <details className="purchase-evidence-preview" open>
+            <summary>Review {job.itemCount} proposed item line{job.itemCount === 1 ? "" : "s"}</summary>
+            <div>{job.previewPurchases.map((purchase) => <article key={purchase.targetLineItemId}>
+              <header><strong>{purchase.merchant || purchase.transactionDescription || "Purchase"}</strong>
+                <span>{purchase.purchaseDate || purchase.transactionDate} · charge {unitsToDecimal(purchase.chargeAmountUnits, account.scale)} {account.currencyCode}</span></header>
+              {purchase.items.map((item) => <div className="purchase-evidence-preview-item"
+                key={item.purchaseEvidenceItemId}>
+                <span>{item.description}{item.quantityDecimal ? ` · qty ${item.quantityDecimal}` : ""}</span>
+                <span>pre-tax {unitsToDecimal(item.preTaxAmountUnits, account.scale)}
+                  {BigInt(item.allocatedTaxAmountUnits) !== 0n
+                    ? ` + tax ${unitsToDecimal(item.allocatedTaxAmountUnits, account.scale)}` : ""}
+                  {` = ${unitsToDecimal(item.finalAmountUnits, account.scale)} ${account.currencyCode}`}</span>
+              </div>)}
+              <small>Evidence: {purchase.sources.map((source) => source.displayName
+                || source.sourceRecordId || source.sourceRef).join(" · ")}</small>
+            </article>)}</div>
+          </details>}
+          <div className="purchase-evidence-job-buttons">
+            <button type="button" className={`primary handoff-copy${purchaseEvidenceCopiedJobId === job.id ? " copied" : ""}`}
+              disabled={Boolean(suspenseReviewBusy) || job.status === "committed"}
+              onClick={() => void copyPurchaseEvidenceHandoff(job)}>
+              {purchaseEvidenceCopiedJobId === job.id ? "✓ Handoff copied" : "Copy agent handoff"}</button>
+            <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+              onClick={() => void refreshPurchaseEvidenceJob(job)}>
+              {suspenseReviewBusy === "evidence-refresh" ? "Refreshing…"
+                : job.status === "preview_ready" && !job.previewPurchases ? "Load preview" : "Refresh status"}</button>
+            {job.status === "preview_ready" && <button type="button" className="primary"
+              disabled={Boolean(suspenseReviewBusy) || !job.previewPurchases}
+              title={!job.previewPurchases ? "Load and review the proposed item lines first." : undefined}
+              onClick={() => void commitPurchaseEvidence(job)}>
+              {suspenseReviewBusy === "evidence-commit" ? "Splitting charges…" : "Apply item splits"}</button>}
+            {job.status !== "ready" && job.status !== "committed" && <button type="button"
+              className="link-button" disabled={Boolean(suspenseReviewBusy)}
+              onClick={() => void restartPurchaseEvidence(job)}>
+              {suspenseReviewBusy === "evidence-restart" ? "Restarting…" : "Restart evidence collection"}</button>}
+          </div>
+        </div>)}
+        </>}
       {suspenseReviewNotice && <p className="suspense-review-notice" role="status">{suspenseReviewNotice}</p>}
       {suspenseReviewError && <p className="error" role="alert">{suspenseReviewError}</p>}
     </section>}
@@ -2791,12 +2964,21 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
               <td className="register-description"><div className="register-description-main">
                 {suspenseReviewOpen && <input type="checkbox"
-                  aria-label={`Select suspense line ${entry.lineItemId}: ${entry.description || "Untitled transaction"}`}
+                  aria-label={`Select suspense line ${entry.lineItemId}: ${entry.memo || entry.description || "Untitled transaction"}`}
                   checked={selectedSuspenseLineIds.has(entry.lineItemId)} disabled={Boolean(suspenseReviewBusy)}
                   onClick={(event) => event.stopPropagation()}
                   onChange={() => toggleSuspenseLine(entry.lineItemId)} />}
-                <strong title={entry.description || "Untitled transaction"}>
-                  {entry.description || "Untitled transaction"}</strong></div>
+                <strong title={entry.memo || entry.description || "Untitled transaction"}>
+                  {suspenseReviewOpen && entry.memo ? entry.memo : entry.description || "Untitled transaction"}</strong></div>
+                {suspenseReviewOpen && entry.memo && entry.description && <small>Original charge: {entry.description}</small>}
+                {entry.purchaseEvidence && <small className="register-purchase-evidence">
+                  Receipt evidence · pre-tax {unitsToDecimal(entry.purchaseEvidence.preTaxAmountUnits, account.scale)}
+                  {BigInt(entry.purchaseEvidence.allocatedTaxAmountUnits) !== 0n
+                    ? ` + tax ${unitsToDecimal(entry.purchaseEvidence.allocatedTaxAmountUnits, account.scale)}` : ""}
+                  {entry.purchaseEvidence.merchant ? ` · ${entry.purchaseEvidence.merchant}` : ""}
+                  {entry.purchaseEvidence.sourceNames.length
+                    ? ` · ${entry.purchaseEvidence.sourceNames.join(" + ")}` : ""}
+                </small>}
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}
                 {entry.evidenceFiles.map((evidence) => <button type="button" className="register-evidence-link"
                   key={evidence.id} onClick={(event) => {

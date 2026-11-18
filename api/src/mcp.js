@@ -8,6 +8,7 @@ import {
   mountArtifactUploadRoutes,
   parseCanonicalStatementArtifact,
   readCompleteArtifact,
+  removeArtifactUpload,
 } from "./artifact-upload.js";
 import {
   getBalanceAssertion,
@@ -69,6 +70,7 @@ import {
   makeRetryDescriptor,
   MCP_CONTRACT_VERSION,
   MCP_SERVER_VERSION,
+  purchaseEvidenceJobArtifactUpload,
   referenceRateArtifactUpload,
   referenceRateSchema,
   retryDescriptorSchema,
@@ -95,6 +97,7 @@ import {
   currencyObjectDescription,
   evidenceFileObjectDescription,
   lineItemObjectDescription,
+  purchaseEvidenceJobObjectDescription,
   statementImportJobObjectDescription,
   transactionImportJobObjectDescription,
   transactionObjectDescription,
@@ -156,6 +159,14 @@ import {
   sendEvidenceFileContent,
   startStatementImportJob,
 } from "./statement-import-jobs.js";
+import {
+  commitPurchaseEvidenceJob,
+  listPurchaseEvidenceJobObjectsPage,
+  purchaseEvidenceCanonicalJsonSchema,
+  restartPurchaseEvidenceJob,
+  startPurchaseEvidenceJob,
+  submitPurchaseEvidencePreview,
+} from "./purchase-evidence-jobs.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -594,6 +605,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     previewSingleAccountStatementImport: services.previewSingleAccountStatementImport
       ?? previewSingleAccountStatementImport,
     readCompleteArtifact: services.readCompleteArtifact ?? readCompleteArtifact,
+    bindArtifactToImportJob: services.bindArtifactToImportJob ?? bindArtifactToImportJob,
+    removeArtifactUpload: services.removeArtifactUpload ?? removeArtifactUpload,
     reconcileAccountThroughDate: services.reconcileAccountThroughDate ?? reconcileAccountThroughDate,
     previewTransactionImport: services.previewTransactionImport ?? previewTransactionImport,
     getTransactionImportPlan: services.getTransactionImportPlan ?? getTransactionImportPlan,
@@ -612,6 +625,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     listStatementImportJobObjectsPage: services.listStatementImportJobObjectsPage
       ?? listStatementImportJobObjectsPage,
     listEvidenceFileObjectsPage: services.listEvidenceFileObjectsPage ?? listEvidenceFileObjectsPage,
+    listPurchaseEvidenceJobObjectsPage: services.listPurchaseEvidenceJobObjectsPage
+      ?? listPurchaseEvidenceJobObjectsPage,
+    startPurchaseEvidenceJob: services.startPurchaseEvidenceJob ?? startPurchaseEvidenceJob,
+    submitPurchaseEvidencePreview: services.submitPurchaseEvidencePreview ?? submitPurchaseEvidencePreview,
+    commitPurchaseEvidenceJob: services.commitPurchaseEvidenceJob ?? commitPurchaseEvidenceJob,
+    restartPurchaseEvidenceJob: services.restartPurchaseEvidenceJob ?? restartPurchaseEvidenceJob,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
@@ -672,6 +691,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       mimeType: "application/schema+json",
     }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
       text: JSON.stringify(singleAccountStatementImportCanonicalJsonSchema) }] }));
+
+  server.registerResource("accounting-purchase-evidence-canonical-schema",
+    purchaseEvidenceCanonicalJsonSchema.$id, {
+      title: "Canonical purchase evidence JSON Schema",
+      description: "The exact provider-neutral receipt, source-reference, item, and pre-tax amount schema for purchase-evidence JSON Lines artifacts.",
+      mimeType: "application/schema+json",
+    }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
+      text: JSON.stringify(purchaseEvidenceCanonicalJsonSchema) }] }));
 
   server.registerResource("accounting-currencies-active", "accounting://context/currencies/active", {
     title: "Accessible accounting units",
@@ -1182,6 +1209,58 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const evidenceFileObjectOutput = successOutputSchema({
     objects: z.array(evidenceFileObjectSchema), resultMetadata: resultMetadataSchema,
+  });
+  const purchaseEvidenceJobSchema = z.object({
+    objectType: z.literal("accounting.purchase_evidence_job"), id: z.string().uuid(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+    status: z.enum(["ready", "processing", "preview_ready", "committed"]),
+    suspenseAccount: z.object({
+      objectType: z.literal("accounting.account"), id: z.number().int().positive(),
+      sourceRef: z.string().min(1), displayName: z.string().min(1),
+      objectRole: z.literal("designated_suspense_account"),
+      currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
+      scale: z.number().int().min(0).max(18),
+    }),
+    targetCount: z.number().int().positive(), matchedCount: z.number().int().nonnegative(),
+    unmatchedCount: z.number().int().nonnegative(), itemCount: z.number().int().nonnegative(),
+    canonicalArtifactId: z.string().uuid().nullable(), createdAt: z.string().min(1),
+    updatedAt: z.string().min(1), committedAt: z.string().nullable(), copiedPrompt: z.string().min(1),
+  });
+  const purchaseEvidenceJobObjectOutput = successOutputSchema({
+    objects: z.array(purchaseEvidenceJobSchema), resultMetadata: resultMetadataSchema,
+  });
+  const purchaseEvidenceTargetSchema = z.object({
+    objectType: z.literal("accounting.line_item"), id: z.number().int().positive(),
+    sourceRef: z.string().min(1), displayName: z.string().min(1),
+    objectRole: z.literal("purchase_evidence_target"),
+    lineItemId: z.number().int().positive(), transactionId: z.number().int().positive(),
+    transactionDate: z.string().min(1), description: z.string().nullable(), amountUnits: z.string().regex(/^-?\d+$/),
+    amountDecimal: z.string().min(1), absoluteChargeDecimal: z.string().min(1),
+    currencyCode: z.string().min(1), scale: z.number().int().min(0).max(18),
+    counterpartAccounts: z.array(z.string().min(1)),
+  });
+  const purchaseEvidenceJobStartOutput = successOutputSchema({
+    job: purchaseEvidenceJobSchema, targets: z.array(purchaseEvidenceTargetSchema).min(1),
+    canonicalArtifactSchema: z.json(), artifactUpload: z.json(),
+    nextTool: z.literal("submit_purchase_evidence_job_artifact"), rules: z.array(z.string().min(1)),
+    effectReceipt: effectReceiptSchema,
+  });
+  const confirmationActionSchema = z.object({
+    type: z.literal("request_user_confirmation"), instruction: z.string().min(1),
+    onApproval: z.object({ tool: z.literal("commit_purchase_evidence_job"),
+      arguments: z.object({ purchase_evidence_job_id: z.string().uuid() }) }),
+  });
+  const purchaseEvidencePreviewOutput = successOutputSchema({
+    job: purchaseEvidenceJobSchema, nextAction: confirmationActionSchema,
+    effectReceipt: effectReceiptSchema,
+  }, ["ready"]);
+  const purchaseEvidenceCommitOutput = successOutputSchema({
+    job: purchaseEvidenceJobSchema, changed: z.boolean(), matchedChargeCount: z.number().int().nonnegative(),
+    createdLineCount: z.number().int().nonnegative(), resultingItemCount: z.number().int().nonnegative(),
+    completionNote: z.string().min(1), effectReceipt: effectReceiptSchema,
+  });
+  const purchaseEvidenceRestartOutput = successOutputSchema({
+    job: purchaseEvidenceJobSchema, completionNote: z.string().min(1), effectReceipt: effectReceiptSchema,
   });
   const referenceRateListOutput = successOutputSchema({
     referenceRates: z.array(referenceRateSchema), resultMetadata: resultMetadataSchema,
@@ -2431,6 +2510,178 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           { type: "transaction", id: resolved.question.transactionId },
           { type: "account", id: target_account_id },
         ]),
+    };
+  }));
+
+  const purchaseEvidenceRecordSchema = z.object({
+    target_line_item_id: z.number().int().positive(),
+    sources: z.array(z.object({
+      kind: z.enum(["email", "amazon_export", "receipt", "file", "other"]),
+      source_ref: z.string().trim().min(1).max(2048),
+      source_record_id: z.string().trim().max(255).nullable(),
+      display_name: z.string().trim().max(1024).nullable(),
+    }).strict()).min(1).max(20),
+    merchant: z.string().trim().max(1024).nullable(),
+    purchase_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    charge_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+    tax_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+    items: z.array(z.object({
+      source_item_id: z.string().trim().max(255).nullable(),
+      description: z.string().trim().min(1).max(16000),
+      quantity_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/).nullable(),
+      pre_tax_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+    }).strict()).min(1).max(500),
+  }).strict();
+
+  registerTool("list_purchase_evidence_job_objects", {
+    title: "Resolve purchase evidence job",
+    description: "Canonical owner-scoped resolver for one copied accounting://purchase-evidence-jobs/{id} reference. Supply exactly that UUID. The job already owns the complete selected suspense-posting set; do not reconstruct it from prose or choose substitute transactions.",
+    inputSchema: z.object({
+      purchase_evidence_job_id: z.string().trim().uuid(),
+    }).strict(),
+    outputSchema: purchaseEvidenceJobObjectOutput,
+    annotations: readOnly,
+    _meta: {
+      ...toolMetadata("accounting.transactions", { objectInputs: [{
+        path: "/purchase_evidence_job_id", objectType: "accounting.purchase_evidence_job",
+        value: "id", allowUnbound: true,
+      }] }),
+      "agent-slayer/objects": purchaseEvidenceJobObjectDescription,
+    },
+  }, async ({ purchase_evidence_job_id }) => safeToolResult(async () => {
+    const page = await accounting.listPurchaseEvidenceJobObjectsPage(pool, personId, {
+      purchaseEvidenceJobId: purchase_evidence_job_id, limit: 1,
+    });
+    return { objects: page.objects, resultMetadata: {
+      ...pageMetadata(page.objects, null, "purchase-evidence-jobs"),
+      sourceRefs: page.objects.map((object) => object.sourceRef),
+    } };
+  }));
+
+  registerTool("start_purchase_evidence_job", {
+    title: "Start purchase evidence job",
+    description: "Start the exact copied purchase-evidence job and return every selected charge target, including its stable line-item ID, date, original description, exact signed amount, absolute charge magnitude, currency, and counterpart accounts. Search connected receipt emails and any source files supplied by the user. Match conservatively, primarily by exact charge amount with supporting dates, order IDs, payment instrument, and merchant facts. Return only matched records in one canonical JSON Lines artifact; unmatched targets stay unchanged. Do not guess final expense accounts.",
+    inputSchema: { purchase_evidence_job_id: z.string().trim().uuid() },
+    outputSchema: purchaseEvidenceJobStartOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["list_purchase_evidence_job_objects"],
+      attachmentHints: [
+        "Search connected receipt emails and inspect user-supplied Amazon exports, saved order-history pages, receipt archives, and receipt files.",
+        "Materialize all supported matches as one canonical JSON Lines artifact; do not copy a large receipt batch through model prose.",
+      ],
+      objectInputs: [{ path: "/purchase_evidence_job_id",
+        objectType: "accounting.purchase_evidence_job", value: "id" }],
+    }),
+  }, async ({ purchase_evidence_job_id }) => safeToolResult(async () => {
+    const started = await accounting.startPurchaseEvidenceJob({ pool, personId,
+      purchaseEvidenceJobId: purchase_evidence_job_id });
+    return {
+      ...started,
+      canonicalArtifactSchema: purchaseEvidenceCanonicalJsonSchema,
+      artifactUpload: purchaseEvidenceJobArtifactUpload,
+      nextTool: "submit_purchase_evidence_job_artifact",
+      rules: [
+        "A source amount is evidence, not a category. Do not choose or infer final expense accounts.",
+        "Each record targets one exact selected lineItemId and its positive charge magnitude must match exactly.",
+        "Preserve item amounts before sales tax and the receipt-level tax separately. Accounting performs deterministic native-unit allocation.",
+        "Pre-tax item amounts plus receipt tax must equal the final charge. Do not hide shipping, discounts, tips, fees, or unexplained residuals inside sales tax.",
+        "Omit unsupported matches from the artifact; Accounting leaves those selected charges unchanged.",
+      ],
+      effectReceipt: effectReceipt("start_purchase_evidence_job", { purchase_evidence_job_id }, "updated", [
+        { type: "purchase_evidence_job", id: purchase_evidence_job_id },
+      ]),
+    };
+  }));
+
+  registerTool("submit_purchase_evidence_job_artifact", {
+    title: "Submit purchase evidence preview",
+    description: "Consume one complete canonical JSON Lines artifact for an already-started purchase-evidence job. Accounting validates the exact selected targets, exact charge magnitudes, item subtotal plus receipt tax, and source references; it allocates tax proportionally in integer native units using deterministic largest remainders. A successful result saves a pending preview only. Present nextAction.instruction literally and do not commit in the same request.",
+    inputSchema: {
+      purchase_evidence_job_id: z.string().trim().uuid(),
+      artifact_id: z.string().trim().uuid(),
+    },
+    outputSchema: purchaseEvidencePreviewOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["start_purchase_evidence_job"],
+      artifactUpload: purchaseEvidenceJobArtifactUpload,
+      objectInputs: [{ path: "/purchase_evidence_job_id",
+        objectType: "accounting.purchase_evidence_job", value: "id" }],
+    }),
+  }, async ({ purchase_evidence_job_id, artifact_id }) => safeWorkflowResult(async () => {
+    const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
+    const parsedRows = parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type);
+    const parsed = z.array(purchaseEvidenceRecordSchema).min(1).max(500).safeParse(parsedRows);
+    if (!parsed.success) throw Object.assign(new Error(
+      "The purchase-evidence artifact does not match Accounting's canonical record schema."), {
+      code: "INVALID_PURCHASE_EVIDENCE_ARTIFACT", details: parsed.error.issues,
+    });
+    await accounting.bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
+      importJobId: purchase_evidence_job_id });
+    const job = await accounting.submitPurchaseEvidencePreview({ pool, personId,
+      purchaseEvidenceJobId: purchase_evidence_job_id, canonicalArtifactId: artifact_id, records: parsed.data });
+    const instruction = `Apply ${job.matchedCount} matched receipt charge${job.matchedCount === 1 ? "" : "s"} as ${job.itemCount} tax-inclusive item split${job.itemCount === 1 ? "" : "s"} in ${job.suspenseAccount.displayName}, while leaving ${job.unmatchedCount} unmatched selected charge${job.unmatchedCount === 1 ? "" : "s"} unchanged?`;
+    return {
+      status: "ready", job,
+      nextAction: { type: "request_user_confirmation", instruction,
+        onApproval: { tool: "commit_purchase_evidence_job",
+          arguments: { purchase_evidence_job_id } } },
+      effectReceipt: effectReceipt("submit_purchase_evidence_job_artifact",
+        { purchase_evidence_job_id, artifact_id }, "created", [
+          { type: "purchase_evidence_job", id: purchase_evidence_job_id },
+        ]),
+    };
+  }, { retryTool: "submit_purchase_evidence_job_artifact", preserveEntireBatch: true }));
+
+  registerTool("commit_purchase_evidence_job", {
+    title: "Apply purchase evidence item splits",
+    description: "Commit the exact prepared purchase-evidence preview after the user approves its provider-written confirmation. Accounting retains each original transaction, replaces only its matched suspense posting with tax-inclusive item postings that sum exactly to the original amount and value, opens one classification question per item, and leaves unmatched selected charges unchanged.",
+    inputSchema: { purchase_evidence_job_id: z.string().trim().uuid() },
+    outputSchema: purchaseEvidenceCommitOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["submit_purchase_evidence_job_artifact"],
+      objectInputs: [{ path: "/purchase_evidence_job_id",
+        objectType: "accounting.purchase_evidence_job", value: "id" }],
+    }),
+  }, async ({ purchase_evidence_job_id }) => safeToolResult(async () => {
+    const committed = await accounting.commitPurchaseEvidenceJob({ pool, personId,
+      purchaseEvidenceJobId: purchase_evidence_job_id });
+    return {
+      ...committed,
+      completionNote: committed.changed
+        ? `${committed.matchedChargeCount} matched charge${committed.matchedChargeCount === 1 ? "" : "s"} now appear in the suspense register as ${committed.resultingItemCount} separate tax-inclusive purchase questions. ${committed.job.unmatchedCount} unmatched selected charge${committed.job.unmatchedCount === 1 ? "" : "s"} remain unchanged.`
+        : "This purchase-evidence preview was already committed; no ledger data changed.",
+      effectReceipt: effectReceipt("commit_purchase_evidence_job", { purchase_evidence_job_id },
+        committed.changed ? "committed" : "unchanged", [
+          { type: "purchase_evidence_job", id: purchase_evidence_job_id },
+        ]),
+    };
+  }));
+
+  registerTool("restart_purchase_evidence_job", {
+    title: "Restart purchase evidence job",
+    description: "Use only when the user asks to retry or discard the current uncommitted extraction for one exact purchase-evidence job. Accounting permanently removes that job's derived canonical artifact binding, matched receipt preview, item allocations, and source-reference preview, but retains the exact selected suspense targets and resets the same job to ready. It never changes ledger lines. A committed job cannot be restarted.",
+    inputSchema: { purchase_evidence_job_id: z.string().trim().uuid() },
+    outputSchema: purchaseEvidenceRestartOutput,
+    annotations: destructiveWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["list_purchase_evidence_job_objects"],
+      objectInputs: [{ path: "/purchase_evidence_job_id",
+        objectType: "accounting.purchase_evidence_job", value: "id" }],
+    }),
+  }, async ({ purchase_evidence_job_id }) => safeToolResult(async () => {
+    const restarted = await accounting.restartPurchaseEvidenceJob({ pool, personId,
+      purchaseEvidenceJobId: purchase_evidence_job_id });
+    if (restarted.removedCanonicalArtifactId) await accounting.removeArtifactUpload({
+      artifactRoot, personId, artifactId: restarted.removedCanonicalArtifactId,
+    });
+    return {
+      job: restarted.job,
+      completionNote: "The uncommitted extraction and preview were removed. The exact selected suspense targets remain saved and this job is ready for a fresh agent handoff.",
+      effectReceipt: effectReceipt("restart_purchase_evidence_job", { purchase_evidence_job_id },
+        "updated", [{ type: "purchase_evidence_job", id: purchase_evidence_job_id }]),
     };
   }));
 

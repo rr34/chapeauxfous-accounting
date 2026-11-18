@@ -34,6 +34,13 @@ import {
   sendEvidenceFileContent,
 } from "./statement-import-jobs.js";
 import {
+  commitPurchaseEvidenceJob,
+  createPurchaseEvidenceJob,
+  getPurchaseEvidenceJob,
+  listPurchaseEvidenceJobs,
+  restartPurchaseEvidenceJob,
+} from "./purchase-evidence-jobs.js";
+import {
   commitTransactionImportJob,
   excludeTransactionImportException,
   getTransactionImportJob,
@@ -254,6 +261,45 @@ app.post("/api/accounting-questions/:lineItemId/resolve", requireAuth, async (re
   try { res.json(await resolveAccountingQuestion({ pool, personId: req.auth.personId,
     lineItemId: req.params.lineItemId, targetAccountId: req.body?.targetAccountId,
     resolution: req.body?.resolution })); } catch (error) { next(error); }
+});
+
+app.get("/api/accounts/:accountId/purchase-evidence-jobs", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ jobs: await listPurchaseEvidenceJobs({ pool, personId: req.auth.personId,
+      accountId: req.params.accountId, limit: req.query.limit ?? 25 }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/purchase-evidence-jobs", requireAuth, async (req, res, next) => {
+  try {
+    res.status(201).json({ job: await createPurchaseEvidenceJob({ pool, personId: req.auth.personId,
+      lineItemIds: req.body?.lineItemIds }) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/purchase-evidence-jobs/:purchaseEvidenceJobId", requireAuth, async (req, res, next) => {
+  try {
+    res.json({ job: await getPurchaseEvidenceJob({ pool, personId: req.auth.personId,
+      purchaseEvidenceJobId: req.params.purchaseEvidenceJobId, includePreview: true }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/purchase-evidence-jobs/:purchaseEvidenceJobId/commit", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await commitPurchaseEvidenceJob({ pool, personId: req.auth.personId,
+      purchaseEvidenceJobId: req.params.purchaseEvidenceJobId }));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/purchase-evidence-jobs/:purchaseEvidenceJobId/restart", requireAuth, async (req, res, next) => {
+  try {
+    const restarted = await restartPurchaseEvidenceJob({ pool, personId: req.auth.personId,
+      purchaseEvidenceJobId: req.params.purchaseEvidenceJobId });
+    if (restarted.removedCanonicalArtifactId) await removeArtifactUpload({
+      artifactRoot, personId: req.auth.personId, artifactId: restarted.removedCanonicalArtifactId,
+    });
+    res.json({ job: restarted.job });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/transactions", requireAuth, async (req, res, next) => {

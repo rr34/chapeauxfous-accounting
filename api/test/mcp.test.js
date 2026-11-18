@@ -466,7 +466,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(validateDiscoveredMcpTools(tools.tools, {
     serverName: "Accounting",
     serverInfo: { name: "chapeaux-fous-accounting" },
-  }), { owned: true, objectTypeCount: 9 });
+  }), { owned: true, objectTypeCount: 10 });
   for (const tool of tools.tools) {
     assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
   }
@@ -474,6 +474,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(objectTools.map(({ name }) => name), [
     "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
     "list_accounting_question_objects",
+    "list_purchase_evidence_job_objects",
     "list_statement_import_job_objects", "list_evidence_file_objects",
     "list_transaction_import_job_objects", "list_balance_assertion_objects",
   ]);
@@ -492,6 +493,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual([...describedTypes.keys()], [
     "accounting.currency", "accounting.account", "accounting.transaction", "accounting.line_item",
     "accounting.question",
+    "accounting.purchase_evidence_job",
     "accounting.statement_import_job", "accounting.evidence_file",
     "accounting.transaction_import_job", "accounting.balance_assertion",
   ]);
@@ -500,20 +502,20 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     return contract == null ? [] : [[tool.name, contract.bindings]];
   }));
   assert.deepEqual(Object.keys(objectInputContracts).sort(), [
-    "analyze_statement_observations", "commit_transaction_import_job", "create_account",
+    "analyze_statement_observations", "commit_purchase_evidence_job", "commit_transaction_import_job", "create_account",
     "create_reference_rates", "create_transaction", "exclude_transaction_import_exception",
     "get_statement_import_job", "get_statement_reconciliation_context", "get_transaction", "get_transaction_import_job",
     "import_single_account_statement", "import_single_account_statement_artifact",
     "import_transactions", "list_account_objects",
     "list_accounting_question_objects", "list_accounting_questions", "list_balance_assertion_objects",
-    "list_currency_objects", "list_evidence_file_objects", "list_line_item_objects", "list_reference_rates",
-    "list_statement_import_job_objects", "list_transaction_import_exceptions", "list_transaction_import_job_objects",
+    "list_currency_objects", "list_evidence_file_objects", "list_line_item_objects", "list_purchase_evidence_job_objects",
+    "list_reference_rates", "list_statement_import_job_objects", "list_transaction_import_exceptions", "list_transaction_import_job_objects",
     "list_transaction_objects", "open_accounting_question", "preview_delete_account",
     "preview_delete_transactions", "preview_transaction_import_job", "reconcile_account_through_date",
-    "resolve_accounting_question", "retry_transaction_import_exception", "save_balance_assertion",
+    "resolve_accounting_question", "restart_purchase_evidence_job", "retry_transaction_import_exception", "save_balance_assertion",
     "search_transactions", "stage_transaction_import_artifact", "stage_transaction_import_chunk",
-    "start_single_account_statement_import", "start_statement_import_job",
-    "submit_statement_import_job_artifact", "update_account",
+    "start_purchase_evidence_job", "start_single_account_statement_import", "start_statement_import_job",
+    "submit_purchase_evidence_job_artifact", "submit_statement_import_job_artifact", "update_account",
   ]);
   assert.deepEqual(objectInputContracts.list_currency_objects, [
     { path: "/currency_id", objectType: "accounting.currency", value: "id", allowUnbound: true },
@@ -543,13 +545,16 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(objectInputContracts.list_statement_import_job_objects, [
     { path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id", allowUnbound: true },
   ]);
+  assert.deepEqual(objectInputContracts.list_purchase_evidence_job_objects, [
+    { path: "/purchase_evidence_job_id", objectType: "accounting.purchase_evidence_job", value: "id", allowUnbound: true },
+  ]);
   assert.deepEqual(objectInputContracts.list_evidence_file_objects, [
     { path: "/evidence_file_id", objectType: "accounting.evidence_file", value: "id", allowUnbound: true },
   ]);
   const identifyingReadTools = new Set([
     "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
     "list_accounting_question_objects", "list_transaction_import_job_objects", "list_balance_assertion_objects",
-    "list_statement_import_job_objects", "list_evidence_file_objects",
+    "list_purchase_evidence_job_objects", "list_statement_import_job_objects", "list_evidence_file_objects",
   ]);
   for (const [toolName, bindings] of Object.entries(objectInputContracts)) {
     for (const binding of bindings) {
@@ -624,6 +629,13 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(tools.tools.some((tool) => tool.name === "get_statement_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "start_statement_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "submit_statement_import_job_artifact"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "list_purchase_evidence_job_objects"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "start_purchase_evidence_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "submit_purchase_evidence_job_artifact"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "commit_purchase_evidence_job"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "restart_purchase_evidence_job"), true);
+  assert.equal(tools.tools.find((tool) => tool.name === "submit_purchase_evidence_job_artifact")
+    ._meta["agent-slayer/artifactUpload"].transportId, "purchase_evidence_job");
   const statementJobResolver = tools.tools.find((tool) => tool.name === "list_statement_import_job_objects");
   assert.deepEqual(Object.keys(statementJobResolver.inputSchema.properties), ["statement_import_job_id"]);
   assert.deepEqual(statementJobResolver.inputSchema.required, ["statement_import_job_id"]);
@@ -1553,7 +1565,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.15.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.16.0");
 
   await handler.close();
 });

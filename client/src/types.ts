@@ -113,6 +113,19 @@ export type AccountLedgerEntry = {
   creditUnits: string | null;
   runningBalanceUnits: string;
   evidenceFiles: EvidenceFile[];
+  purchaseEvidence: null | {
+    purchaseEvidenceItemId: number;
+    jobId: string;
+    description: string;
+    merchant: string | null;
+    purchaseDate: string | null;
+    quantityDecimal: string | null;
+    preTaxAmountUnits: string;
+    allocatedTaxAmountUnits: string;
+    finalAmountUnits: string;
+    sourceRefs: string[];
+    sourceNames: string[];
+  };
 };
 
 export type TransactionImportReview = {

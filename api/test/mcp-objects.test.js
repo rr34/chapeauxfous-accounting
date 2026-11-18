@@ -190,6 +190,10 @@ test("the authoritative account read bootstraps the exact binding required by st
     });
     assert.deepEqual(observed[0].objects, [{
       id: 178, ref: "accounting://accounts/178", display: "Fifth Third Main x5999",
+      fields: {
+        id: 178, sourceRef: "accounting://accounts/178", displayName: "Fifth Third Main x5999",
+        accountType: "asset", currencyCode: "USD", postable: true, suspense: false, archived: false,
+      },
     }]);
     assert.equal(objectInputBindingProblem({
       toolDefinition: statementStart,

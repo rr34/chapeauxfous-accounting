@@ -105,6 +105,10 @@ test("an account ledger groups split accounts and calculates its running balance
         assert.deepEqual(params, [7, 20, 21]);
         return [[]];
       }
+      if (sql.includes("FROM accounting_purchase_evidence_items")) {
+        assert.deepEqual(params, [7, 20, 21]);
+        return [[]];
+      }
       throw new Error(`Unexpected query: ${sql}`);
     },
   };
@@ -119,7 +123,8 @@ test("an account ledger groups split accounts and calculates its running balance
           currencyId: 1, currencyCode: "USD", scale: 2 },
         { lineItemId: 22, accountId: 8, accountName: "Income", memo: null, amountUnits: "-320",
           currencyId: 1, currencyCode: "USD", scale: 2 },
-      ], evidenceFiles: [], debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
+      ], evidenceFiles: [], purchaseEvidence: null,
+      debitUnits: "320", creditUnits: null, runningBalanceUnits: "320" },
     { lineItemId: 21, transactionId: 11, date: "2026-08-02", description: "Card purchase", memo: "Lunch",
       reconciliationState: "unreconciled", reconciledAt: null,
       splitAccountNames: ["Food", "Tax"], splits: [
@@ -129,7 +134,8 @@ test("an account ledger groups split accounts and calculates its running balance
           currencyId: 1, currencyCode: "USD", scale: 2 },
         { lineItemId: 24, accountId: 10, accountName: "Tax", memo: null, amountUnits: "20",
           currencyId: 1, currencyCode: "USD", scale: 2 },
-      ], evidenceFiles: [], debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
+      ], evidenceFiles: [], purchaseEvidence: null,
+      debitUnits: null, creditUnits: "120", runningBalanceUnits: "200" },
   ]);
 });
 
@@ -162,6 +168,10 @@ test("a credit-normal account register keeps journal sides and reverses running-
         ]];
       }
       if (sql.includes("FROM line_item_evidence_links")) {
+        assert.deepEqual(params, [7, 20, 21]);
+        return [[]];
+      }
+      if (sql.includes("FROM accounting_purchase_evidence_items")) {
         assert.deepEqual(params, [7, 20, 21]);
         return [[]];
       }

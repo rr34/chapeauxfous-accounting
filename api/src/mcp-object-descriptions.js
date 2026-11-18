@@ -177,6 +177,31 @@ export const statementImportJobObjectDescription = Object.freeze({
   }],
 });
 
+export const purchaseEvidenceJobObjectDescription = Object.freeze({
+  protocol: "agent-slayer.object-description",
+  version: 1,
+  types: [{
+    id: "accounting.purchase_evidence_job",
+    title: "Purchase evidence job",
+    summary: "One owner-scoped workflow binding selected suspense postings to receipt emails, exports, files, and item-level purchase evidence.",
+    aliases: ["receipt job", "purchase evidence", "Amazon receipt batch", "item split job"],
+    identity: { field: "id", summary: "Provider-owned purchase-evidence job UUID." },
+    reference: { field: "sourceRef", summary: "Stable accounting://purchase-evidence-jobs/{id} reference." },
+    display: { field: "displayName", summary: "Suspense account, selected target count, and current job state." },
+    qualifiers: [
+      { field: "status", summary: "Ready, processing, preview-ready, or committed workflow state." },
+      { field: "targetCount", summary: "Exact number of selected suspense postings bound to the job." },
+      { field: "matchedCount", summary: "Number of selected charges with reconciled canonical purchase evidence." },
+      { field: "itemCount", summary: "Number of tax-inclusive item lines prepared from matched receipts." },
+      { field: "updatedAt", summary: "Time the workflow state last changed." },
+    ],
+    relationships: [{
+      name: "suspense_account", targetType: "accounting.account",
+      summary: "suspenseAccount.id identifies the exact account containing every selected posting.",
+    }],
+  }],
+});
+
 export const evidenceFileObjectDescription = Object.freeze({
   protocol: "agent-slayer.object-description",
   version: 1,

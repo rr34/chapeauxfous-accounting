@@ -179,6 +179,7 @@ export async function listAccountLedger(pool, personId, accountId) {
   }
 
   const evidenceByLineItemId = new Map();
+  const purchaseEvidenceByLineItemId = new Map();
   const lineItemIds = [...entriesByLineItemId.keys()];
   if (lineItemIds.length) {
     const [evidenceRows] = await pool.query(
@@ -215,6 +216,44 @@ export async function listAccountLedger(pool, personId, accountId) {
         downloadPath: `/api/evidence-files/${evidence.evidence_file_id}/content`,
       });
     }
+    const [purchaseRows] = await pool.query(
+      `SELECT pei.resulting_line_item_id, pei.purchase_evidence_item_id, pei.description,
+              pei.quantity_decimal, pei.source_pre_tax_amount_units, pei.allocated_tax_amount_units,
+              pei.final_amount_units, per.merchant, per.purchase_date,
+              pej.purchase_evidence_job_id, pes.source_ref, pes.display_name, pes.source_ordinal
+         FROM accounting_purchase_evidence_items pei
+         JOIN accounting_purchase_evidence_records per
+           ON per.purchase_evidence_record_id = pei.purchase_evidence_record_id
+         JOIN accounting_purchase_evidence_jobs pej
+           ON pej.purchase_evidence_job_id = per.purchase_evidence_job_id
+         LEFT JOIN accounting_purchase_evidence_sources pes
+           ON pes.purchase_evidence_record_id = per.purchase_evidence_record_id
+        WHERE pej.owner_person_id = ?
+          AND pei.resulting_line_item_id IN (${lineItemIds.map(() => "?").join(", ")})
+        ORDER BY pei.resulting_line_item_id, pes.source_ordinal`,
+      [personId, ...lineItemIds],
+    );
+    for (const purchase of purchaseRows) {
+      const lineItemId = Number(purchase.resulting_line_item_id);
+      const existing = purchaseEvidenceByLineItemId.get(lineItemId);
+      if (existing) {
+        if (purchase.source_ref != null) existing.sourceRefs.push(String(purchase.source_ref));
+        if (purchase.display_name != null) existing.sourceNames.push(String(purchase.display_name));
+        continue;
+      }
+      purchaseEvidenceByLineItemId.set(lineItemId, {
+        purchaseEvidenceItemId: Number(purchase.purchase_evidence_item_id),
+        jobId: String(purchase.purchase_evidence_job_id), description: String(purchase.description),
+        merchant: purchase.merchant == null ? null : String(purchase.merchant),
+        purchaseDate: purchase.purchase_date == null ? null : String(purchase.purchase_date),
+        quantityDecimal: purchase.quantity_decimal == null ? null : String(purchase.quantity_decimal),
+        preTaxAmountUnits: String(purchase.source_pre_tax_amount_units),
+        allocatedTaxAmountUnits: String(purchase.allocated_tax_amount_units),
+        finalAmountUnits: String(purchase.final_amount_units),
+        sourceRefs: purchase.source_ref == null ? [] : [String(purchase.source_ref)],
+        sourceNames: purchase.display_name == null ? [] : [String(purchase.display_name)],
+      });
+    }
   }
 
   let runningBalance = 0n;
@@ -231,6 +270,7 @@ export async function listAccountLedger(pool, personId, accountId) {
       splitAccountNames: [...entry.splitAccounts.values()],
       splits: [...entry.splits.values()],
       evidenceFiles: evidenceByLineItemId.get(entry.lineItemId) ?? [],
+      purchaseEvidence: purchaseEvidenceByLineItemId.get(entry.lineItemId) ?? null,
       reconciliationState: entry.reconciliationState,
       reconciledAt: entry.reconciledAt,
       debitUnits: amount > 0n ? amount.toString() : null,

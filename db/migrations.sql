@@ -7,6 +7,130 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0021: purchase-evidence-jobs
+-- writer downtime: schedule maintenance; new tables and foreign keys take metadata locks.
+-- deployment order: apply before deploying purchase-evidence job HTTP or MCP surfaces.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+-- Canonical purchase evidence preserves source amounts; application code owns exact tax allocation and ledger splitting.
+
+CREATE TABLE `accounting_purchase_evidence_jobs` (
+  `purchase_evidence_job_id` char(36) NOT NULL
+    COMMENT 'Opaque UUID for one bounded batch of selected suspense postings awaiting purchase evidence.',
+  `owner_person_id` int(11) NOT NULL
+    COMMENT 'Person whose ledger and private purchase evidence own this job.',
+  `suspense_account_id` int(11) NOT NULL
+    COMMENT 'Exact designated suspense account containing every selected posting when the job was created.',
+  `currency_id` int(11) NOT NULL
+    COMMENT 'Native currency shared by every selected suspense posting and every canonical purchase amount.',
+  `job_status` enum('ready','processing','preview_ready','committed') NOT NULL DEFAULT 'ready'
+    COMMENT 'Current workflow state. ready: selected targets are saved. processing: an agent is collecting evidence. preview_ready: canonical matched purchases passed exact amount checks. committed: matched suspense postings were split into item postings.',
+  `canonical_artifact_id` char(36) NULL DEFAULT NULL
+    COMMENT 'Optional disposable canonical JSON Lines artifact submitted for this job.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT current_timestamp(6) ON UPDATE current_timestamp(6),
+  `committed_at` datetime(6) NULL DEFAULT NULL,
+  PRIMARY KEY (`purchase_evidence_job_id`),
+  KEY `accounting_purchase_evidence_jobs_owner_status_IDX` (`owner_person_id`, `job_status`, `updated_at`),
+  KEY `accounting_purchase_evidence_jobs_account_IDX` (`owner_person_id`, `suspense_account_id`, `updated_at`),
+  CONSTRAINT `accounting_purchase_evidence_jobs_owner_FK`
+    FOREIGN KEY (`owner_person_id`) REFERENCES `people2_people` (`person_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `accounting_purchase_evidence_jobs_account_FK`
+    FOREIGN KEY (`suspense_account_id`) REFERENCES `accounts` (`account_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT `accounting_purchase_evidence_jobs_currency_FK`
+    FOREIGN KEY (`currency_id`) REFERENCES `currencies` (`currency_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Own one provider-neutral purchase-evidence workflow for an exact selected set of open suspense postings. One row: One batch whose targets, extraction, preview, and commit remain bound together.';
+
+CREATE TABLE `accounting_purchase_evidence_job_lines` (
+  `purchase_evidence_job_id` char(36) NOT NULL,
+  `line_item_id` bigint(20) NOT NULL
+    COMMENT 'Exact open suspense posting selected for this job; commit retains this row as the first resulting item posting.',
+  `original_amount_units` bigint(20) NOT NULL
+    COMMENT 'Signed native-unit amount captured at selection and revalidated before preview and commit.',
+  PRIMARY KEY (`purchase_evidence_job_id`, `line_item_id`),
+  KEY `accounting_purchase_evidence_job_lines_line_IDX` (`line_item_id`),
+  CONSTRAINT `accounting_purchase_evidence_job_lines_job_FK`
+    FOREIGN KEY (`purchase_evidence_job_id`) REFERENCES `accounting_purchase_evidence_jobs` (`purchase_evidence_job_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT `accounting_purchase_evidence_job_lines_line_FK`
+    FOREIGN KEY (`line_item_id`) REFERENCES `line_items` (`line_item_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Freeze the exact selected suspense-posting membership of a purchase-evidence job. One row: One selected posting with its original signed amount.';
+
+CREATE TABLE `accounting_purchase_evidence_records` (
+  `purchase_evidence_record_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `purchase_evidence_job_id` char(36) NOT NULL,
+  `target_line_item_id` bigint(20) NOT NULL
+    COMMENT 'Selected suspense posting whose absolute amount exactly equals charge_amount_units.',
+  `merchant` varchar(1024) NULL DEFAULT NULL,
+  `purchase_date` date NULL DEFAULT NULL,
+  `charge_amount_units` bigint(20) unsigned NOT NULL
+    COMMENT 'Absolute final charge in the job currency native units.',
+  `receipt_tax_amount_units` bigint(20) unsigned NOT NULL DEFAULT 0
+    COMMENT 'Receipt-level tax preserved separately and allocated deterministically across item postings by application code.',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  PRIMARY KEY (`purchase_evidence_record_id`),
+  UNIQUE KEY `accounting_purchase_evidence_records_target_UQ` (`purchase_evidence_job_id`, `target_line_item_id`),
+  CONSTRAINT `accounting_purchase_evidence_records_job_FK`
+    FOREIGN KEY (`purchase_evidence_job_id`) REFERENCES `accounting_purchase_evidence_jobs` (`purchase_evidence_job_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT `accounting_purchase_evidence_records_target_FK`
+    FOREIGN KEY (`target_line_item_id`) REFERENCES `line_items` (`line_item_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Store one reconciled canonical purchase charge matched to one selected suspense posting. Source receipt values remain distinct from derived tax-inclusive item totals.';
+
+CREATE TABLE `accounting_purchase_evidence_sources` (
+  `purchase_evidence_source_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `purchase_evidence_record_id` bigint(20) NOT NULL,
+  `source_ordinal` int(10) unsigned NOT NULL,
+  `source_kind` enum('email','amazon_export','receipt','file','other') NOT NULL,
+  `source_ref` varchar(2048) NOT NULL
+    COMMENT 'Stable provider-owned reference such as an email, file, receipt, or order record reference.',
+  `source_record_id` varchar(255) NULL DEFAULT NULL,
+  `display_name` varchar(1024) NULL DEFAULT NULL,
+  PRIMARY KEY (`purchase_evidence_source_id`),
+  UNIQUE KEY `accounting_purchase_evidence_sources_ordinal_UQ` (`purchase_evidence_record_id`, `source_ordinal`),
+  CONSTRAINT `accounting_purchase_evidence_sources_record_FK`
+    FOREIGN KEY (`purchase_evidence_record_id`) REFERENCES `accounting_purchase_evidence_records` (`purchase_evidence_record_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Preserve provider-neutral source references supporting one canonical purchase charge. One row: One exact email, export row, receipt, file, or other evidence reference.';
+
+CREATE TABLE `accounting_purchase_evidence_items` (
+  `purchase_evidence_item_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `purchase_evidence_record_id` bigint(20) NOT NULL,
+  `item_ordinal` int(10) unsigned NOT NULL,
+  `source_item_id` varchar(255) NULL DEFAULT NULL,
+  `description` text NOT NULL,
+  `quantity_decimal` varchar(128) NULL DEFAULT NULL
+    COMMENT 'Optional exact source quantity string; no floating-point interpretation is stored.',
+  `source_pre_tax_amount_units` bigint(20) unsigned NOT NULL
+    COMMENT 'Absolute item amount before receipt-level tax, preserved exactly from canonical evidence.',
+  `allocated_tax_amount_units` bigint(20) unsigned NOT NULL
+    COMMENT 'Receipt tax assigned by deterministic largest-remainder proportional allocation.',
+  `final_amount_units` bigint(20) unsigned NOT NULL
+    COMMENT 'Tax-inclusive native-unit amount used when the selected suspense posting is split.',
+  `resulting_line_item_id` bigint(20) NULL DEFAULT NULL
+    COMMENT 'Ledger posting produced for this item at commit, or null while the preview is pending.',
+  PRIMARY KEY (`purchase_evidence_item_id`),
+  UNIQUE KEY `accounting_purchase_evidence_items_ordinal_UQ` (`purchase_evidence_record_id`, `item_ordinal`),
+  KEY `accounting_purchase_evidence_items_line_IDX` (`resulting_line_item_id`),
+  CONSTRAINT `accounting_purchase_evidence_items_record_FK`
+    FOREIGN KEY (`purchase_evidence_record_id`) REFERENCES `accounting_purchase_evidence_records` (`purchase_evidence_record_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT `accounting_purchase_evidence_items_line_FK`
+    FOREIGN KEY (`resulting_line_item_id`) REFERENCES `line_items` (`line_item_id`)
+    ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Mirror purchase line evidence and the resulting ledger split. One row: One source item with preserved pre-tax amount, explicit allocated tax, and exact tax-inclusive final amount.';
+
+-- end migration 0021
+
 -- migration 0020: evidence-accounting-significance
 -- writer downtime: schedule maintenance; altering the evidence table takes a metadata lock.
 -- deployment order: apply before deploying evidence metadata reads or independent statement determinations.
