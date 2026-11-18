@@ -2108,7 +2108,7 @@ function compareRegisterSortValues(left: string | bigint | number | null,
 function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow,
   sort: RegisterSort, account: Account, accountNames: Map<number, string>) {
   const knownBalanceOrder = knownBalanceOrderForSameDate(left.date, left.kind === "assertion",
-    right.date, right.kind === "assertion");
+    right.date, right.kind === "assertion", sort.key === "date" ? sort.direction : null);
   if (knownBalanceOrder != null) return knownBalanceOrder;
   const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account, accountNames),
     registerRowSortValue(right, sort.key, account, accountNames), sort.direction);

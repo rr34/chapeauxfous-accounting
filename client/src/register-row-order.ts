@@ -3,7 +3,10 @@ export function knownBalanceOrderForSameDate(
   leftIsKnownBalance: boolean,
   rightDate: string,
   rightIsKnownBalance: boolean,
+  dateDirection: "asc" | "desc" | null,
 ) {
-  if (leftDate !== rightDate || leftIsKnownBalance === rightIsKnownBalance) return null;
-  return leftIsKnownBalance ? 1 : -1;
+  if (dateDirection == null || leftDate !== rightDate
+    || leftIsKnownBalance === rightIsKnownBalance) return null;
+  const chronologicalOrder = leftIsKnownBalance ? 1 : -1;
+  return dateDirection === "asc" ? chronologicalOrder : -chronologicalOrder;
 }
