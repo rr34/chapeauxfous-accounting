@@ -3,7 +3,7 @@ import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import { descriptionFamily } from "./description-family";
 import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs";
-import { knownBalanceOrderForSameDate } from "./register-row-order";
+import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
@@ -2113,6 +2113,10 @@ function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow
   const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account, accountNames),
     registerRowSortValue(right, sort.key, account, accountNames), sort.direction);
   if (primary !== 0) return primary;
+  if (sort.key === "date" && left.date === right.date) {
+    const byChronology = sameDateChronologicalOrder(left.order, right.order, sort.direction);
+    if (byChronology !== 0) return byChronology;
+  }
   if (sort.key !== "description") {
     const byDescription = registerSortCollator.compare(registerRowDescription(left), registerRowDescription(right));
     if (byDescription !== 0) return byDescription;
@@ -2240,8 +2244,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           : previous?.reconciledThrough == null || entry.reconciledAt > previous.reconciledThrough
             ? entry.reconciledAt : previous.reconciledThrough });
     });
-    const imported = importReviews.flatMap((review) => review.rows.map((row, index) => ({
-      kind: "import" as const, date: row.transactionDate, order: entries.length + index,
+    let importedOrder = entries.length;
+    const imported = importReviews.flatMap((review) => review.rows.map((row) => ({
+      kind: "import" as const, date: row.transactionDate, order: importedOrder++,
       importPlanId: review.importPlanId, row, amountUnits: decimalToUnits(row.amountDecimal, account.scale),
     })));
     const chronological = [

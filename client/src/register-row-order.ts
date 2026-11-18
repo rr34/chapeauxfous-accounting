@@ -10,3 +10,12 @@ export function knownBalanceOrderForSameDate(
   const chronologicalOrder = leftIsKnownBalance ? 1 : -1;
   return dateDirection === "asc" ? chronologicalOrder : -chronologicalOrder;
 }
+
+export function sameDateChronologicalOrder(
+  leftOrder: number,
+  rightOrder: number,
+  dateDirection: "asc" | "desc",
+) {
+  const chronologicalOrder = leftOrder - rightOrder;
+  return dateDirection === "asc" ? chronologicalOrder : -chronologicalOrder;
+}
