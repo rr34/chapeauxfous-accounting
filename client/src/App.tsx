@@ -1125,13 +1125,13 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
           {journalHeader && initialAccount
             ? signedAccountMovementDecimal(currentAccountTotal, initialAccount)
             : registerMovementInput(mainLine, 0)}</td>
+        <td />
+        <td>{journalHeader ? <span className="register-transaction-label">Transaction</span>
+          : <strong>{otherAccountLabel}</strong>}</td>
         <td className="amount balance" title="Running balance before these edits; updates after save">
           {runningBalanceUnits != null && initialAccount
             ? unitsToDecimal(runningBalanceUnits, initialAccount.scale) : "—"}</td>
         <td className="amount known-balance">{date === initialTransaction.date ? knownBalanceAction : null}</td>
-        <td>{journalHeader ? <span className="register-transaction-label">Transaction</span>
-          : <strong>{otherAccountLabel}</strong>}</td>
-        <td />
       </tr>
       {showDateEditor && <tr className="register-inline-date-row"><td colSpan={7}>
         <div className="register-inline-date-controls">
@@ -1155,7 +1155,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
               onChange={(event) => updateLine(index, { memo: event.target.value })}
               placeholder={line.autoBalance ? "New line or balancing line" : isSelectedAccountLine ? "Memo for this account line" : "Memo"} /></td>
             <td>{isThisAccount && registerMovementInput(line, index)}</td>
-            <td /><td />
+            <td>{!isThisAccount && registerMovementInput(line, index)}</td>
             <td>{isSelectedAccountLine && initialAccount
               ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
               : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
@@ -1165,7 +1165,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
               {!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
               aria-label={`Remove line ${index + 1}`}
               onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}</td>
-            <td>{!isThisAccount && registerMovementInput(line, index)}</td>
+            <td /><td />
           </tr>
           {registerEditValueRow(line, index)}
         </Fragment>;
@@ -1202,7 +1202,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
         onChange={(event) => setDescription(event.target.value)} placeholder="Description" /></td>
       <td className="amount">{initialAccount && currentAccountTotal
         ? signedAccountMovementDecimal(currentAccountTotal, initialAccount) : null}</td>
-      <td /><td /><td><span className="register-new-label">New transaction</span></td><td />
+      <td /><td><span className="register-new-label">New transaction</span></td><td /><td />
     </tr>
     {lines.map((line, index) => {
       const lineAccount = accountMap.get(Number(line.accountId));
@@ -1224,7 +1224,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
           <td><input aria-label={`Memo for line ${index + 1}`} value={line.memo}
             onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" /></td>
           <td>{isThisAccount && registerMovementInput(line, index)}</td>
-          <td /><td />
+          <td>{!isThisAccount && registerMovementInput(line, index)}</td>
           <td>{index === 0 && initialAccount
             ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
             : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
@@ -1232,7 +1232,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
             <button type="button" className="quiet" aria-label={`Remove line ${index + 1}`}
             disabled={index === 0 || lines.length <= 1}
             onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button></td>
-          <td>{!isThisAccount && registerMovementInput(line, index)}</td>
+          <td /><td />
         </tr>
         {showValuationDetails && <tr className="register-inline-value-row"><td /><td colSpan={6}>
           <div className="register-inline-value-controls">
@@ -2875,10 +2875,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <RegisterSortHeader label="Date" sortKey="date" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Description" sortKey="description" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="This account" sortKey="thisAccount" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Other account amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Running balance" sortKey="runningBalance" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Known balance" sortKey="knownBalance" sort={registerSort} onSort={changeRegisterSort} />
-          <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
-          <RegisterSortHeader label="Other accounts amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
         </tr></thead>
         <tbody>{!suspenseReviewOpen && newRowsAtTop && newTransactionRows}{displayedRegisterRows.map((row) => {
           if (row.kind === "assertion") {
@@ -2894,6 +2894,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   ).catch((nextError) => setReconciliationError(errorMessage(nextError)))}>
                   PDF evidence · {evidence.fileName}</button>)}</td>
               <td></td>
+              <td></td><td>—</td>
               <td className="amount balance">{unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</td>
               <td className="amount known-balance"><div className="known-balance-controls">
                 <button type="button" className={assertion.matches ? "known-balance-reconcile" : "known-balance-edit"}
@@ -2907,7 +2908,6 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   aria-label={`Edit known balance for ${assertion.date}`} title="Edit known balance"
                   disabled={reconcilingAssertionId != null} onClick={() => editKnownBalance(assertion)}>✎</button>}
               </div></td>
-              <td>—</td><td></td>
             </tr>
               {knownBalanceFormMode === "edit-row" && knownBalanceAnchorDate === assertion.date
                 && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>}
@@ -2935,9 +2935,6 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                       : `Imported · ${row.row.decision}`}</button></td>
                 <td className={`amount ${movementEffectClass(row.amountUnits, account.type)}`}>
                   {signedAccountMovement(row.amountUnits, account)}</td>
-                <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
-                <td></td>
-                <td>{otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
                 <td className="amount">{row.row.otherLines.map((line, index) => {
                   const splitAccount = accountByFullName.get(line.accountFullName);
                   return <span className="import-other-amount" key={`${line.accountFullName}-${index}`}>
@@ -2945,6 +2942,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                     {splitAccount ? signedAccountMovement(decimalToUnits(line.amountDecimal, splitAccount.scale), splitAccount)
                       : `${line.amountDecimal} ${account.currencyCode}`}</span>;
                 })}</td>
+                <td>{otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
+                <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
+                <td></td>
               </tr>
               {view !== "basic" && [
                 ...(view === "journal" ? [{ accountFullName: fullAccountNames.get(account.id) ?? account.name,
@@ -2959,11 +2959,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   <td className={`amount ${line.thisAccount && amountUnits
                     ? movementEffectClass(amountUnits, account.type) : ""}`}>
                     {line.thisAccount && amountUnits ? signedAccountMovement(amountUnits, account) : ""}</td>
-                  <td></td><td></td><td><strong>{line.accountFullName}</strong></td>
                   <td className={`amount ${!line.thisAccount && splitAccount && amountUnits
                     ? movementEffectClass(amountUnits, splitAccount.type) : ""}`}>
                     {!line.thisAccount && splitAccount && amountUnits
                       ? signedAccountMovement(amountUnits, splitAccount) : !line.thisAccount ? line.amountDecimal : ""}</td>
+                  <td><strong>{line.accountFullName}</strong></td><td></td><td></td>
                 </tr>;
               })}
             </Fragment>;
@@ -3090,12 +3090,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   PDF evidence · {evidence.fileName}</button>)}</td>
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
                 {signedAccountMovement(row.totalAmountUnits, account)}</td>
-              <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
-              <td className="amount known-balance">{knownBalanceAction}</td>
+              <td />
               <td className={view === "journal" ? undefined : "register-other-account-summary"}>
                 {view === "journal" ? <span className="register-transaction-label">Transaction</span>
                   : counterpartLabel}</td>
-              <td />
+              <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
+              <td className="amount known-balance">{knownBalanceAction}</td>
             </tr>
             {view !== "basic" && entry.splits
               .filter((split) => view === "journal" || split.accountId !== account.id)
@@ -3113,11 +3113,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   <td className={`amount ${splitAccount && isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
                     {isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
-                  <td></td><td></td>
-                  <td><strong>{split.accountName}</strong></td>
                   <td className={`amount ${splitAccount && !isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
                     {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
+                  <td><strong>{split.accountName}</strong></td><td></td><td></td>
                 </tr>;
               })}
             {!newRowsAtTop && rowBalanceForm}
