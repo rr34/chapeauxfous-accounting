@@ -543,6 +543,56 @@ export async function getEvidenceFile({ pool, personId, evidenceFileId }) {
   return rows[0];
 }
 
+export async function readOneAccountImportEvidenceText({
+  pool, evidenceRoot, personId, statementImportJobId, offset = 0, maxCharacters = 20000,
+}) {
+  const job = await getStatementImportJob({ pool, personId, statementImportJobId });
+  if (job.evidenceFile.mediaType !== TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE) {
+    throw statementError("This evidence is not saved text. Use its authenticated PDF download descriptor instead.",
+      "TEXT_EVIDENCE_REQUIRED", { mediaType: job.evidenceFile.mediaType }, 409);
+  }
+  const start = Number(offset);
+  const limit = Number(maxCharacters);
+  if (!Number.isInteger(start) || start < 0) {
+    throw statementError("Text evidence offset must be a nonnegative integer.", "INVALID_TEXT_EVIDENCE_OFFSET");
+  }
+  if (!Number.isInteger(limit) || limit < 1000 || limit > 50000) {
+    throw statementError("Text evidence maxCharacters must be between 1,000 and 50,000.",
+      "INVALID_TEXT_EVIDENCE_LIMIT");
+  }
+  const row = await getEvidenceFile({ pool, personId, evidenceFileId: job.evidenceFile.id });
+  const bytes = await readFile(evidencePath(evidenceRoot, String(row.storage_key)));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (bytes.length !== Number(row.byte_size) || digest !== String(row.sha256)) {
+    throw statementError("Stored text evidence failed integrity verification.",
+      "EVIDENCE_STORAGE_CONFLICT", undefined, 500);
+  }
+  let value;
+  try {
+    value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw statementError("Stored text evidence is not valid UTF-8.", "INVALID_TEXT_EVIDENCE", undefined, 500);
+  }
+  const characters = [...value];
+  if (start > characters.length) {
+    throw statementError("Text evidence offset is beyond the end of the source.",
+      "INVALID_TEXT_EVIDENCE_OFFSET", { characterCount: characters.length });
+  }
+  const end = Math.min(start + limit, characters.length);
+  return {
+    statementImportJobId: job.id,
+    evidenceFileId: job.evidenceFile.id,
+    sourceRef: job.evidenceFile.sourceRef,
+    fileName: job.evidenceFile.fileName,
+    sha256: job.evidenceFile.sha256,
+    offset: start,
+    text: characters.slice(start, end).join(""),
+    nextOffset: end < characters.length ? end : null,
+    complete: end === characters.length,
+    characterCount: characters.length,
+  };
+}
+
 function contentDisposition(fileName) {
   return `attachment; filename*=UTF-8''${encodeURIComponent(safeFileName(fileName))}`;
 }

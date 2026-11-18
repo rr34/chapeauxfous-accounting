@@ -104,6 +104,13 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     copiedPrompt: "Process accounting://statement-import-jobs/728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
     transactionListCopiedPrompt: "Process this same evidence as a transaction list.",
   });
+  const textJobFixture = (status = "ready") => {
+    const job = statementJobFixture(status);
+    return { ...job, displayName: `pasted.txt · Wallet · ${status}`,
+      evidenceFile: { ...job.evidenceFile, displayName: "pasted.txt", fileName: "pasted.txt",
+        mediaType: "text/plain", byteSize: 25 },
+      download: { ...job.download, fileName: "pasted.txt", mediaType: "text/plain", byteSize: 25 } };
+  };
   const services = {
     async listStatementImportJobObjectsPage(_pool, _personId, options) {
       resolvedStatementJobOptions = options;
@@ -114,6 +121,13 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     },
     async getStatementImportJob() { return statementJobFixture(); },
     async startStatementImportJob() { return { job: statementJobFixture("processing"), transitioned: true }; },
+    async startTransactionListImportJob() { return { job: textJobFixture("processing"), transitioned: false }; },
+    async readOneAccountImportEvidenceText() {
+      return { statementImportJobId: textJobFixture().id, evidenceFileId: 81,
+        sourceRef: "accounting://evidence-files/81", fileName: "pasted.txt",
+        sha256: `sha256:${"9".repeat(64)}`, offset: 0, text: "2026-01-01 | Fuel | 5.00",
+        nextOffset: null, complete: true, characterCount: 26 };
+    },
     async describeAccountingSchema(_pool, _databaseName, request) {
       return { request, tables: [{ name: "accounts", comment: "Owner-scoped ledger accounts", columns: [
         { name: "AccountName", type: "text", nullable: false, comment: "Name of this ledger account" },
@@ -512,8 +526,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "list_currency_objects", "list_evidence_file_objects", "list_line_item_objects", "list_purchase_evidence_job_objects",
     "list_reference_rates", "list_statement_import_job_objects", "list_transaction_import_exceptions", "list_transaction_import_job_objects",
     "list_transaction_objects", "merge_suspense_transfer_pair", "open_accounting_question", "preview_delete_account",
-    "preview_delete_transactions", "preview_transaction_import_job", "reconcile_account_through_date",
-    "resolve_accounting_question", "restart_purchase_evidence_job", "retry_transaction_import_exception", "save_balance_assertion",
+    "preview_delete_transactions", "preview_transaction_import_job", "read_one_account_import_evidence_text",
+    "reconcile_account_through_date", "resolve_accounting_question", "restart_purchase_evidence_job", "retry_transaction_import_exception", "save_balance_assertion",
     "search_transactions", "stage_transaction_import_artifact", "stage_transaction_import_chunk",
     "start_purchase_evidence_job", "start_single_account_statement_import", "start_statement_import_job",
     "start_transaction_list_import_job", "submit_purchase_evidence_job_artifact",
@@ -1215,6 +1229,21 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     /including zero-amount line items such as \$0\.00.*balanced statement-and-suspense transaction/);
   assert.equal(startedStatementJob.structuredContent.extraction.artifactUpload.transportId,
     "statement_import_job");
+  const startedTransactionListJob = await client.callTool({
+    name: "start_transaction_list_import_job", arguments: {
+      statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
+    },
+  });
+  assert.equal(startedTransactionListJob.structuredContent.download, null);
+  assert.equal(startedTransactionListJob.structuredContent.textAccess.nextTool,
+    "read_one_account_import_evidence_text");
+  const textEvidence = await client.callTool({
+    name: "read_one_account_import_evidence_text", arguments: {
+      statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", offset: 0, max_characters: 20000,
+    },
+  });
+  assert.equal(textEvidence.structuredContent.complete, true);
+  assert.equal(textEvidence.structuredContent.text, "2026-01-01 | Fuel | 5.00");
   const missingStatementBalance = await client.callTool({
     name: "import_single_account_statement",
     arguments: {

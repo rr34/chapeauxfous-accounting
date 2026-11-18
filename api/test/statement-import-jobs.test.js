@@ -9,6 +9,7 @@ import {
   bindStatementImportPreview,
   createStatementImportFromPdf,
   createTransactionListImportFromText,
+  readOneAccountImportEvidenceText,
   restartStatementImportJob,
   sendEvidenceFileContent,
   startStatementImportJob,
@@ -194,6 +195,13 @@ test("plain copied transaction evidence creates a transaction-list handoff witho
     statementImportJobId: created.id });
   assert.equal(started.transitioned, true);
   assert.equal(started.job.status, "processing");
+
+  const firstChunk = await readOneAccountImportEvidenceText({ pool, evidenceRoot, personId: 7,
+    statementImportJobId: created.id, offset: 0, maxCharacters: 1000 });
+  assert.equal(firstChunk.text, text);
+  assert.equal(firstChunk.nextOffset, null);
+  assert.equal(firstChunk.complete, true);
+  assert.equal(firstChunk.sha256, `sha256:${sha256}`);
 
   const response = new TestResponse();
   const finished = new Promise((resolve, reject) => response.once("finish", resolve).once("error", reject));

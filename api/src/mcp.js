@@ -156,6 +156,7 @@ import {
   getStatementImportJob as getSingleAccountStatementImportJob,
   listEvidenceFileObjectsPage,
   listStatementImportJobObjectsPage,
+  readOneAccountImportEvidenceText,
   resolveEvidenceRoot,
   sendEvidenceFileContent,
   startStatementImportJob,
@@ -647,6 +648,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     listStatementImportJobObjectsPage: services.listStatementImportJobObjectsPage
       ?? listStatementImportJobObjectsPage,
     listEvidenceFileObjectsPage: services.listEvidenceFileObjectsPage ?? listEvidenceFileObjectsPage,
+    readOneAccountImportEvidenceText: services.readOneAccountImportEvidenceText ?? readOneAccountImportEvidenceText,
     listPurchaseEvidenceJobObjectsPage: services.listPurchaseEvidenceJobObjectsPage
       ?? listPurchaseEvidenceJobObjectsPage,
     startPurchaseEvidenceJob: services.startPurchaseEvidenceJob ?? startPurchaseEvidenceJob,
@@ -1253,7 +1255,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   };
   const statementImportJobStartOutput = successOutputSchema({
     job: statementImportJobSchema,
-    download: statementDownloadSchema,
+    download: statementDownloadSchema.nullable(),
+    textAccess: z.object({
+      nextTool: z.literal("read_one_account_import_evidence_text"),
+      statementImportJobId: z.string().uuid(), evidenceFileId: z.number().int().positive(),
+      fileName: z.string().min(1), sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    }).nullable(),
     extraction: z.object(statementJobGuideShape),
     effectReceipt: effectReceiptSchema,
   });
@@ -1262,7 +1269,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const transactionListImportJobStartOutput = successOutputSchema({
     job: statementImportJobSchema,
-    download: transactionListDownloadSchema,
+    download: transactionListDownloadSchema.nullable(),
+    textAccess: z.object({
+      nextTool: z.literal("read_one_account_import_evidence_text"),
+      statementImportJobId: z.string().uuid(), evidenceFileId: z.number().int().positive(),
+      fileName: z.string().min(1), sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    }).nullable(),
     extraction: z.object({
       workflow: z.literal("single_account_transaction_list"),
       canonicalArtifactSchema: z.json(), artifactUpload: z.json(),
@@ -1273,6 +1285,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const evidenceFileObjectOutput = successOutputSchema({
     objects: z.array(evidenceFileObjectSchema), resultMetadata: resultMetadataSchema,
+  });
+  const oneAccountEvidenceTextOutput = successOutputSchema({
+    statementImportJobId: z.string().uuid(), evidenceFileId: z.number().int().positive(),
+    sourceRef: z.string().min(1), fileName: z.string().min(1),
+    sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/), offset: z.number().int().nonnegative(),
+    text: z.string(), nextOffset: z.number().int().nonnegative().nullable(), complete: z.boolean(),
+    characterCount: z.number().int().nonnegative(),
   });
   const purchaseEvidenceJobSchema = z.object({
     objectType: z.literal("accounting.purchase_evidence_job"), id: z.string().uuid(),
@@ -2925,7 +2944,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           : "Process the complete saved text evidence supplied by Accounting, including statement facts that may appear outside the transaction rows.",
         mediaType === "application/pdf"
           ? "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document."
-          : "Use the saved text directly as the complete source evidence; do not require a PDF merely because this is a statement workflow.",
+          : "Read every saved-text chunk through the textAccess tool until complete; do not require a PDF or search native Files merely because this is a statement workflow.",
         "Use only evidence visible in this one statement.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text, including zero-amount line items such as $0.00. Accounting retains each zero-amount row as a balanced statement-and-suspense transaction with no balance effect.",
@@ -3003,6 +3022,26 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       statementImportJobId: statement_import_job_id })),
   })));
 
+  registerTool("read_one_account_import_evidence_text", {
+    title: "Read one-account text evidence",
+    description: "Read one integrity-verified, owner-scoped chunk of saved UTF-8 one-account evidence after a statement or transaction-list start result supplies textAccess. Begin at offset 0 and continue with each returned nextOffset until complete is true. This is the authoritative text source; do not search the native Files capability for Accounting-owned evidence. The tool is read-only and creates no preview.",
+    inputSchema: {
+      statement_import_job_id: z.string().trim().uuid(),
+      offset: z.number().int().nonnegative().default(0),
+      max_characters: z.number().int().min(1000).max(50000).default(20000),
+    },
+    outputSchema: oneAccountEvidenceTextOutput,
+    annotations: readOnly,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["start_statement_import_job", "start_transaction_list_import_job"],
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id",
+        role: "source_evidence_job" }],
+    }),
+  }, async ({ statement_import_job_id, offset, max_characters }) => safeToolResult(async () => (
+    accounting.readOneAccountImportEvidenceText({ pool, evidenceRoot, personId,
+      statementImportJobId: statement_import_job_id, offset, maxCharacters: max_characters })
+  )));
+
   registerTool("start_statement_import_job", {
     title: "Start statement import job",
     description: "Atomically start one ready statement job in the owner's serial workflow and return the exact original-evidence download descriptor plus the current extraction requirements. Evidence may be a PDF or saved text. Retrieve and process the complete source directly; for PDFs do not substitute server-side extracted text. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
@@ -3016,7 +3055,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, async ({ statement_import_job_id }) => safeToolResult(async () => {
     const { job, transitioned } = await accounting.startStatementImportJob({ pool, personId,
       statementImportJobId: statement_import_job_id });
-    return { job: statementJobMetadata(job), download: job.download,
+    const isPdf = job.evidenceFile.mediaType === "application/pdf";
+    return { job: statementJobMetadata(job), download: isPdf ? job.download : null,
+      textAccess: isPdf ? null : {
+        nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
+        evidenceFileId: job.evidenceFile.id, fileName: job.evidenceFile.fileName,
+        sha256: job.evidenceFile.sha256,
+      },
       extraction: await statementJobExtractionGuide(job.account.id, job.evidenceFile.mediaType),
       effectReceipt: effectReceipt("start_statement_import_job", { statement_import_job_id },
         transitioned ? "updated" : "unchanged", [
@@ -3041,13 +3086,22 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       statementImportJobId: statement_import_job_id });
     return {
       job: statementJobMetadata(job),
-      download: { ...job.download, transportId: "transaction_list_evidence_download" },
+      download: job.evidenceFile.mediaType === "application/pdf"
+        ? { ...job.download, transportId: "transaction_list_evidence_download" } : null,
+      textAccess: job.evidenceFile.mediaType === "text/plain" ? {
+        nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
+        evidenceFileId: job.evidenceFile.id, fileName: job.evidenceFile.fileName,
+        sha256: job.evidenceFile.sha256,
+      } : null,
       extraction: {
         workflow: "single_account_transaction_list",
         canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
         artifactUpload: transactionListImportJobArtifactUpload,
         nextTool: "submit_transaction_list_import_job_artifact",
         rules: [
+          job.evidenceFile.mediaType === "text/plain"
+            ? "Call read_one_account_import_evidence_text from offset 0 through every returned nextOffset until complete is true. Do not search native Files for this Accounting-owned evidence."
+            : "Process the complete authenticated PDF supplied in download; do not omit pages.",
           "Extract every supported dated movement for the already-bound account; positive increases its displayed balance and negative decreases it.",
           "Generate stable source_record_id values and preserve useful merchant, payee, memo, or transaction text in available_text.",
           "Discard copied headings, incidental categories, formatting, navigation, summaries, and unrelated text when they are not needed to support a movement.",

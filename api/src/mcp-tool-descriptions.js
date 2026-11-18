@@ -36,6 +36,7 @@ const descriptions = {
   list_statement_import_job_objects: read("Resolve exactly one copied one-account evidence-job UUID to compact identity and related references; then call the start tool named by its handoff."),
   list_evidence_file_objects: read("Read immutable owner-scoped evidence-file identities, integrity metadata, and independently stored accounting-significance dates and amounts without returning file bytes."),
   get_statement_import_job: read("Inspect one identified statement job without starting it; omit this status read from the normal initial processing path."),
+  read_one_account_import_evidence_text: read("Read complete Accounting-owned UTF-8 evidence in verified bounded chunks after a one-account start result supplies textAccess; do not search native Files for this private source."),
   start_statement_import_job: mutate("Start or idempotently continue one statement interpretation of saved PDF or text evidence and return its complete source-access contract and extraction requirements.", ["UPDATE"]),
   submit_statement_import_job_artifact: mutate("Create a pending statement preview from canonical rows bound to one exact job, account, and immutable original PDF. Opening values remain evidence and reconciliation inputs; only the closing pair may create a known balance.", ["CREATE"]),
   start_transaction_list_import_job: mutate("Start or idempotently continue one transaction-list interpretation of saved PDF or text evidence and return its complete source plus extraction contract; copied noise may be discarded.", ["UPDATE"]),
