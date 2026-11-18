@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withPoolTransaction } from "./db.js";
@@ -529,6 +529,66 @@ export async function restartStatementImportJob({ pool, personId, statementImpor
     job: await getStatementImportJob({ pool, personId, statementImportJobId: newJobId }),
     removedCanonicalArtifactId: removed.canonicalArtifactId,
   };
+}
+
+export async function deleteStatementImportJob({ pool, personId, statementImportJobId }) {
+  const removed = await withPoolTransaction(pool, async (connection) => {
+    const row = await loadStatementJob(connection, personId, statementImportJobId, { lock: true });
+    if (row.job_status === "committed") throw statementError(
+      "Committed source evidence cannot be cleared because it supports posted ledger data.",
+      "COMMITTED_STATEMENT_DELETE_FORBIDDEN", undefined, 409);
+    const [evidenceRows] = await connection.query(
+      `SELECT storage_key
+         FROM accounting_evidence_files
+        WHERE evidence_file_id = ? AND owner_person_id = ?
+        FOR UPDATE`,
+      [row.evidence_file_id, ownerId(personId)],
+    );
+    if (!evidenceRows.length) throw statementError(
+      "Evidence file not found.", "EVIDENCE_FILE_NOT_FOUND", undefined, 404);
+    await connection.query(
+      `DELETE FROM accounting_statement_import_jobs
+        WHERE statement_import_job_id = ? AND owner_person_id = ?`,
+      [row.statement_import_job_id, ownerId(personId)],
+    );
+    if (row.import_plan_id != null) {
+      await connection.query(
+        `DELETE FROM accounting_import_plans
+          WHERE import_plan_id = ? AND owner_person_id = ? AND plan_status <> 'committed'`,
+        [row.import_plan_id, ownerId(personId)],
+      );
+    }
+    const [references] = await connection.query(
+      `SELECT
+         (SELECT COUNT(*) FROM accounting_statement_import_jobs WHERE evidence_file_id = ?) AS job_count,
+         (SELECT COUNT(*) FROM line_item_evidence_links WHERE evidence_file_id = ?) AS line_count,
+         (SELECT COUNT(*) FROM balance_assertion_evidence_links WHERE evidence_file_id = ?) AS assertion_count`,
+      [row.evidence_file_id, row.evidence_file_id, row.evidence_file_id],
+    );
+    const evidenceStillReferenced = Number(references[0]?.job_count ?? 0)
+      + Number(references[0]?.line_count ?? 0) + Number(references[0]?.assertion_count ?? 0) > 0;
+    if (!evidenceStillReferenced) {
+      await connection.query(
+        `DELETE FROM accounting_evidence_files
+          WHERE evidence_file_id = ? AND owner_person_id = ?`,
+        [row.evidence_file_id, ownerId(personId)],
+      );
+    }
+    return {
+      statementImportJobId: String(row.statement_import_job_id),
+      evidenceFileId: Number(row.evidence_file_id),
+      evidenceDeleted: !evidenceStillReferenced,
+      evidenceStorageKey: evidenceStillReferenced ? null : String(evidenceRows[0].storage_key),
+      removedCanonicalArtifactId: row.canonical_artifact_id == null
+        ? null : String(row.canonical_artifact_id),
+    };
+  });
+  return removed;
+}
+
+export async function removeEvidenceStorageFile({ evidenceRoot, storageKey }) {
+  if (storageKey == null) return;
+  await rm(evidencePath(evidenceRoot, String(storageKey)), { force: true });
 }
 
 export async function getEvidenceFile({ pool, personId, evidenceFileId }) {

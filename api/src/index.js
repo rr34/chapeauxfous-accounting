@@ -28,9 +28,11 @@ import {
   STATEMENT_EVIDENCE_MAX_BYTES,
   createStatementImportFromPdf,
   createTransactionListImportFromText,
+  deleteStatementImportJob,
   getStatementImportJob,
   listStatementImportJobs,
   resolveEvidenceRoot,
+  removeEvidenceStorageFile,
   restartStatementImportJob,
   sendEvidenceFileContent,
 } from "./statement-import-jobs.js";
@@ -194,6 +196,20 @@ app.post("/api/statement-import-jobs/:statementImportJobId/restart", requireAuth
         artifactId: restarted.removedCanonicalArtifactId });
     }
     res.status(201).json({ job: restarted.job });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/statement-import-jobs/:statementImportJobId", requireAuth, async (req, res, next) => {
+  try {
+    const removed = await deleteStatementImportJob({ pool, personId: req.auth.personId,
+      statementImportJobId: req.params.statementImportJobId });
+    if (removed.removedCanonicalArtifactId) {
+      await removeArtifactUpload({ artifactRoot, personId: req.auth.personId,
+        artifactId: removed.removedCanonicalArtifactId });
+    }
+    await removeEvidenceStorageFile({ evidenceRoot, storageKey: removed.evidenceStorageKey });
+    res.json({ deleted: true, statementImportJobId: removed.statementImportJobId,
+      evidenceFileId: removed.evidenceFileId, evidenceDeleted: removed.evidenceDeleted });
   } catch (error) { next(error); }
 });
 

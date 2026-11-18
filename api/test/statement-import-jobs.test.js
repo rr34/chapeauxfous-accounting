@@ -9,7 +9,9 @@ import {
   bindStatementImportPreview,
   createStatementImportFromPdf,
   createTransactionListImportFromText,
+  deleteStatementImportJob,
   readOneAccountImportEvidenceText,
+  removeEvidenceStorageFile,
   restartStatementImportJob,
   sendEvidenceFileContent,
   startStatementImportJob,
@@ -59,7 +61,8 @@ function statementPool() {
           evidence_currency_code: evidence.currency_id == null ? null : "USD",
           evidence_currency_scale: evidence.currency_id == null ? null : 2 }]];
       }
-      if (sql.includes("FROM accounting_evidence_files")) {
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM accounting_evidence_files")
+          && !sql.includes("AS job_count")) {
         const [id, owner] = params;
         const evidence = state.evidence.get(Number(id));
         return [[evidence?.owner_person_id === owner ? evidence : undefined].filter(Boolean)];
@@ -98,6 +101,17 @@ function statementPool() {
         const job = state.jobs.get(id);
         if (job?.owner_person_id === owner) state.jobs.delete(id);
         return [{ affectedRows: job ? 1 : 0 }];
+      }
+      if (sql.includes("AS job_count") && sql.includes("AS line_count")) {
+        const evidenceFileId = Number(params[0]);
+        return [[{ job_count: [...state.jobs.values()].filter((job) =>
+          Number(job.evidence_file_id) === evidenceFileId).length, line_count: 0, assertion_count: 0 }]];
+      }
+      if (sql.includes("DELETE FROM accounting_evidence_files")) {
+        const [evidenceFileId, owner] = params;
+        const evidence = state.evidence.get(Number(evidenceFileId));
+        if (evidence?.owner_person_id === owner) state.evidence.delete(Number(evidenceFileId));
+        return [{ affectedRows: evidence ? 1 : 0 }];
       }
       throw new Error(`Unexpected query: ${sql}`);
     },
@@ -211,6 +225,35 @@ test("plain copied transaction evidence creates a transaction-list handoff witho
   await finished;
   assert.equal(response.headers.get("content-type"), "text/plain");
   assert.equal(response.body.toString("utf8"), text);
+});
+
+test("clearing an uncommitted import removes unreferenced source evidence bytes", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+  const pool = statementPool();
+  const text = "2026-11-10 | The Home Depot | 75.00";
+  const digest = createHash("sha256").update(Buffer.from(text)).digest("hex");
+  const first = await createTransactionListImportFromText({
+    pool, evidenceRoot, personId: 7, accountId: 34, fileName: "first.txt", text,
+  });
+  const second = await createTransactionListImportFromText({
+    pool, evidenceRoot, personId: 7, accountId: 34, fileName: "same.txt", text,
+  });
+  const storedPath = path.join(evidenceRoot, `owner-7/sha256/${digest}.txt`);
+
+  const sharedRemoval = await deleteStatementImportJob({ pool, personId: 7,
+    statementImportJobId: first.id });
+  assert.equal(sharedRemoval.evidenceDeleted, false);
+  assert.equal(sharedRemoval.evidenceStorageKey, null);
+  assert.equal((await readFile(storedPath)).toString(), text);
+
+  const finalRemoval = await deleteStatementImportJob({ pool, personId: 7,
+    statementImportJobId: second.id });
+  assert.equal(finalRemoval.evidenceDeleted, true);
+  await removeEvidenceStorageFile({ evidenceRoot, storageKey: finalRemoval.evidenceStorageKey });
+  await assert.rejects(readFile(storedPath), (error) => error.code === "ENOENT");
+  assert.equal(pool.state.evidence.size, 0);
+  assert.equal(pool.state.jobs.size, 0);
 });
 
 test("PDF and text evidence can each use either one-account interpretation", async (t) => {

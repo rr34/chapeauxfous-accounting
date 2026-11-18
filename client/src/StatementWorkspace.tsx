@@ -166,6 +166,23 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     finally { setBusy(""); }
   }
 
+  async function clearSourceEvidence() {
+    if (!activeStatementJob || !window.confirm(
+      "Clear this saved source evidence? This permanently removes the uncommitted import job, its pending preview, and its derived artifact. The source file is also deleted unless another import or posted ledger record still references the same evidence.",
+    )) return;
+    setBusy("delete-evidence"); setError(""); setNotice("");
+    try {
+      const result = await api<{ evidenceDeleted: boolean }>(
+        `/statement-import-jobs/${activeStatementJob.id}`, { method: "DELETE" }, token,
+      );
+      setStatementJobs((current) => current.filter((job) => job.id !== activeStatementJob.id));
+      setNotice(result.evidenceDeleted
+        ? "The uncommitted import and its saved source evidence were permanently removed."
+        : "The uncommitted import was removed. The source evidence remains because another import or posted ledger record references it.");
+    } catch (nextError) { setError(message(nextError)); }
+    finally { setBusy(""); }
+  }
+
   return <section className="statement-workspace card">
     <div className="section-heading"><div><p className="eyebrow">Agent import workflow</p>
       <h2>Import transactions for one account</h2></div></div>
@@ -208,11 +225,15 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         {activeStatementJob && <div className="statement-file"><strong>{activeStatementJob.evidenceFile.fileName}</strong>
           <span>{activeStatementJob.status.replaceAll("_", " ")} · {activeStatementJob.evidenceFile.sha256}</span>
           {evidenceSignificance.map((value) => <span key={value}>{value}</span>)}
-          <button type="button" className="link-button" onClick={() => void downloadEvidenceFile(
-            activeStatementJob.evidenceFile.downloadPath
-              ?? `/api/evidence-files/${activeStatementJob.evidenceFile.id}/content`,
-            activeStatementJob.evidenceFile.fileName, token,
-          ).catch((nextError) => setError(message(nextError)))}>Download source evidence</button></div>}
+          <div className="statement-evidence-actions"><button type="button" className="link-button"
+            disabled={Boolean(busy)} onClick={() => void downloadEvidenceFile(
+              activeStatementJob.evidenceFile.downloadPath
+                ?? `/api/evidence-files/${activeStatementJob.evidenceFile.id}/content`,
+              activeStatementJob.evidenceFile.fileName, token,
+            ).catch((nextError) => setError(message(nextError)))}>Download source evidence</button>
+          <button type="button" className="danger-link" disabled={Boolean(busy)}
+            onClick={() => void clearSourceEvidence()}>
+            {busy === "delete-evidence" ? "Clearing…" : "Clear saved source evidence"}</button></div></div>}
 
         <h3>2. Designate where unknown sides wait</h3>
         {suspense && <p className="statement-file">Suspense account: {paths.get(suspense.id)} · {suspense.currencyCode}</p>}

@@ -119,6 +119,7 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .statement-workspace .handoff-copy.copied { background: #4e8a57; box-shadow: 0 0 0 3px #dcebdd; }
 .statement-file, .statement-sample, .statement-review { margin: .75rem 0; border-radius: 8px; background: #f2f5f0; padding: .7rem; font-size: .77rem; }
 .statement-file { display: grid; gap: .35rem; overflow-wrap: anywhere; }
+.statement-evidence-actions { display: flex; flex-wrap: wrap; gap: .35rem .8rem; align-items: center; }
 .statement-sample > div { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .3rem; color: #526158; }
 .statement-review { border-left: 4px solid #9eb49f; }
 .statement-review h3 { margin-top: 0; }
