@@ -28,15 +28,15 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const postable = accounts.filter((account) => !account.placeholder && !account.archivedAt);
   const [accountId, setAccountId] = useState(initialAccountId == null ? "" : String(initialAccountId));
   const [designationId, setDesignationId] = useState("");
-  const [statementFile, setStatementFile] = useState<File | null>(null);
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [transactionText, setTransactionText] = useState("");
-  const [transactionTextName, setTransactionTextName] = useState("pasted-transactions.txt");
   const [statementJobs, setStatementJobs] = useState<StatementImportJob[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [handoffCopied, setHandoffCopied] = useState<"statement" | "transactions" | "">("");
   const copiedResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sourceFileInput = useRef<HTMLInputElement | null>(null);
   const account = postable.find((candidate) => candidate.id === Number(accountId));
   const suspense = postable.find((candidate) => candidate.suspense
     && candidate.currencyId === account?.currencyId && candidate.id !== account?.id);
@@ -102,14 +102,26 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     finally { setBusy(""); }
   }
 
-  async function uploadStatement() {
-    if (!account || !statementFile) return;
+  async function uploadSourceEvidence() {
+    if (!account || !sourceFile) return;
     setBusy("upload"); setError(""); setNotice("");
     try {
-      const result = await uploadStatementPdf<{ job: StatementImportJob }>(account.id, statementFile, token);
+      const lowerName = sourceFile.name.toLowerCase();
+      const isPdf = sourceFile.type === "application/pdf" || lowerName.endsWith(".pdf");
+      const isText = ["text/plain", "text/csv", "application/csv"].includes(sourceFile.type)
+        || lowerName.endsWith(".txt") || lowerName.endsWith(".csv");
+      if (!isPdf && !isText) throw new Error("Choose a PDF, TXT, or CSV file.");
+      const result = isPdf
+        ? await uploadStatementPdf<{ job: StatementImportJob }>(account.id, sourceFile, token)
+        : await api<{ job: StatementImportJob }>(
+          `/accounts/${account.id}/transaction-list-import-jobs`, {
+            method: "POST", body: JSON.stringify({ fileName: sourceFile.name, text: await sourceFile.text() }),
+          }, token,
+        );
       setStatementJobs((current) => [result.job, ...current]);
-      setStatementFile(null);
-      setNotice("The original PDF evidence is saved in Accounting. Nothing has been posted.");
+      setSourceFile(null);
+      if (sourceFileInput.current) sourceFileInput.current.value = "";
+      setNotice(`${isPdf ? "The original PDF" : "The uploaded text"} evidence is saved in Accounting. Nothing has been posted.`);
     } catch (nextError) { setError(message(nextError)); }
     finally { setBusy(""); }
   }
@@ -120,7 +132,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     try {
       const result = await api<{ job: StatementImportJob }>(
         `/accounts/${account.id}/transaction-list-import-jobs`, {
-          method: "POST", body: JSON.stringify({ fileName: transactionTextName, text: transactionText }),
+          method: "POST", body: JSON.stringify({ fileName: "pasted-transactions.txt", text: transactionText }),
         }, token,
       );
       setStatementJobs((current) => [result.job, ...current]);
@@ -204,23 +216,17 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
 
         <h3>1. Save source evidence</h3>
         {!activeStatementJob && <>
-          <label>PDF evidence<input type="file" accept="application/pdf,.pdf"
-            onChange={(event) => setStatementFile(event.target.files?.[0] ?? null)} /></label>
-          <button type="button" className="primary" disabled={!account || !statementFile || Boolean(busy)}
-            onClick={() => void uploadStatement()}>{busy === "upload" ? "Uploading…" : "Save PDF in Accounting"}</button>
-          <p className="muted">or paste/upload text evidence. Either format can be interpreted as a statement or as a transaction list.</p>
-          <label>Text evidence file<input type="file" accept="text/plain,text/csv,.txt,.csv"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              setTransactionTextName(file.name);
-              void file.text().then(setTransactionText).catch((nextError) => setError(message(nextError)));
-            }} /></label>
+          <label>Evidence file (PDF, TXT, or CSV)<input ref={sourceFileInput} type="file"
+            accept="application/pdf,text/plain,text/csv,.pdf,.txt,.csv"
+            onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)} /></label>
+          <button type="button" className="primary" disabled={!account || !sourceFile || Boolean(busy)}
+            onClick={() => void uploadSourceEvidence()}>{busy === "upload" ? "Uploading…" : "Save uploaded file"}</button>
+          <p className="muted">Or paste text directly below. Uploaded files and pasted text can each be interpreted as a statement or as a transaction list.</p>
           <label>Copied evidence text<textarea rows={10} value={transactionText}
             placeholder="Paste statement details or a transaction list here. Extra headings, categories, formatting, and unrelated text are okay."
-            onChange={(event) => { setTransactionText(event.target.value); setTransactionTextName("pasted-transactions.txt"); }} /></label>
+            onChange={(event) => setTransactionText(event.target.value)} /></label>
           <button type="button" className="secondary" disabled={!account || !transactionText.trim() || Boolean(busy)}
-            onClick={() => void saveTransactionText()}>{busy === "text-upload" ? "Saving…" : "Save text evidence"}</button>
+            onClick={() => void saveTransactionText()}>{busy === "text-upload" ? "Saving…" : "Save pasted text"}</button>
         </>}
         {activeStatementJob && <div className="statement-file"><strong>{activeStatementJob.evidenceFile.fileName}</strong>
           <span>{activeStatementJob.status.replaceAll("_", " ")} · {activeStatementJob.evidenceFile.sha256}</span>
