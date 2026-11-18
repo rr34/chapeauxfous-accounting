@@ -3,20 +3,6 @@ import { api, downloadEvidenceFile, uploadStatementPdf } from "./api";
 import { unitsToDecimal } from "./money";
 import type { Account, BalanceAssertion, StatementImportJob } from "./types";
 
-type AccountingQuestion = {
-  lineItemId: number;
-  transactionDate: string;
-  transactionDescription: string | null;
-  accountFullName: string;
-  accountId: number;
-  currencyId: number;
-  currencyCode: string;
-  scale: number;
-  amountUnits: string;
-  audience: string;
-  prompt: string;
-};
-
 function fullPaths(accounts: Account[]) {
   const byId = new Map(accounts.map((account) => [account.id, account]));
   const resolve = (account: Account): string => {
@@ -44,10 +30,6 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const [designationId, setDesignationId] = useState("");
   const [statementFile, setStatementFile] = useState<File | null>(null);
   const [statementJobs, setStatementJobs] = useState<StatementImportJob[]>([]);
-  const [questions, setQuestions] = useState<AccountingQuestion[]>([]);
-  const [questionCursor, setQuestionCursor] = useState<string | null>(null);
-  const [questionTargets, setQuestionTargets] = useState<Record<number, string>>({});
-  const [questionNotes, setQuestionNotes] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -118,18 +100,6 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     finally { setBusy(""); }
   }
 
-  async function loadQuestions(cursor: string | null = null) {
-    const result = await api<{ questions: AccountingQuestion[]; nextCursor: string | null }>(
-      `/accounting-questions?status=open&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {}, token,
-    );
-    setQuestions((current) => cursor ? [...current, ...result.questions] : result.questions);
-    setQuestionCursor(result.nextCursor);
-  }
-
-  useEffect(() => {
-    void loadQuestions().catch((nextError) => setError(message(nextError)));
-  }, [token]);
-
   async function uploadStatement() {
     if (!account || !statementFile) return;
     setBusy("upload"); setError(""); setNotice("");
@@ -173,28 +143,6 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
       setNotice("The processing state was removed and a fresh job was created from the unchanged original PDF.");
     } catch (nextError) { setError(message(nextError)); }
     finally { setBusy(""); }
-  }
-
-  async function assign(question: AccountingQuestion) {
-    const targetAccountId = Number(questionTargets[question.lineItemId]);
-    if (!targetAccountId) return;
-    setBusy(`question-${question.lineItemId}`);
-    setError("");
-    try {
-      await api(`/accounting-questions/${question.lineItemId}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({
-          targetAccountId,
-          resolution: questionNotes[question.lineItemId] || null,
-        }),
-      }, token);
-      await loadQuestions();
-      await onChanged();
-    } catch (nextError) {
-      setError(message(nextError));
-    } finally {
-      setBusy("");
-    }
   }
 
   return <section className="statement-workspace card">
@@ -268,36 +216,6 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         {activeStatementJob && <button type="button" className="link-button" disabled={Boolean(busy)}
           onClick={() => void loadStatementJobs().catch((nextError) => setError(message(nextError)))}>
           Refresh statement status</button>}
-      </section>
-
-      <section className="statement-questions-panel">
-        <h3>Open suspense questions <span>{questions.length}{questionCursor ? "+" : ""}</span></h3>
-        <p className="muted">Review these after other accounts or evidence are imported. Matching entries with fees or different quantities is a later step; use final account assignment only when the evidence supports it.</p>
-        {questions.map((question) => <article className="statement-question" key={question.lineItemId}>
-          <div><strong>{question.transactionDescription || question.prompt}</strong>
-            <small>{question.transactionDate} · {question.accountFullName} · {question.audience}</small></div>
-          <b>{unitsToDecimal(question.amountUnits, question.scale)} {question.currencyCode}</b>
-          <p>{question.prompt}</p>
-          <div className="statement-question-fields">
-            <label>Final account<select value={questionTargets[question.lineItemId] ?? ""}
-              onChange={(event) => setQuestionTargets((current) => ({ ...current, [question.lineItemId]: event.target.value }))}>
-              <option value="">Choose account</option>
-              {postable.filter((candidate) => candidate.currencyId === question.currencyId
-                && candidate.id !== question.accountId).map((candidate) => <option key={candidate.id} value={candidate.id}>
-                  {paths.get(candidate.id)}
-                </option>)}
-            </select></label>
-            <label>Evidence / reason<input value={questionNotes[question.lineItemId] ?? ""}
-              placeholder="Receipt, merchant, or decision"
-              onChange={(event) => setQuestionNotes((current) => ({ ...current, [question.lineItemId]: event.target.value }))} /></label>
-          </div>
-          <button type="button" className="secondary" disabled={!questionTargets[question.lineItemId] || Boolean(busy)}
-            onClick={() => void assign(question)}>{busy === `question-${question.lineItemId}` ? "Assigning…" : "Assign suspense line"}</button>
-        </article>)}
-        {questionCursor && <button type="button" className="secondary" disabled={Boolean(busy)}
-          onClick={() => void loadQuestions(questionCursor).catch((nextError) => setError(message(nextError)))}>
-          Load more questions</button>}
-        {!questions.length && <p className="statement-empty">No open accounting questions.</p>}
       </section>
     </div>
     {notice && <p className="statement-success" role="status">{notice}</p>}

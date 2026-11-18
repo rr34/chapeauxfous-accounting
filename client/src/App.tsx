@@ -3,6 +3,7 @@ import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import { descriptionFamily } from "./description-family";
 import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs";
+import { knownBalanceOrderForSameDate } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
@@ -2106,6 +2107,9 @@ function compareRegisterSortValues(left: string | bigint | number | null,
 
 function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow,
   sort: RegisterSort, account: Account, accountNames: Map<number, string>) {
+  const knownBalanceOrder = knownBalanceOrderForSameDate(left.date, left.kind === "assertion",
+    right.date, right.kind === "assertion");
+  if (knownBalanceOrder != null) return knownBalanceOrder;
   const primary = compareRegisterSortValues(registerRowSortValue(left, sort.key, account, accountNames),
     registerRowSortValue(right, sort.key, account, accountNames), sort.direction);
   if (primary !== 0) return primary;
@@ -3799,7 +3803,7 @@ export default function App() {
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
         <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
-          onClick={() => selectWorkspaceView("statements")}>Statements &amp; questions</button>
+          onClick={() => selectWorkspaceView("statements")}>Statements</button>
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
           onClick={() => selectWorkspaceView("misfits")}>Import issues
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
