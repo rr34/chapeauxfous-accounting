@@ -102,6 +102,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       byteSize: 2048, sha256: `sha256:${"9".repeat(64)}`, method: "GET",
       endpointPath: "/mcp/evidence-files/81/content", acceptsByteRanges: true },
     copiedPrompt: "Process accounting://statement-import-jobs/728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
+    transactionListCopiedPrompt: "Process this same evidence as a transaction list.",
   });
   const services = {
     async listStatementImportJobObjectsPage(_pool, _personId, options) {

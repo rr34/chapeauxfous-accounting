@@ -519,7 +519,7 @@ function transactionListConfirmationInstruction({ accountDisplayName, preview })
 }
 
 function statementJobMetadata(job) {
-  const { download: _download, ...metadata } = job;
+  const { download: _download, transactionListCopiedPrompt: _transactionListCopiedPrompt, ...metadata } = job;
   return metadata;
 }
 
