@@ -1,13 +1,17 @@
-const accountingTables = Object.freeze([
-  "account_balance_assertions", "accounting_import_plans", "accounting_schema_metadata", "accounting_transaction_import_items",
-  "accounting_transaction_import_jobs", "accounting_transaction_import_requests", "accounts",
-  "api_tokens", "currencies", "line_items", "lineitems_tags_join", "people2_people", "tags", "transactions", "xrates",
+export const accountingStorageTables = Object.freeze([
+  "account_balance_assertions", "accounting_import_plans", "accounting_purchase_evidence_adjustments",
+  "accounting_purchase_evidence_items", "accounting_purchase_evidence_job_lines", "accounting_purchase_evidence_jobs",
+  "accounting_purchase_evidence_records", "accounting_purchase_evidence_sources", "accounting_schema_metadata",
+  "accounting_transaction_import_items", "accounting_transaction_import_jobs", "accounting_transaction_import_requests",
+  "accounting_transaction_merges", "accounting_evidence_files", "accounting_statement_import_jobs",
+  "line_item_evidence_links", "balance_assertion_evidence_links", "accounts", "api_tokens", "currencies",
+  "line_items", "lineitems_tags_join", "people2_people", "tags", "transactions", "xrates",
 ]);
 
 const ignoredWords = new Set(["a", "an", "and", "are", "by", "for", "how", "in", "is", "of", "on", "or", "the", "to", "what", "with"]);
 
 export async function describeAccountingSchema(pool, databaseName, request) {
-  const placeholders = accountingTables.map(() => "?").join(", ");
+  const placeholders = accountingStorageTables.map(() => "?").join(", ");
   const [rows] = await pool.query(
     `SELECT t.TABLE_NAME AS tableName, t.TABLE_COMMENT AS tableComment,
             c.COLUMN_NAME AS columnName, c.COLUMN_TYPE AS columnType,
@@ -17,7 +21,7 @@ export async function describeAccountingSchema(pool, databaseName, request) {
          ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
       WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME IN (${placeholders})
       ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION`,
-    [databaseName, ...accountingTables],
+    [databaseName, ...accountingStorageTables],
   );
   const terms = [...new Set(String(request).toLowerCase().match(/[a-z0-9_]+/g) ?? [])]
     .filter((term) => !ignoredWords.has(term));

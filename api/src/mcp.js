@@ -167,6 +167,7 @@ import {
   startPurchaseEvidenceJob,
   submitPurchaseEvidencePreview,
 } from "./purchase-evidence-jobs.js";
+import { mergeSuspenseTransferPair } from "./suspense-transfer-merge.js";
 
 const readOnly = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 const writesData = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -631,6 +632,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     submitPurchaseEvidencePreview: services.submitPurchaseEvidencePreview ?? submitPurchaseEvidencePreview,
     commitPurchaseEvidenceJob: services.commitPurchaseEvidenceJob ?? commitPurchaseEvidenceJob,
     restartPurchaseEvidenceJob: services.restartPurchaseEvidenceJob ?? restartPurchaseEvidenceJob,
+    mergeSuspenseTransferPair: services.mergeSuspenseTransferPair ?? mergeSuspenseTransferPair,
     listTransactionImportExceptions: services.listTransactionImportExceptions ?? listTransactionImportExceptions,
     previewTransactionImportJob: services.previewTransactionImportJob ?? previewTransactionImportJob,
     commitTransactionImportJob: services.commitTransactionImportJob ?? commitTransactionImportJob,
@@ -695,7 +697,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   server.registerResource("accounting-purchase-evidence-canonical-schema",
     purchaseEvidenceCanonicalJsonSchema.$id, {
       title: "Canonical purchase evidence JSON Schema",
-      description: "The exact provider-neutral receipt, source-reference, item, and pre-tax amount schema for purchase-evidence JSON Lines artifacts.",
+      description: "The exact provider-neutral receipt, source-reference, item, tax, and signed adjustment schema for purchase-evidence JSON Lines artifacts.",
       mimeType: "application/schema+json",
     }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "application/schema+json",
       text: JSON.stringify(purchaseEvidenceCanonicalJsonSchema) }] }));
@@ -1079,6 +1081,33 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const accountingQuestionMutationOutput = successOutputSchema({
     question: accountingQuestionSchema, changed: z.boolean().optional(),
+    effectReceipt: effectReceiptSchema,
+  });
+  const suspenseTransferMergeOutput = successOutputSchema({
+    retainedTransactionId: z.number().int().positive(),
+    absorbedTransactionId: z.number().int().positive(),
+    retainedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    absorbedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    dateGapDays: z.number().int().min(0).max(3),
+    amountUnits: z.string().regex(/^-?\d+$/),
+    movedLineItemId: z.number().int().positive(),
+    retainedAccountId: z.number().int().positive(),
+    retainedAccountName: z.string().min(1),
+    absorbedAccountId: z.number().int().positive(),
+    absorbedAccountName: z.string().min(1),
+    retainedTransactionObject: z.object({
+      objectType: z.literal("accounting.transaction"),
+      objectRole: z.literal("merged_transfer"),
+      id: z.number().int().positive(),
+      sourceRef: z.string().min(1),
+      displayName: z.string().min(1),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      state: z.enum(["draft", "posted", "voided"]),
+      valuationCurrencyCode: z.string().min(1),
+      accountIds: z.array(z.number().int().positive()).length(2),
+    }),
+    transaction: transactionSchema,
+    completionNote: z.string().min(1),
     effectReceipt: effectReceiptSchema,
   });
   const accountReconciliationOutput = successOutputSchema({
@@ -2279,7 +2308,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("get_transaction", {
     title: "Get transaction",
-    description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line amounts and valuation values, tags, and any legacy transaction exchange rates.",
+    description: "Use to inspect one transaction after its owner-scoped ID is known. A successful result proves the current header, line amounts and valuation values, tags, any legacy transaction exchange rates, and any original source headers absorbed while connecting an exact suspense transfer.",
     inputSchema: { transaction_id: positiveInteger("Transaction id.") },
     outputSchema: transactionReadOutput,
     annotations: readOnly,
@@ -2513,6 +2542,51 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     };
   }));
 
+  registerTool("merge_suspense_transfer_pair", {
+    title: "Merge exact suspense transfer pair",
+    description: "Use only after the user chooses which of two imported transactions should survive. Accounting revalidates that the two identified open suspense questions are exact opposite same-currency amounts no more than three calendar days apart. It moves the absorbed transaction's real statement posting into the retained transaction, removes the cancelling suspense postings, redirects import provenance, and preserves the absorbed transaction's original ID, date, description, and source identity as merge evidence. The retained transaction supplies the final date and header; both real statement postings, line IDs, reconciliation states, and evidence remain connected in one transfer.",
+    inputSchema: {
+      line_item_ids: z.array(positiveInteger("Open suspense accounting-question ID.")).length(2),
+      retained_transaction_id: positiveInteger("One selected pair transaction whose date and header should survive."),
+    },
+    outputSchema: suspenseTransferMergeOutput,
+    annotations: destructiveWrite,
+    _meta: toolMetadata("accounting.transactions", {
+      dependencies: ["list_accounting_question_objects", "list_transaction_objects"],
+      objectInputs: [
+        { path: "/line_item_ids/*", objectType: "accounting.question", value: "id" },
+        { path: "/retained_transaction_id", objectType: "accounting.transaction", value: "id" },
+      ],
+    }),
+  }, async ({ line_item_ids, retained_transaction_id }) => safeToolResult(async () => {
+    const merged = await accounting.mergeSuspenseTransferPair({
+      pool, personId, lineItemIds: line_item_ids, retainedTransactionId: retained_transaction_id,
+    });
+    const transactionObject = {
+      objectType: "accounting.transaction",
+      objectRole: "merged_transfer",
+      id: merged.transaction.id,
+      sourceRef: `accounting://transactions/${merged.transaction.id}`,
+      displayName: `${merged.transaction.date} · ${merged.transaction.description || `Transaction #${merged.transaction.id}`}`,
+      date: merged.transaction.date,
+      state: merged.transaction.state,
+      valuationCurrencyCode: merged.transaction.lineItems.find((line) =>
+        line.currencyId === merged.transaction.valuationCurrencyId)?.currencyCode
+        ?? merged.transaction.lineItems[0].currencyCode,
+      accountIds: [...new Set(merged.transaction.lineItems.map((line) => line.accountId))],
+    };
+    return {
+      ...merged,
+      retainedTransactionObject: transactionObject,
+      completionNote: `Merged the exact transfer into transaction ${merged.retainedTransactionId}. Its ${merged.retainedDate} date and header survive; the absorbed ${merged.absorbedDate} transaction identity remains stored as merge evidence.`,
+      effectReceipt: effectReceipt("merge_suspense_transfer_pair",
+        { line_item_ids, retained_transaction_id }, "updated", [
+          { type: "transaction", id: merged.retainedTransactionId },
+          { type: "line_item", id: merged.movedLineItemId },
+        ]),
+    };
+  }));
+
   const purchaseEvidenceRecordSchema = z.object({
     target_line_item_id: z.number().int().positive(),
     sources: z.array(z.object({
@@ -2525,6 +2599,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     purchase_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
     charge_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
     tax_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+    adjustments: z.array(z.object({
+      kind: z.enum(["discount", "shipping", "handling", "fee", "tip", "other"]),
+      description: z.string().trim().min(1).max(1024),
+      amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
+    }).strict()).max(100),
     items: z.array(z.object({
       source_item_id: z.string().trim().max(255).nullable(),
       description: z.string().trim().min(1).max(16000),
@@ -2584,8 +2663,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       rules: [
         "A source amount is evidence, not a category. Do not choose or infer final expense accounts.",
         "Each record targets one exact selected lineItemId and its positive charge magnitude must match exactly.",
-        "Preserve item amounts before sales tax and the receipt-level tax separately. Accounting performs deterministic native-unit allocation.",
-        "Pre-tax item amounts plus receipt tax must equal the final charge. Do not hide shipping, discounts, tips, fees, or unexplained residuals inside sales tax.",
+        "Preserve item amounts before sales tax, receipt-level tax, and every explicit signed adjustment separately. Accounting performs deterministic native-unit allocation.",
+        "Pre-tax item amounts plus receipt tax plus explicit discounts, shipping, handling, fees, tips, and other adjustments must equal the final charge. Never hide an adjustment or unexplained residual inside sales tax.",
         "Omit unsupported matches from the artifact; Accounting leaves those selected charges unchanged.",
       ],
       effectReceipt: effectReceipt("start_purchase_evidence_job", { purchase_evidence_job_id }, "updated", [
@@ -2596,7 +2675,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("submit_purchase_evidence_job_artifact", {
     title: "Submit purchase evidence preview",
-    description: "Consume one complete canonical JSON Lines artifact for an already-started purchase-evidence job. Accounting validates the exact selected targets, exact charge magnitudes, item subtotal plus receipt tax, and source references; it allocates tax proportionally in integer native units using deterministic largest remainders. A successful result saves a pending preview only. Present nextAction.instruction literally and do not commit in the same request.",
+    description: "Consume one complete canonical JSON Lines artifact for an already-started purchase-evidence job. Accounting validates the exact selected targets, exact charge magnitudes, item subtotal plus receipt tax plus explicit signed adjustments, and source references; it allocates tax and each adjustment proportionally in integer native units using deterministic largest remainders. A successful result saves a pending preview only. Present nextAction.instruction literally and do not commit in the same request.",
     inputSchema: {
       purchase_evidence_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
@@ -2621,7 +2700,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       importJobId: purchase_evidence_job_id });
     const job = await accounting.submitPurchaseEvidencePreview({ pool, personId,
       purchaseEvidenceJobId: purchase_evidence_job_id, canonicalArtifactId: artifact_id, records: parsed.data });
-    const instruction = `Apply ${job.matchedCount} matched receipt charge${job.matchedCount === 1 ? "" : "s"} as ${job.itemCount} tax-inclusive item split${job.itemCount === 1 ? "" : "s"} in ${job.suspenseAccount.displayName}, while leaving ${job.unmatchedCount} unmatched selected charge${job.unmatchedCount === 1 ? "" : "s"} unchanged?`;
+    const instruction = `Apply ${job.matchedCount} matched receipt charge${job.matchedCount === 1 ? "" : "s"} as ${job.itemCount} final-cost item split${job.itemCount === 1 ? "" : "s"} in ${job.suspenseAccount.displayName}, while leaving ${job.unmatchedCount} unmatched selected charge${job.unmatchedCount === 1 ? "" : "s"} unchanged?`;
     return {
       status: "ready", job,
       nextAction: { type: "request_user_confirmation", instruction,
@@ -2636,7 +2715,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("commit_purchase_evidence_job", {
     title: "Apply purchase evidence item splits",
-    description: "Commit the exact prepared purchase-evidence preview after the user approves its provider-written confirmation. Accounting retains each original transaction, replaces only its matched suspense posting with tax-inclusive item postings that sum exactly to the original amount and value, opens one classification question per item, and leaves unmatched selected charges unchanged.",
+    description: "Commit the exact prepared purchase-evidence preview after the user approves its provider-written confirmation. Accounting retains each original transaction, replaces only its matched suspense posting with final-cost item postings that include allocated tax and adjustments and sum exactly to the original amount and value, opens one classification question per item, and leaves unmatched selected charges unchanged.",
     inputSchema: { purchase_evidence_job_id: z.string().trim().uuid() },
     outputSchema: purchaseEvidenceCommitOutput,
     annotations: idempotentWrite,
@@ -2651,7 +2730,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     return {
       ...committed,
       completionNote: committed.changed
-        ? `${committed.matchedChargeCount} matched charge${committed.matchedChargeCount === 1 ? "" : "s"} now appear in the suspense register as ${committed.resultingItemCount} separate tax-inclusive purchase questions. ${committed.job.unmatchedCount} unmatched selected charge${committed.job.unmatchedCount === 1 ? "" : "s"} remain unchanged.`
+        ? `${committed.matchedChargeCount} matched charge${committed.matchedChargeCount === 1 ? "" : "s"} now appear in the suspense register as ${committed.resultingItemCount} separate final-cost purchase questions. ${committed.job.unmatchedCount} unmatched selected charge${committed.job.unmatchedCount === 1 ? "" : "s"} remain unchanged.`
         : "This purchase-evidence preview was already committed; no ledger data changed.",
       effectReceipt: effectReceipt("commit_purchase_evidence_job", { purchase_evidence_job_id },
         committed.changed ? "committed" : "unchanged", [

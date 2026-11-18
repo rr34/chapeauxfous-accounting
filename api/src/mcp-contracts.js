@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.16.0";
+export const MCP_SERVER_VERSION = "0.17.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
@@ -152,6 +152,15 @@ export const transactionSchema = z.object({
     toUnits: z.string().regex(/^\d+$/).describe("Positive target-currency units in the exact ratio."),
     toCurrencyId: z.number().int().positive().describe("Target currency ID of the ratio."),
   })).describe("Transaction exchange rates retained for legacy valuation evidence."),
+  mergedTransactions: z.array(z.object({
+    absorbedTransactionId: z.number().int().positive(),
+    originalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    originalDescription: z.string().nullable(),
+    sourceSystem: z.string().nullable(),
+    sourceId: z.string().nullable(),
+    sourceFingerprint: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    mergedAt: z.string().datetime(),
+  })).optional().describe("Original header and source identities absorbed when exact imported transfer sides were connected."),
 });
 
 export const accountingQuestionSchema = z.object({
@@ -425,7 +434,7 @@ export const accountingCapabilityManifest = Object.freeze({
     name: "chapeaux-fous-accounting",
     title: "Chapeaux Fous Accounting",
     version: MCP_SERVER_VERSION,
-    instructions: "For a statement uploaded to Accounting, resolve the stable accounting.statement_import_job reference, call start_statement_import_job, and retrieve the complete immutable original PDF through its authenticated owner-scoped download descriptor. Give the whole original PDF directly to the document-capable model as an input_file with high detail so it receives extracted text and page images for the entire document; do not substitute server-side text extraction, omit pages, filter small print, or place PDF bytes in MCP JSON. Determine the period start date, opening balance, period end date, and closing balance separately across the entire document; each determination has its own found flag and may exist without its paired date or amount. Accounting retains the opening pair as statement evidence and may use it to validate movement, but never creates a ledger known-balance assertion from it. Only a found closing date and closing balance can create a known-balance assertion. Produce complete structured statement-movement objects matching the returned canonical schema; the host validates and materializes their JSON Lines artifact before uploading it through the submission tool's advertised transport. Then call submit_statement_import_job_artifact to create the preview bound to the exact job, account, and evidence file. For accounting.purchase_evidence_job references, start the exact job, search connected receipt emails and supplied files, and submit only canonical item evidence that exactly reconciles to selected charge amounts; Accounting allocates receipt tax and owns the ledger split. Do not guess categories or commit without approval. Jobs process serially. For a statement attached directly to the agent instead, first identify exactly one accounting.account object and use start_single_account_statement_import followed by import_single_account_statement_artifact; use inline import_single_account_statement only for bounded records already present directly in the interaction. Never send one-account statement rows through generic transaction-import jobs or exception-by-exception repair. Report absent evidence values without asking the user to supply them. Do not guess or submit a suspense account, counteraccount, category, fee, price, or transfer during initial intake. Accounting resolves the designated same-currency suspense account. Only a ready result with an importPlanId means a durable preview exists; it is pending and not posted until the exact plan is approved and committed. On error, say clearly that no preview was saved. Do not enumerate every statement row unless asked. After commit, check any known closing balance and reconcile only when it matches. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
+    instructions: "For a statement uploaded to Accounting, resolve the stable accounting.statement_import_job reference, call start_statement_import_job, and retrieve the complete immutable original PDF through its authenticated owner-scoped download descriptor. Give the whole original PDF directly to the document-capable model as an input_file with high detail so it receives extracted text and page images for the entire document; do not substitute server-side text extraction, omit pages, filter small print, or place PDF bytes in MCP JSON. Determine the period start date, opening balance, period end date, and closing balance separately across the entire document; each determination has its own found flag and may exist without its paired date or amount. Accounting retains the opening pair as statement evidence and may use it to validate movement, but never creates a ledger known-balance assertion from it. Only a found closing date and closing balance can create a known-balance assertion. Produce complete structured statement-movement objects matching the returned canonical schema; the host validates and materializes their JSON Lines artifact before uploading it through the submission tool's advertised transport. Then call submit_statement_import_job_artifact to create the preview bound to the exact job, account, and evidence file. For accounting.purchase_evidence_job references, start the exact job, search connected receipt emails and supplied files, and submit only canonical item evidence that exactly reconciles to selected charge amounts; Accounting allocates receipt tax and explicit signed order adjustments and owns the ledger split. Do not guess categories or commit without approval. Jobs process serially. For a statement attached directly to the agent instead, first identify exactly one accounting.account object and use start_single_account_statement_import followed by import_single_account_statement_artifact; use inline import_single_account_statement only for bounded records already present directly in the interaction. Never send one-account statement rows through generic transaction-import jobs or exception-by-exception repair. Report absent evidence values without asking the user to supply them. Do not guess or submit a suspense account, counteraccount, category, fee, price, or transfer during initial intake. Accounting resolves the designated same-currency suspense account. Only a ready result with an importPlanId means a durable preview exists; it is pending and not posted until the exact plan is approved and committed. On error, say clearly that no preview was saved. Do not enumerate every statement row unless asked. After commit, check any known closing balance and reconcile only when it matches. Mutations return effect receipts. Import and deletion workflows require an exact provider plan followed by the matching commit tool.",
     artifactUpload: artifactUploadContract,
   },
   capabilities: [
@@ -465,16 +474,17 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.transactions",
       title: "Double-entry transactions and purchase evidence",
-      summary: "Read, create, import, verify, and permanently delete transactions, and turn receipt evidence for selected suspense charges into reviewable item splits.",
+      summary: "Read, create, import, verify, merge exact suspense transfers, and permanently delete transactions, and turn receipt evidence for selected suspense charges into reviewable item splits.",
       aliases: ["transactions", "journal entries", "ledger entries", "purchase evidence", "receipt emails",
-        "Amazon receipts", "suspense classification"],
-      guidance: "For a copied accounting.purchase_evidence_job, resolve and start that exact job, search connected receipt emails and supplied files, then submit its canonical artifact without guessing final accounts. Accounting owns exact amount checks, tax allocation, preview, and commit. Use generic transaction import only when the source already describes complete balanced transactions with their account sides. Route every file listing movements for one named account through accounting.reconciliation and start_single_account_statement_import, including CSV files and requests to reach a known balance. Permanent deletion requires an MCP preview, one explicit confirmation, and the exact matching commit operation.",
+        "Amazon receipts", "suspense classification", "account transfer", "credit card payment"],
+      guidance: "For a copied accounting.purchase_evidence_job, resolve and start that exact job, search connected receipt emails and supplied files, then submit its canonical artifact without guessing final accounts. Accounting owns exact amount checks, tax and adjustment allocation, preview, and commit. For two identified open suspense questions with unique exact opposite same-currency amounts no more than three calendar days apart, merge them only after the user chooses which imported transaction supplies the surviving date and header. Use generic transaction import only when the source already describes complete balanced transactions with their account sides. Route every file listing movements for one named account through accounting.reconciliation and start_single_account_statement_import, including CSV files and requests to reach a known balance. Permanent deletion requires an MCP preview, one explicit confirmation, and the exact matching commit operation.",
       tools: ["search_transactions", "list_transaction_objects", "list_transactions", "get_transaction", "create_transaction", "get_transaction_import_schema",
         "create_transaction_import_job", "stage_transaction_import_artifact", "stage_transaction_import_chunk", "retry_transaction_import_exception",
         "exclude_transaction_import_exception", "list_transaction_import_jobs", "list_transaction_import_job_objects", "get_transaction_import_job",
         "list_transaction_import_exceptions", "preview_transaction_import_job",
         "commit_transaction_import_job", "import_transactions", "get_transaction_import_plan",
         "commit_transaction_import", "list_accounting_questions", "list_accounting_question_objects", "open_accounting_question", "resolve_accounting_question",
+        "merge_suspense_transfer_pair",
         "list_purchase_evidence_job_objects", "start_purchase_evidence_job",
         "submit_purchase_evidence_job_artifact", "commit_purchase_evidence_job",
         "restart_purchase_evidence_job",
@@ -483,7 +493,7 @@ export const accountingCapabilityManifest = Object.freeze({
       dependencies: ["accounting.accounts", "accounting.currencies"],
       attachmentHints: [
         "For a copied purchase-evidence job, use connected receipt emails and any supplied Amazon export, saved order-history page, receipt archive, or receipt file as source evidence. Return provider-owned source references with each supported match.",
-        "Purchase evidence never chooses final expense accounts. Preserve source item amounts and receipt-level tax separately; Accounting creates the pending tax-inclusive item split.",
+        "Purchase evidence never chooses final expense accounts. Preserve source item amounts, receipt-level tax, and every signed order-level discount, shipping charge, handling charge, fee, tip, or other adjustment separately; Accounting allocates them and creates the pending final-cost item split.",
         "A file listing movements into and out of one named account is a statement, even when it is called a transaction CSV or is expected to reach a known balance. Select accounting.reconciliation and call start_single_account_statement_import; do not create a generic transaction import job for those one-sided rows.",
         "For a generic complete-transaction file tied to a named account, select the accounting.accounts.active_paths context view to resolve its full path and currency once; use list_accounts only when current posted balances are needed.",
         "Fetch the authoritative canonical line-record JSON Schema only when the source already contains enough account sides to assemble complete balanced transactions.",

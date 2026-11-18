@@ -122,6 +122,7 @@ export type AccountLedgerEntry = {
     quantityDecimal: string | null;
     preTaxAmountUnits: string;
     allocatedTaxAmountUnits: string;
+    allocatedAdjustmentAmountUnits: string;
     finalAmountUnits: string;
     sourceRefs: string[];
     sourceNames: string[];
@@ -218,6 +219,15 @@ export type TransactionDetail = {
     tags: Array<{ key: string; value: string }>;
   }>;
   rates: Array<{ id: number; fromUnits: string; fromCurrencyId: number; toUnits: string; toCurrencyId: number }>;
+  mergedTransactions?: Array<{
+    absorbedTransactionId: number;
+    originalDate: string;
+    originalDescription: string | null;
+    sourceSystem: string | null;
+    sourceId: string | null;
+    sourceFingerprint: string | null;
+    mergedAt: string;
+  }>;
 };
 
 export type CanonicalImportRecord = {

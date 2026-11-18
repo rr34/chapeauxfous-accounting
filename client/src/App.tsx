@@ -2,6 +2,7 @@ import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from
 import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
 import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import { descriptionFamily } from "./description-family";
+import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
@@ -1970,6 +1971,14 @@ function Ledger({ transactions, selected, onSelect, onOpenInRegister, onVerify, 
       <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="secondary"
         onClick={() => onOpenInRegister(selected)}>Open in register</button><button type="button" className="danger-link"
           onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
+      {selected.mergedTransactions && selected.mergedTransactions.length > 0 && <details className="transaction-merge-provenance">
+        <summary>Merged transfer source{selected.mergedTransactions.length === 1 ? "" : "s"}</summary>
+        {selected.mergedTransactions.map((merged) => <p key={merged.absorbedTransactionId}>
+          Absorbed transaction #{merged.absorbedTransactionId} · original date {merged.originalDate}
+          {merged.originalDescription ? ` · ${merged.originalDescription}` : ""}
+          {merged.sourceSystem && merged.sourceId ? ` · ${merged.sourceSystem}:${merged.sourceId}` : ""}
+        </p>)}
+      </details>}
       {selected.lineItems.map((line) => <div className="detail-line" key={line.id}><div><strong>{line.accountName}</strong><small>{line.memo}</small>
         {line.tags.length > 0 && <div className="tag-list">{line.tags.map((tag) => <span key={`${tag.key}:${tag.value}`}>{tag.key}:{tag.value}</span>)}</div>}</div>
         <b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
@@ -1988,12 +1997,20 @@ type RegisterSortKey = "date" | "description" | "thisAccount" | "runningBalance"
   | "knownBalance" | "splitAccounts" | "otherAmounts";
 type RegisterSort = { key: RegisterSortKey; direction: "asc" | "desc" };
 type RegisterAccountingQuestion = { lineItemId: number };
-type SuspenseReviewGroup = {
+type SuspenseDescriptionReviewGroup = {
+  kind: "description";
   id: string;
   splitAccountLabel: string;
   descriptionFamily: string;
   rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
 };
+type SuspenseTransferReviewGroup = {
+  kind: "transfer";
+  id: string;
+  dateGapDays: number;
+  rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
+};
+type SuspenseReviewGroup = SuspenseDescriptionReviewGroup | SuspenseTransferReviewGroup;
 type PurchaseEvidenceJob = {
   id: string;
   sourceRef: string;
@@ -2014,6 +2031,7 @@ type PurchaseEvidenceJob = {
     chargeAmountUnits: string;
     taxAmountUnits: string;
     sources: Array<{ kind: string; sourceRef: string; sourceRecordId: string | null; displayName: string | null }>;
+    adjustments: Array<{ kind: string; description: string; amountUnits: string }>;
     items: Array<{
       purchaseEvidenceItemId: number;
       sourceItemId: string | null;
@@ -2021,6 +2039,7 @@ type PurchaseEvidenceJob = {
       quantityDecimal: string | null;
       preTaxAmountUnits: string;
       allocatedTaxAmountUnits: string;
+      allocatedAdjustmentAmountUnits: string;
       finalAmountUnits: string;
       resultingLineItemId: number | null;
     }>;
@@ -2253,24 +2272,48 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     new Set(openSuspenseQuestions.map((question) => question.lineItemId)), [openSuspenseQuestions]);
   const suspenseReviewGroups = useMemo<SuspenseReviewGroup[]>(() => {
     if (!suspenseReviewOpen) return [];
-    const groups = new Map<string, SuspenseReviewGroup>();
+    const openRows = suspenseReviewRows.filter((row) => openSuspenseQuestionIds.has(row.entry.lineItemId));
+    const rowByLineItemId = new Map(openRows.map((row) => [row.entry.lineItemId, row]));
+    const transferPairs = findUnambiguousSuspenseTransferPairs(openRows
+      .filter((row) => row.entry.purchaseEvidence == null).map((row) => ({
+      lineItemId: row.entry.lineItemId,
+      transactionId: row.entry.transactionId,
+      date: row.date,
+      amountUnits: row.totalAmountUnits,
+      counterpartAccountIds: [...new Set(row.entry.splits
+        .filter((split) => split.accountId !== account.id).map((split) => split.accountId))],
+      })));
+    const pairedLineItemIds = new Set(transferPairs.flatMap((pair) =>
+      [pair.firstLineItemId, pair.secondLineItemId]));
+    const transferGroups: SuspenseTransferReviewGroup[] = transferPairs.map((pair) => ({
+      kind: "transfer",
+      id: `transfer:${Math.min(pair.firstLineItemId, pair.secondLineItemId)}:${Math.max(pair.firstLineItemId, pair.secondLineItemId)}`,
+      dateGapDays: pair.dateGapDays,
+      rows: [rowByLineItemId.get(pair.firstLineItemId), rowByLineItemId.get(pair.secondLineItemId)]
+        .filter((row): row is Extract<AccountRegisterRow, { kind: "entry" }> => Boolean(row))
+        .sort((left, right) => right.date.localeCompare(left.date) || left.order - right.order),
+    }));
+    const groups = new Map<string, SuspenseDescriptionReviewGroup>();
     for (const row of suspenseReviewRows) {
-      if (!openSuspenseQuestionIds.has(row.entry.lineItemId)) continue;
+      if (!openSuspenseQuestionIds.has(row.entry.lineItemId)
+        || pairedLineItemIds.has(row.entry.lineItemId)) continue;
       const splitAccountLabel = (registerRowSplitAccounts(row, account.id, fullAccountNames) ?? "No split account")
         .split("\u0000").join(" + ");
       const family = descriptionFamily(row.entry.memo || registerRowDescription(row));
       const id = `${splitAccountLabel.toLocaleLowerCase("en-US")}\u0000${family.key}`;
-      const group = groups.get(id) ?? { id, splitAccountLabel, descriptionFamily: family.label, rows: [] };
+      const group = groups.get(id) ?? { kind: "description" as const, id, splitAccountLabel,
+        descriptionFamily: family.label, rows: [] };
       group.rows.push(row);
       groups.set(id, group);
     }
-    return [...groups.values()].sort((left, right) => {
+    const descriptionGroups = [...groups.values()].sort((left, right) => {
       const bySplit = registerSortCollator.compare(left.splitAccountLabel, right.splitAccountLabel);
       return (registerSort.direction === "asc" ? bySplit : -bySplit)
         || registerSortCollator.compare(left.descriptionFamily, right.descriptionFamily);
     })
       .map((group) => ({ ...group, rows: [...group.rows].sort((left, right) =>
         right.date.localeCompare(left.date) || left.order - right.order) }));
+    return [...transferGroups, ...descriptionGroups];
   }, [account.id, fullAccountNames, openSuspenseQuestionIds, suspenseReviewRows,
     registerSort.direction, suspenseReviewOpen]);
   const displayedRegisterRows = suspenseReviewOpen
@@ -2278,6 +2321,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const suspenseGroupStartByLineItemId = useMemo(() => new Map(suspenseReviewGroups
     .filter((group) => group.rows.length > 0)
     .map((group) => [group.rows[0].entry.lineItemId, group])), [suspenseReviewGroups]);
+  const suspenseGroupByLineItemId = useMemo(() => new Map(suspenseReviewGroups
+    .flatMap((group) => group.rows.map((row) => [row.entry.lineItemId, group] as const))),
+  [suspenseReviewGroups]);
 
   const newRowsAtTop = registerSort.key === "date" && registerSort.direction === "desc";
 
@@ -2333,6 +2379,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   }
 
   function toggleSuspenseGroup(group: SuspenseReviewGroup) {
+    if (group.kind === "transfer") return;
     const ids = group.rows.map((row) => row.entry.lineItemId);
     setSelectedSuspenseLineIds((current) => {
       const next = new Set(current);
@@ -2343,6 +2390,33 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       }
       return next;
     });
+  }
+
+  async function mergeSuspenseTransfer(group: SuspenseTransferReviewGroup, retainedTransactionId: number) {
+    setSuspenseReviewBusy(`transfer:${retainedTransactionId}`);
+    setSuspenseReviewError("");
+    setSuspenseReviewNotice("");
+    try {
+      const result = await api<{ retainedTransactionId: number; absorbedTransactionId: number;
+        retainedDate: string; absorbedDate: string }>("/accounting-questions/merge-transfer", {
+        method: "POST",
+        body: JSON.stringify({
+          lineItemIds: group.rows.map((row) => row.entry.lineItemId), retainedTransactionId,
+        }),
+      }, token);
+      setSelectedSuspenseLineIds((current) => {
+        const next = new Set(current);
+        for (const row of group.rows) next.delete(row.entry.lineItemId);
+        return next;
+      });
+      const [questions] = await Promise.all([loadOpenSuspenseQuestions(), onTransactionCreated()]);
+      setOpenSuspenseQuestions(questions);
+      setSuspenseReviewNotice(`Merged the matching transfer into transaction ${result.retainedTransactionId}. Kept its ${formatRegisterDate(result.retainedDate)} date; preserved the absorbed ${formatRegisterDate(result.absorbedDate)} source identity as merge evidence.`);
+    } catch (nextError) {
+      setSuspenseReviewError(errorMessage(nextError));
+    } finally {
+      setSuspenseReviewBusy("");
+    }
   }
 
   function toggleSuspenseLine(lineItemId: number) {
@@ -2426,7 +2500,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
 
   async function commitPurchaseEvidence(job: PurchaseEvidenceJob) {
     if (job.status !== "preview_ready"
-      || !window.confirm(`Split ${job.matchedCount} matched suspense charge${job.matchedCount === 1 ? "" : "s"} into ${job.itemCount} tax-inclusive purchase line${job.itemCount === 1 ? "" : "s"}? Unmatched charges will remain unchanged.`)) return;
+      || !window.confirm(`Split ${job.matchedCount} matched suspense charge${job.matchedCount === 1 ? "" : "s"} into ${job.itemCount} final-cost purchase line${job.itemCount === 1 ? "" : "s"}? Unmatched charges will remain unchanged.`)) return;
     setSuspenseReviewBusy("evidence-commit"); setSuspenseReviewError("");
     try {
       const result = await api<{ job: PurchaseEvidenceJob; resultingItemCount: number }>(
@@ -2435,7 +2509,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         ...current.filter((job) => job.id !== result.job.id)]);
       setOpenSuspenseQuestions(await loadOpenSuspenseQuestions());
       setSelectedSuspenseLineIds(new Set());
-      setSuspenseReviewNotice(`${result.job.matchedCount} matched charge${result.job.matchedCount === 1 ? "" : "s"} split into ${result.resultingItemCount} tax-inclusive purchase lines. Each line remains in this suspense register as its own classification question.`);
+      setSuspenseReviewNotice(`${result.job.matchedCount} matched charge${result.job.matchedCount === 1 ? "" : "s"} split into ${result.resultingItemCount} final-cost purchase lines. Each line remains in this suspense register as its own classification question.`);
       await onChanged();
     } catch (nextError) { setSuspenseReviewError(errorMessage(nextError)); }
     finally { setSuspenseReviewBusy(""); }
@@ -2692,8 +2766,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
           onClick={() => void toggleSuspenseReview()}>
           {suspenseReviewBusy === "load" ? "Loading questions…" : "Review groups"}</button></>
-      : <><div className="suspense-group-review-heading"><div><strong>Grouped by split account → similar description prefix</strong>
-        <small>{openSuspenseQuestions.length} unresolved line{openSuspenseQuestions.length === 1 ? "" : "s"} in {suspenseReviewGroups.length} group{suspenseReviewGroups.length === 1 ? "" : "s"}. Dates, reference IDs, and long number tokens are ignored for grouping; every original description remains visible below.</small></div>
+      : <><div className="suspense-group-review-heading"><div><strong>Likely transfers first, then split account → similar description prefix</strong>
+        <small>{openSuspenseQuestions.length} unresolved line{openSuspenseQuestions.length === 1 ? "" : "s"} in {suspenseReviewGroups.length} group{suspenseReviewGroups.length === 1 ? "" : "s"}. Unique exact opposite amounts within three days are shown as transfer pairs. Remaining rows ignore dates, reference IDs, and long number tokens for description grouping; every original description remains visible below.</small></div>
         <button type="button" className="link-button" disabled={Boolean(suspenseReviewBusy)}
           onClick={() => void toggleSuspenseReview()}>Done</button></div>
         <div className="suspense-bulk-actions">
@@ -2712,7 +2786,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         </div>
         <div className="purchase-evidence-actions">
           <div><strong>Need receipts before classifying?</strong>
-            <small>Save the exact selection as an Accounting job, then let the agent match connected receipt emails or attached exports. Accounting checks the amount, allocates receipt tax, and prepares item-level suspense splits.</small></div>
+            <small>Save the exact selection as an Accounting job, then let the agent match connected receipt emails or attached exports. Accounting checks the amount, allocates receipt tax and explicit discounts or fees, and prepares item-level suspense splits.</small></div>
           <button type="button" className="secondary"
             disabled={selectedSuspenseLineIds.size === 0 || selectedSuspenseLineIds.size > 500
               || Boolean(suspenseReviewBusy)} onClick={() => void createPurchaseEvidenceForSelection()}>
@@ -2734,8 +2808,13 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 <span>pre-tax {unitsToDecimal(item.preTaxAmountUnits, account.scale)}
                   {BigInt(item.allocatedTaxAmountUnits) !== 0n
                     ? ` + tax ${unitsToDecimal(item.allocatedTaxAmountUnits, account.scale)}` : ""}
+                  {BigInt(item.allocatedAdjustmentAmountUnits) !== 0n
+                    ? ` + adjustments ${unitsToDecimal(item.allocatedAdjustmentAmountUnits, account.scale)}` : ""}
                   {` = ${unitsToDecimal(item.finalAmountUnits, account.scale)} ${account.currencyCode}`}</span>
               </div>)}
+              {purchase.adjustments.length > 0 && <small>Receipt adjustments: {purchase.adjustments
+                .map((adjustment) => `${adjustment.description} ${unitsToDecimal(adjustment.amountUnits, account.scale)} ${account.currencyCode}`)
+                .join(" · ")}</small>}
               <small>Evidence: {purchase.sources.map((source) => source.displayName
                 || source.sourceRecordId || source.sourceRef).join(" · ")}</small>
             </article>)}</div>
@@ -2892,18 +2971,33 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           const counterpartLabel = counterpartNames.length === 0 ? "—"
             : counterpartNames.length === 1 ? counterpartNames[0] : "Split";
           const suspenseGroup = suspenseGroupStartByLineItemId.get(entry.lineItemId);
+          const rowSuspenseGroup = suspenseGroupByLineItemId.get(entry.lineItemId);
           const suspenseGroupLineIds = suspenseGroup?.rows.map((candidate) => candidate.entry.lineItemId) ?? [];
           const suspenseGroupSelectedCount = suspenseGroupLineIds
             .filter((lineItemId) => selectedSuspenseLineIds.has(lineItemId)).length;
           const suspenseGroupHeader = suspenseGroup && <tr className="suspense-register-group-row">
             <td colSpan={7}><div className="suspense-register-group-content"><div><div>
-              <strong>{suspenseGroup.splitAccountLabel}</strong>
-              <span>Similar description: {suspenseGroup.descriptionFamily}</span></div>
-              <small>{suspenseGroup.rows.length} unresolved line{suspenseGroup.rows.length === 1 ? "" : "s"}</small></div>
-              <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+              {suspenseGroup.kind === "transfer" ? <>
+                <strong>Likely transfer pair</strong>
+                <span>Exact opposite amounts · {suspenseGroup.dateGapDays} day{suspenseGroup.dateGapDays === 1 ? "" : "s"} apart</span>
+              </> : <>
+                <strong>{suspenseGroup.splitAccountLabel}</strong>
+                <span>Similar description: {suspenseGroup.descriptionFamily}</span>
+              </>}</div>
+              <small>{suspenseGroup.kind === "transfer"
+                ? "Choose which imported transaction supplies the surviving date and header. Both statement postings and their evidence remain connected to it."
+                : `${suspenseGroup.rows.length} unresolved line${suspenseGroup.rows.length === 1 ? "" : "s"}`}</small></div>
+              {suspenseGroup.kind === "transfer" ? <div className="suspense-transfer-actions">
+                {suspenseGroup.rows.map((candidate) => <button type="button" className="secondary"
+                  key={candidate.entry.transactionId} disabled={Boolean(suspenseReviewBusy)}
+                  onClick={() => void mergeSuspenseTransfer(suspenseGroup, candidate.entry.transactionId)}>
+                  {suspenseReviewBusy === `transfer:${candidate.entry.transactionId}` ? "Merging…"
+                    : `Keep ${formatRegisterDate(candidate.date)} · ${(registerRowSplitAccounts(candidate, account.id, fullAccountNames) ?? "transaction").split("\u0000").join(" + ")}`}
+                </button>)}
+              </div> : <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
                 onClick={() => toggleSuspenseGroup(suspenseGroup)}>
                 {suspenseGroupSelectedCount === suspenseGroup.rows.length
-                  ? `Clear all ${suspenseGroup.rows.length}` : `Select all ${suspenseGroup.rows.length}`}</button>
+                  ? `Clear all ${suspenseGroup.rows.length}` : `Select all ${suspenseGroup.rows.length}`}</button>}
             </div></td>
           </tr>;
           const expanded = view !== "basic";
@@ -2963,7 +3057,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 onClick={(event) => { event.stopPropagation(); void activateTransaction(entry, true); }}
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
               <td className="register-description"><div className="register-description-main">
-                {suspenseReviewOpen && <input type="checkbox"
+                {suspenseReviewOpen && rowSuspenseGroup?.kind !== "transfer" && <input type="checkbox"
                   aria-label={`Select suspense line ${entry.lineItemId}: ${entry.memo || entry.description || "Untitled transaction"}`}
                   checked={selectedSuspenseLineIds.has(entry.lineItemId)} disabled={Boolean(suspenseReviewBusy)}
                   onClick={(event) => event.stopPropagation()}
@@ -2975,6 +3069,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   Receipt evidence · pre-tax {unitsToDecimal(entry.purchaseEvidence.preTaxAmountUnits, account.scale)}
                   {BigInt(entry.purchaseEvidence.allocatedTaxAmountUnits) !== 0n
                     ? ` + tax ${unitsToDecimal(entry.purchaseEvidence.allocatedTaxAmountUnits, account.scale)}` : ""}
+                  {BigInt(entry.purchaseEvidence.allocatedAdjustmentAmountUnits) !== 0n
+                    ? ` + adjustments ${unitsToDecimal(entry.purchaseEvidence.allocatedAdjustmentAmountUnits, account.scale)}` : ""}
                   {entry.purchaseEvidence.merchant ? ` · ${entry.purchaseEvidence.merchant}` : ""}
                   {entry.purchaseEvidence.sourceNames.length
                     ? ` · ${entry.purchaseEvidence.sourceNames.join(" + ")}` : ""}

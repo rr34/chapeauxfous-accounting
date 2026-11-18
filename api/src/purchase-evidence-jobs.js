@@ -4,7 +4,7 @@ import { attachTags, validateTransaction } from "./accounting.js";
 import { accountingQuestionTagKeys, accountingQuestionTags } from "./accounting-questions.js";
 import { decimalToUnits, unitsToDecimal } from "./money.js";
 
-export const PURCHASE_EVIDENCE_SCHEMA_URI = "accounting://schemas/purchase-evidence-record/v1";
+export const PURCHASE_EVIDENCE_SCHEMA_URI = "accounting://schemas/purchase-evidence-record/v2";
 export const PURCHASE_EVIDENCE_MAX_TARGETS = 500;
 export const PURCHASE_EVIDENCE_MAX_ITEMS = 5000;
 
@@ -12,11 +12,11 @@ export const purchaseEvidenceCanonicalJsonSchema = Object.freeze({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: PURCHASE_EVIDENCE_SCHEMA_URI,
   title: "Canonical purchase evidence record",
-  description: "One selected suspense charge, its provider-neutral evidence references, and receipt item amounts before receipt-level sales tax allocation.",
+  description: "One selected suspense charge, its provider-neutral evidence references, receipt items, sales tax, and explicit signed order-level adjustments.",
   type: "object",
   additionalProperties: false,
   required: ["target_line_item_id", "sources", "merchant", "purchase_date", "charge_amount_decimal",
-    "tax_amount_decimal", "items"],
+    "tax_amount_decimal", "adjustments", "items"],
   properties: {
     target_line_item_id: { type: "integer", minimum: 1,
       description: "Exact selected suspense posting this evidence supports." },
@@ -34,6 +34,14 @@ export const purchaseEvidenceCanonicalJsonSchema = Object.freeze({
       description: "Positive final charge magnitude; it must exactly equal the selected suspense posting magnitude." },
     tax_amount_decimal: { type: "string", pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 128,
       description: "Receipt-level sales tax. Accounting allocates it proportionally and preserves it separately." },
+    adjustments: { type: "array", maxItems: 100, items: { type: "object",
+      additionalProperties: false, required: ["kind", "description", "amount_decimal"],
+      properties: {
+        kind: { enum: ["discount", "shipping", "handling", "fee", "tip", "other"] },
+        description: { type: "string", minLength: 1, maxLength: 1024 },
+        amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128,
+          description: "Signed receipt adjustment. Discounts are negative; added costs are positive." },
+      } } },
     items: { type: "array", minItems: 1, maxItems: 500, items: { type: "object",
       additionalProperties: false, required: ["source_item_id", "description", "quantity_decimal", "pre_tax_amount_decimal"],
       properties: {
@@ -124,6 +132,12 @@ export function allocateProportionally(totalUnits, weights) {
     allocations[remainders[index % remainders.length].index] += 1n;
   }
   return allocations;
+}
+
+export function allocateSignedProportionally(totalUnits, weights) {
+  const total = BigInt(totalUnits);
+  const sign = total < 0n ? -1n : 1n;
+  return allocateProportionally(absolute(total), weights).map((value) => value * sign);
 }
 
 function copiedPrompt(id) {
@@ -231,7 +245,8 @@ async function loadPurchaseEvidencePreview(connection, personId, purchaseEvidenc
   const [items] = await connection.query(
     `SELECT purchase_evidence_record_id, purchase_evidence_item_id, item_ordinal, source_item_id,
             description, quantity_decimal, source_pre_tax_amount_units,
-            allocated_tax_amount_units, final_amount_units, resulting_line_item_id
+            allocated_tax_amount_units, allocated_adjustment_amount_units,
+            final_amount_units, resulting_line_item_id
        FROM accounting_purchase_evidence_items
       WHERE purchase_evidence_record_id IN (${placeholders})
       ORDER BY purchase_evidence_record_id, item_ordinal`,
@@ -242,6 +257,13 @@ async function loadPurchaseEvidencePreview(connection, personId, purchaseEvidenc
        FROM accounting_purchase_evidence_sources
       WHERE purchase_evidence_record_id IN (${placeholders})
       ORDER BY purchase_evidence_record_id, source_ordinal`,
+    recordIds,
+  );
+  const [adjustments] = await connection.query(
+    `SELECT purchase_evidence_record_id, adjustment_kind, description, source_amount_units
+       FROM accounting_purchase_evidence_adjustments
+      WHERE purchase_evidence_record_id IN (${placeholders})
+      ORDER BY purchase_evidence_record_id, adjustment_ordinal`,
     recordIds,
   );
   const itemsByRecord = new Map();
@@ -255,6 +277,7 @@ async function loadPurchaseEvidencePreview(connection, personId, purchaseEvidenc
       quantityDecimal: item.quantity_decimal == null ? null : String(item.quantity_decimal),
       preTaxAmountUnits: String(item.source_pre_tax_amount_units),
       allocatedTaxAmountUnits: String(item.allocated_tax_amount_units),
+      allocatedAdjustmentAmountUnits: String(item.allocated_adjustment_amount_units),
       finalAmountUnits: String(item.final_amount_units),
       resultingLineItemId: item.resulting_line_item_id == null ? null : Number(item.resulting_line_item_id),
     });
@@ -269,6 +292,14 @@ async function loadPurchaseEvidencePreview(connection, personId, purchaseEvidenc
       displayName: source.display_name == null ? null : String(source.display_name) });
     sourcesByRecord.set(id, values);
   }
+  const adjustmentsByRecord = new Map();
+  for (const adjustment of adjustments) {
+    const id = Number(adjustment.purchase_evidence_record_id);
+    const values = adjustmentsByRecord.get(id) ?? [];
+    values.push({ kind: String(adjustment.adjustment_kind), description: String(adjustment.description),
+      amountUnits: String(adjustment.source_amount_units) });
+    adjustmentsByRecord.set(id, values);
+  }
   return records.map((record) => ({
     targetLineItemId: Number(record.target_line_item_id),
     transactionDate: String(record.TransactionDate),
@@ -278,6 +309,7 @@ async function loadPurchaseEvidencePreview(connection, personId, purchaseEvidenc
     chargeAmountUnits: String(record.charge_amount_units),
     taxAmountUnits: String(record.receipt_tax_amount_units),
     sources: sourcesByRecord.get(Number(record.purchase_evidence_record_id)) ?? [],
+    adjustments: adjustmentsByRecord.get(Number(record.purchase_evidence_record_id)) ?? [],
     items: itemsByRecord.get(Number(record.purchase_evidence_record_id)) ?? [],
   }));
 }
@@ -506,6 +538,10 @@ export function normalizePurchaseEvidenceRecord(record, scale) {
     throw purchaseError("Each purchase requires 1 through 500 item lines.",
       "INVALID_PURCHASE_EVIDENCE_RECORD", { targetLineItemId });
   }
+  if (!Array.isArray(record.adjustments) || record.adjustments.length > 100) {
+    throw purchaseError("Each purchase requires an adjustments array containing at most 100 entries.",
+      "INVALID_PURCHASE_EVIDENCE_RECORD", { targetLineItemId });
+  }
   const items = record.items.map((item, index) => {
     const preTax = BigInt(decimalToUnits(String(item.pre_tax_amount_decimal), scale));
     if (preTax < 0n) throw purchaseError("Item pre-tax amounts cannot be negative.",
@@ -516,15 +552,33 @@ export function normalizePurchaseEvidenceRecord(record, scale) {
       quantityDecimal: boundedText(item.quantity_decimal, 128, "Item quantity"), preTax,
     };
   });
+  const adjustments = record.adjustments.map((adjustment) => ({
+    kind: String(adjustment.kind),
+    description: boundedText(adjustment.description, 1024, "Adjustment description", { required: true }),
+    amount: BigInt(decimalToUnits(String(adjustment.amount_decimal), scale)),
+  }));
   const subtotal = items.reduce((sum, item) => sum + item.preTax, 0n);
-  if (subtotal + tax !== charge) throw purchaseError(
-    "Item pre-tax amounts plus receipt tax must exactly equal the selected charge.",
+  const adjustmentTotal = adjustments.reduce((sum, adjustment) => sum + adjustment.amount, 0n);
+  if (subtotal + tax + adjustmentTotal !== charge) throw purchaseError(
+    "Item pre-tax amounts plus receipt tax and explicit adjustments must exactly equal the selected charge.",
     "PURCHASE_EVIDENCE_RECEIPT_DOES_NOT_TOTAL", {
-      targetLineItemId, subtotalUnits: subtotal.toString(), taxUnits: tax.toString(), chargeUnits: charge.toString(),
+      targetLineItemId, subtotalUnits: subtotal.toString(), taxUnits: tax.toString(),
+      adjustmentUnits: adjustmentTotal.toString(), chargeUnits: charge.toString(),
     });
   const taxAllocations = allocateProportionally(tax, items.map((item) => item.preTax));
+  const adjustmentAllocations = items.map(() => 0n);
+  for (const adjustment of adjustments) {
+    const allocated = allocateSignedProportionally(adjustment.amount, items.map((item) => item.preTax));
+    allocated.forEach((value, index) => { adjustmentAllocations[index] += value; });
+  }
+  const normalizedItems = items.map((item, index) => ({ ...item,
+    allocatedTax: taxAllocations[index], allocatedAdjustment: adjustmentAllocations[index],
+    finalAmount: item.preTax + taxAllocations[index] + adjustmentAllocations[index] }));
+  if (normalizedItems.some((item) => item.finalAmount < 0n)) throw purchaseError(
+    "Receipt adjustments cannot make an allocated item amount negative.",
+    "PURCHASE_EVIDENCE_NEGATIVE_ITEM_TOTAL", { targetLineItemId });
   return {
-    targetLineItemId, charge, tax,
+    targetLineItemId, charge, tax, adjustments,
     merchant: boundedText(record.merchant, 1024, "Merchant"),
     purchaseDate: record.purchase_date == null ? null : String(record.purchase_date),
     sources: record.sources.map((source) => ({
@@ -532,8 +586,7 @@ export function normalizePurchaseEvidenceRecord(record, scale) {
       sourceRecordId: boundedText(source.source_record_id, 255, "Source record ID"),
       displayName: boundedText(source.display_name, 1024, "Source display name"),
     })),
-    items: items.map((item, index) => ({ ...item, allocatedTax: taxAllocations[index],
-      finalAmount: item.preTax + taxAllocations[index] })),
+    items: normalizedItems,
   };
 }
 
@@ -608,13 +661,21 @@ export async function submitPurchaseEvidencePreview({
          VALUES (?, ?, ?, ?, ?, ?)`,
         [recordId, index + 1, source.kind, source.sourceRef, source.sourceRecordId, source.displayName],
       );
+      for (const [index, adjustment] of record.adjustments.entries()) await connection.query(
+        `INSERT INTO accounting_purchase_evidence_adjustments
+          (purchase_evidence_record_id, adjustment_ordinal, adjustment_kind, description, source_amount_units)
+         VALUES (?, ?, ?, ?, ?)`,
+        [recordId, index + 1, adjustment.kind, adjustment.description, adjustment.amount.toString()],
+      );
       for (const [index, item] of record.items.entries()) await connection.query(
         `INSERT INTO accounting_purchase_evidence_items
           (purchase_evidence_record_id, item_ordinal, source_item_id, description, quantity_decimal,
-           source_pre_tax_amount_units, allocated_tax_amount_units, final_amount_units)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           source_pre_tax_amount_units, allocated_tax_amount_units,
+           allocated_adjustment_amount_units, final_amount_units)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [recordId, index + 1, item.sourceItemId, item.description, item.quantityDecimal,
-          item.preTax.toString(), item.allocatedTax.toString(), item.finalAmount.toString()],
+          item.preTax.toString(), item.allocatedTax.toString(), item.allocatedAdjustment.toString(),
+          item.finalAmount.toString()],
       );
     }
     await connection.query(

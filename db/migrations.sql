@@ -7,6 +7,157 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0023: complete-purchase-and-merge-storage-comments
+-- writer downtime: schedule maintenance; MODIFY COLUMN statements take metadata locks.
+-- deployment order: apply after migrations 0021 and 0022 before requiring complete schema discovery metadata.
+-- recovery: comments are metadata-only; restore the verified pre-migration backup if rollback is required.
+-- This corrects missing column comments append-only because migration 0021 may already be applied.
+
+ALTER TABLE `accounting_purchase_evidence_jobs`
+  MODIFY COLUMN `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC creation timestamp for this exact purchase-evidence job.',
+  MODIFY COLUMN `updated_at` datetime(6) NOT NULL DEFAULT current_timestamp(6) ON UPDATE current_timestamp(6)
+    COMMENT 'UTC timestamp of the most recent job state, artifact, preview, or commit change.',
+  MODIFY COLUMN `committed_at` datetime(6) NULL DEFAULT NULL
+    COMMENT 'UTC timestamp when the prepared item splits were committed, or null before commit.';
+
+ALTER TABLE `accounting_purchase_evidence_job_lines`
+  MODIFY COLUMN `purchase_evidence_job_id` char(36) NOT NULL
+    COMMENT 'Purchase-evidence job owning this exact selected suspense posting.';
+
+ALTER TABLE `accounting_purchase_evidence_records`
+  MODIFY COLUMN `purchase_evidence_record_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identity of one canonical matched receipt charge within a job.',
+  MODIFY COLUMN `purchase_evidence_job_id` char(36) NOT NULL
+    COMMENT 'Purchase-evidence job that owns this matched receipt charge.',
+  MODIFY COLUMN `merchant` varchar(1024) NULL DEFAULT NULL
+    COMMENT 'Optional merchant name preserved from the supporting receipt evidence.',
+  MODIFY COLUMN `purchase_date` date NULL DEFAULT NULL
+    COMMENT 'Optional purchase date preserved from the supporting receipt evidence.',
+  MODIFY COLUMN `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC timestamp when this canonical matched charge preview was stored.';
+
+ALTER TABLE `accounting_purchase_evidence_sources`
+  MODIFY COLUMN `purchase_evidence_source_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identity of one provider-owned evidence reference.',
+  MODIFY COLUMN `purchase_evidence_record_id` bigint(20) NOT NULL
+    COMMENT 'Canonical matched receipt charge supported by this evidence reference.',
+  MODIFY COLUMN `source_ordinal` int(10) unsigned NOT NULL
+    COMMENT 'Stable one-based source order within the canonical matched charge.',
+  MODIFY COLUMN `source_kind` enum('email','amazon_export','receipt','file','other') NOT NULL
+    COMMENT 'Provider-neutral kind of evidence supporting the matched charge.',
+  MODIFY COLUMN `source_record_id` varchar(255) NULL DEFAULT NULL
+    COMMENT 'Optional provider record or order identity within source_ref.',
+  MODIFY COLUMN `display_name` varchar(1024) NULL DEFAULT NULL
+    COMMENT 'Optional human-facing label for this evidence reference.';
+
+ALTER TABLE `accounting_purchase_evidence_items`
+  MODIFY COLUMN `purchase_evidence_item_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identity of one receipt item and its derived final-cost posting.',
+  MODIFY COLUMN `purchase_evidence_record_id` bigint(20) NOT NULL
+    COMMENT 'Canonical matched receipt charge containing this item.',
+  MODIFY COLUMN `item_ordinal` int(10) unsigned NOT NULL
+    COMMENT 'Stable one-based item order within the canonical matched charge.',
+  MODIFY COLUMN `source_item_id` varchar(255) NULL DEFAULT NULL
+    COMMENT 'Optional item identity preserved from the receipt provider.',
+  MODIFY COLUMN `description` text NOT NULL
+    COMMENT 'Receipt item description used as the resulting suspense-posting memo.';
+
+ALTER TABLE `accounting_purchase_evidence_adjustments`
+  MODIFY COLUMN `purchase_evidence_adjustment_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identity of one explicit signed receipt-level adjustment.',
+  MODIFY COLUMN `purchase_evidence_record_id` bigint(20) NOT NULL
+    COMMENT 'Canonical matched receipt charge containing this adjustment.',
+  MODIFY COLUMN `adjustment_ordinal` int(10) unsigned NOT NULL
+    COMMENT 'Stable one-based adjustment order within the canonical matched charge.',
+  MODIFY COLUMN `adjustment_kind` enum('discount','shipping','handling','fee','tip','other') NOT NULL
+    COMMENT 'Provider-neutral classification of this explicit signed adjustment.';
+
+ALTER TABLE `accounting_transaction_merges`
+  MODIFY COLUMN `transaction_merge_id` bigint(20) NOT NULL AUTO_INCREMENT
+    COMMENT 'Stable identity of one user-confirmed exact transfer merge.',
+  MODIFY COLUMN `owner_person_id` int(11) NOT NULL
+    COMMENT 'Ledger owner who confirmed and owns this transfer merge provenance.',
+  MODIFY COLUMN `absorbed_description` text NULL DEFAULT NULL
+    COMMENT 'Original description of the absorbed imported transaction.',
+  MODIFY COLUMN `absorbed_valuation_currency_id` int(11) NOT NULL
+    COMMENT 'Original valuation currency of the absorbed imported transaction.',
+  MODIFY COLUMN `absorbed_source_system` varchar(32) NULL DEFAULT NULL
+    COMMENT 'Original provider namespace of the absorbed imported transaction.',
+  MODIFY COLUMN `absorbed_source_id` varchar(128) NULL DEFAULT NULL
+    COMMENT 'Original provider transaction identity within absorbed_source_system.',
+  MODIFY COLUMN `absorbed_source_fingerprint` char(64) NULL DEFAULT NULL
+    COMMENT 'Original canonical SHA-256 source fingerprint of the absorbed transaction.',
+  MODIFY COLUMN `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6)
+    COMMENT 'UTC timestamp when the exact transfer merge was committed.';
+
+-- end migration 0023
+
+-- migration 0022: receipt-adjustments-and-transaction-merge-provenance
+-- writer downtime: schedule maintenance; altering the item table and adding tables take metadata locks.
+-- deployment order: apply after migration 0021 and before receipt-adjustment or suspense-transfer-merge code.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+-- Application code validates and allocates every adjustment and performs transfer merges atomically.
+
+ALTER TABLE `accounting_purchase_evidence_items`
+  ADD COLUMN `allocated_adjustment_amount_units` bigint(20) NOT NULL DEFAULT 0
+    COMMENT 'Signed sum of receipt-level discounts, shipping, handling, fees, tips, and other explicit adjustments allocated deterministically to this item.'
+    AFTER `allocated_tax_amount_units`;
+
+CREATE TABLE `accounting_purchase_evidence_adjustments` (
+  `purchase_evidence_adjustment_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `purchase_evidence_record_id` bigint(20) NOT NULL,
+  `adjustment_ordinal` int(10) unsigned NOT NULL,
+  `adjustment_kind` enum('discount','shipping','handling','fee','tip','other') NOT NULL,
+  `description` varchar(1024) NOT NULL
+    COMMENT 'Source-facing receipt label, such as Amazon Day Discount or Shipping & Handling.',
+  `source_amount_units` bigint(20) NOT NULL
+    COMMENT 'Signed receipt adjustment in native currency units. Discounts are negative; added costs are positive.',
+  PRIMARY KEY (`purchase_evidence_adjustment_id`),
+  UNIQUE KEY `accounting_purchase_evidence_adjustments_ordinal_UQ`
+    (`purchase_evidence_record_id`, `adjustment_ordinal`),
+  CONSTRAINT `accounting_purchase_evidence_adjustments_record_FK`
+    FOREIGN KEY (`purchase_evidence_record_id`) REFERENCES `accounting_purchase_evidence_records` (`purchase_evidence_record_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Preserve explicit receipt-level amounts outside item subtotal and sales tax. One row: One labeled signed adjustment whose allocation is owned by application code.';
+
+CREATE TABLE `accounting_transaction_merges` (
+  `transaction_merge_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `owner_person_id` int(11) NOT NULL,
+  `retained_transaction_id` bigint(20) NOT NULL
+    COMMENT 'Surviving connected ledger transaction chosen by the user.',
+  `absorbed_transaction_id` bigint(20) NOT NULL
+    COMMENT 'Original stable ID of the transaction removed after its non-suspense line moved into the survivor.',
+  `retained_suspense_line_item_id` bigint(20) NOT NULL
+    COMMENT 'Original ID of the cancelling suspense line removed from the retained transaction.',
+  `absorbed_suspense_line_item_id` bigint(20) NOT NULL
+    COMMENT 'Original ID of the cancelling suspense line removed from the absorbed transaction.',
+  `absorbed_transaction_date` date NOT NULL
+    COMMENT 'Original accounting date of the absorbed transaction before the user chose the survivor date.',
+  `absorbed_description` text NULL DEFAULT NULL,
+  `absorbed_valuation_currency_id` int(11) NOT NULL,
+  `absorbed_source_system` varchar(32) NULL DEFAULT NULL,
+  `absorbed_source_id` varchar(128) NULL DEFAULT NULL,
+  `absorbed_source_fingerprint` char(64) NULL DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  PRIMARY KEY (`transaction_merge_id`),
+  UNIQUE KEY `accounting_transaction_merges_absorbed_UQ` (`owner_person_id`, `absorbed_transaction_id`),
+  KEY `accounting_transaction_merges_retained_IDX` (`retained_transaction_id`, `created_at`),
+  CONSTRAINT `accounting_transaction_merges_owner_FK`
+    FOREIGN KEY (`owner_person_id`) REFERENCES `people2_people` (`person_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT `accounting_transaction_merges_retained_FK`
+    FOREIGN KEY (`retained_transaction_id`) REFERENCES `transactions` (`transaction_id`)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT `accounting_transaction_merges_currency_FK`
+    FOREIGN KEY (`absorbed_valuation_currency_id`) REFERENCES `currencies` (`currency_id`)
+    ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+  COMMENT='Preserve the absorbed transaction identity and original date when two exact opposite suspense imports are merged into one connected transfer. One row: One user-confirmed merge into one surviving transaction.';
+
+-- end migration 0022
+
 -- migration 0021: purchase-evidence-jobs
 -- writer downtime: schedule maintenance; new tables and foreign keys take metadata locks.
 -- deployment order: apply before deploying purchase-evidence job HTTP or MCP surfaces.

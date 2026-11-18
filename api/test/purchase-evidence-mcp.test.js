@@ -41,6 +41,7 @@ test("purchase evidence MCP preserves exact targets, previews tax allocation, an
       display_name: "Amazon order 114-1" }],
     merchant: "Amazon", purchase_date: "2026-09-30", charge_amount_decimal: "4.53",
     tax_amount_decimal: "0.33",
+    adjustments: [],
     items: [{ source_item_id: "item-1", description: "USB cable", quantity_decimal: "1",
       pre_tax_amount_decimal: "4.20" }],
   };
@@ -99,7 +100,7 @@ test("purchase evidence MCP preserves exact targets, previews tax allocation, an
     assert.deepEqual(previewed.structuredContent.nextAction.onApproval, {
       tool: "commit_purchase_evidence_job", arguments: { purchase_evidence_job_id: jobId },
     });
-    assert.match(previewed.structuredContent.nextAction.instruction, /1 matched receipt charge.*1 tax-inclusive item split/);
+    assert.match(previewed.structuredContent.nextAction.instruction, /1 matched receipt charge.*1 final-cost item split/);
 
     const committed = await client.callTool({ name: "commit_purchase_evidence_job",
       arguments: { purchase_evidence_job_id: jobId } });

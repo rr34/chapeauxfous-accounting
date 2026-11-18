@@ -17,7 +17,15 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+  const storageCommentMigration = migrations.find((migration) => migration.version === 23);
+  assert.match(storageCommentMigration.sql, /ALTER TABLE `accounting_purchase_evidence_jobs`/);
+  assert.match(storageCommentMigration.sql, /MODIFY COLUMN `created_at` datetime\(6\).*COMMENT/s);
+  assert.match(storageCommentMigration.sql, /ALTER TABLE `accounting_transaction_merges`/);
+  const transferAndAdjustmentMigration = migrations.find((migration) => migration.version === 22);
+  assert.match(transferAndAdjustmentMigration.sql, /ADD COLUMN `allocated_adjustment_amount_units` bigint\(20\)/);
+  assert.match(transferAndAdjustmentMigration.sql, /CREATE TABLE `accounting_purchase_evidence_adjustments`/);
+  assert.match(transferAndAdjustmentMigration.sql, /CREATE TABLE `accounting_transaction_merges`/);
   const purchaseEvidenceMigration = migrations.find((migration) => migration.version === 21);
   assert.match(purchaseEvidenceMigration.sql, /CREATE TABLE `accounting_purchase_evidence_jobs`/);
   assert.match(purchaseEvidenceMigration.sql, /CREATE TABLE `accounting_purchase_evidence_job_lines`/);

@@ -40,6 +40,7 @@ import {
   listPurchaseEvidenceJobs,
   restartPurchaseEvidenceJob,
 } from "./purchase-evidence-jobs.js";
+import { mergeSuspenseTransferPair } from "./suspense-transfer-merge.js";
 import {
   commitTransactionImportJob,
   excludeTransactionImportException,
@@ -255,6 +256,17 @@ app.post("/api/accounting-questions/resolve-batch", requireAuth, async (req, res
   try { res.json(await resolveAccountingQuestions({ pool, personId: req.auth.personId,
     lineItemIds: req.body?.lineItemIds, targetAccountId: req.body?.targetAccountId,
     resolution: req.body?.resolution })); } catch (error) { next(error); }
+});
+
+app.post("/api/accounting-questions/merge-transfer", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await mergeSuspenseTransferPair({
+      pool,
+      personId: req.auth.personId,
+      lineItemIds: req.body?.lineItemIds,
+      retainedTransactionId: req.body?.retainedTransactionId,
+    }));
+  } catch (error) { next(error); }
 });
 
 app.post("/api/accounting-questions/:lineItemId/resolve", requireAuth, async (req, res, next) => {

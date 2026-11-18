@@ -116,6 +116,29 @@ test("the MCP exposes grounded multi-statement context and reference prices", as
         accountFullName: "Income:Consulting", status: "resolved", resolution: "Matched receipt",
         resolvedAt: "2026-09-14T12:00:00.000Z", targetAccountId: 44 } };
     },
+    async mergeSuspenseTransferPair(input) {
+      seen.mergeTransfer = input;
+      return {
+        retainedTransactionId: 81, absorbedTransactionId: 82,
+        retainedDate: "2026-09-28", absorbedDate: "2026-09-26", dateGapDays: 2,
+        amountUnits: "-9700", movedLineItemId: 904,
+        retainedAccountId: 31, retainedAccountName: "CC CapOne x7334",
+        absorbedAccountId: 44, absorbedAccountName: "Checking",
+        transaction: {
+          id: 81, date: "2026-09-28", transactionAt: null,
+          description: "CAPITAL ONE ONLINE PYMT", state: "posted", valuationCurrencyId: 1,
+          lineItems: [
+            { id: 902, amountUnits: "9700", valueUnits: "9700", reconciliationState: "unreconciled",
+              reconciledAt: null, memo: null, accountId: 31, accountName: "CC CapOne x7334",
+              currencyId: 1, currencyCode: "USD", scale: 2, tags: [] },
+            { id: 904, amountUnits: "-9700", valueUnits: "-9700", reconciliationState: "cleared",
+              reconciledAt: null, memo: null, accountId: 44, accountName: "Checking",
+              currencyId: 1, currencyCode: "USD", scale: 2, tags: [] },
+          ],
+          rates: [],
+        },
+      };
+    },
   };
   const server = createAccountingMcpServer({ personId: 7, pool: {}, services });
   const client = new Client({ name: "accounting-reconciliation-test", version: "1.0.0" });
@@ -197,6 +220,15 @@ test("the MCP exposes grounded multi-statement context and reference prices", as
   assert.equal(resolved.structuredContent.changed, true);
   assert.deepEqual(seen.resolveQuestion, { pool: {}, personId: 7, lineItemId: 901,
     targetAccountId: 44, resolution: "Matched receipt" });
+
+  const merged = await client.callTool({ name: "merge_suspense_transfer_pair", arguments: {
+    line_item_ids: [901, 903], retained_transaction_id: 81,
+  } });
+  assert.equal(merged.structuredContent.retainedTransactionObject.objectRole, "merged_transfer");
+  assert.deepEqual(merged.structuredContent.retainedTransactionObject.accountIds, [31, 44]);
+  assert.match(merged.structuredContent.completionNote, /absorbed 2026-09-26/);
+  assert.deepEqual(seen.mergeTransfer, { pool: {}, personId: 7,
+    lineItemIds: [901, 903], retainedTransactionId: 81 });
 
   const questionResource = await client.readResource({ uri: "accounting://questions/901" });
   assert.equal(JSON.parse(questionResource.contents[0].text).question.lineItemId, 901);

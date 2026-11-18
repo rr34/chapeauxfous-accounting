@@ -26,6 +26,7 @@ test("ledger reads expose an optional UTC source instant while ordering by accou
     if (sql.includes("FROM line_items li JOIN accounts")) return [[]];
     if (sql.includes("FROM lineitems_tags_join")) return [[]];
     if (sql.includes("FROM xrates")) return [[]];
+    if (sql.includes("FROM accounting_transaction_merges")) return [[]];
     throw new Error(`Unexpected query: ${sql}`);
   } };
   const page = await listTransactionsPage(pool, 7);

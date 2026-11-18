@@ -192,7 +192,7 @@ export const purchaseEvidenceJobObjectDescription = Object.freeze({
       { field: "status", summary: "Ready, processing, preview-ready, or committed workflow state." },
       { field: "targetCount", summary: "Exact number of selected suspense postings bound to the job." },
       { field: "matchedCount", summary: "Number of selected charges with reconciled canonical purchase evidence." },
-      { field: "itemCount", summary: "Number of tax-inclusive item lines prepared from matched receipts." },
+      { field: "itemCount", summary: "Number of final-cost item lines prepared from matched receipts." },
       { field: "updatedAt", summary: "Time the workflow state last changed." },
     ],
     relationships: [{

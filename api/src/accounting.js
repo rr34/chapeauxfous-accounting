@@ -26,6 +26,13 @@ function calendarDate(value, field = "Transaction date") {
   return normalized;
 }
 
+function timestampFromDatabase(value) {
+  if (value instanceof Date) return value.toISOString();
+  const normalized = String(value).trim().replace(" ", "T")
+    .replace(/(\.\d{3})\d+/u, "$1");
+  return new Date(normalized.endsWith("Z") ? normalized : `${normalized}Z`).toISOString();
+}
+
 function optionalBoundedText(value, field, maximum) {
   if (value == null) return null;
   const normalized = String(value).trim();
@@ -219,7 +226,7 @@ export async function listAccountLedger(pool, personId, accountId) {
     const [purchaseRows] = await pool.query(
       `SELECT pei.resulting_line_item_id, pei.purchase_evidence_item_id, pei.description,
               pei.quantity_decimal, pei.source_pre_tax_amount_units, pei.allocated_tax_amount_units,
-              pei.final_amount_units, per.merchant, per.purchase_date,
+              pei.allocated_adjustment_amount_units, pei.final_amount_units, per.merchant, per.purchase_date,
               pej.purchase_evidence_job_id, pes.source_ref, pes.display_name, pes.source_ordinal
          FROM accounting_purchase_evidence_items pei
          JOIN accounting_purchase_evidence_records per
@@ -249,6 +256,7 @@ export async function listAccountLedger(pool, personId, accountId) {
         quantityDecimal: purchase.quantity_decimal == null ? null : String(purchase.quantity_decimal),
         preTaxAmountUnits: String(purchase.source_pre_tax_amount_units),
         allocatedTaxAmountUnits: String(purchase.allocated_tax_amount_units),
+        allocatedAdjustmentAmountUnits: String(purchase.allocated_adjustment_amount_units),
         finalAmountUnits: String(purchase.final_amount_units),
         sourceRefs: purchase.source_ref == null ? [] : [String(purchase.source_ref)],
         sourceNames: purchase.display_name == null ? [] : [String(purchase.display_name)],
@@ -892,7 +900,8 @@ export async function getTransaction(pool, personId, transactionId) {
   );
   if (!transactions.length) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
   const [lines] = await pool.query(
-    `SELECT li.line_item_id, li.amount_units, li.value_units, li.memo, li.account_id, a.AccountName,
+    `SELECT li.line_item_id, li.amount_units, li.value_units, li.reconciliation_state, li.reconciled_at,
+            li.memo, li.account_id, a.AccountName,
             a.account_currency_id, c.CurrencyAbbreviation, c.scale
        FROM line_items li JOIN accounts a ON a.account_id = li.account_id
        JOIN currencies c ON c.currency_id = a.account_currency_id
@@ -910,6 +919,14 @@ export async function getTransaction(pool, personId, transactionId) {
        FROM xrates WHERE transaction_id = ? AND owner_person_id = ? AND xrate_type = 'transaction'`,
     [transactionId, personId],
   );
+  const [mergedTransactions] = await pool.query(
+    `SELECT absorbed_transaction_id, absorbed_transaction_date, absorbed_description,
+            absorbed_source_system, absorbed_source_id, absorbed_source_fingerprint, created_at
+       FROM accounting_transaction_merges
+      WHERE retained_transaction_id = ? AND owner_person_id = ?
+      ORDER BY created_at, transaction_merge_id`,
+    [transactionId, personId],
+  );
   const tagsByLine = new Map();
   for (const tag of tags) {
     const key = Number(tag.tagged_line_item_id);
@@ -923,10 +940,21 @@ export async function getTransaction(pool, personId, transactionId) {
     valuationCurrencyId: Number(transactions[0].valuation_currency_id),
     lineItems: lines.map((line) => ({ id: Number(line.line_item_id), amountUnits: String(line.amount_units),
       valueUnits: line.value_units == null ? null : String(line.value_units), memo: line.memo,
+      reconciliationState: line.reconciliation_state,
+      reconciledAt: line.reconciled_at == null ? null : String(line.reconciled_at).slice(0, 10),
       accountId: Number(line.account_id), accountName: line.AccountName, currencyId: Number(line.account_currency_id),
       currencyCode: line.CurrencyAbbreviation.trim(), scale: Number(line.scale), tags: tagsByLine.get(Number(line.line_item_id)) ?? [] })),
     rates: rates.map((rate) => ({ id: Number(rate.xrate_id), fromUnits: String(rate.from_units),
       fromCurrencyId: Number(rate.from_currency_id), toUnits: String(rate.to_units), toCurrencyId: Number(rate.to_currency_id) })),
+    mergedTransactions: mergedTransactions.map((merged) => ({
+      absorbedTransactionId: Number(merged.absorbed_transaction_id),
+      originalDate: String(merged.absorbed_transaction_date).slice(0, 10),
+      originalDescription: merged.absorbed_description == null ? null : String(merged.absorbed_description),
+      sourceSystem: merged.absorbed_source_system == null ? null : String(merged.absorbed_source_system),
+      sourceId: merged.absorbed_source_id == null ? null : String(merged.absorbed_source_id),
+      sourceFingerprint: merged.absorbed_source_fingerprint == null ? null : String(merged.absorbed_source_fingerprint),
+      mergedAt: timestampFromDatabase(merged.created_at),
+    })),
   };
 }
 
