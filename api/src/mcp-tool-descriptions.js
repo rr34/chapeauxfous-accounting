@@ -38,6 +38,8 @@ const descriptions = {
   get_statement_import_job: read("Inspect one identified statement job without starting it; omit this status read from the normal initial processing path."),
   start_statement_import_job: mutate("Start or idempotently continue one statement job and exclusively return its complete-PDF access contract and current extraction requirements.", ["UPDATE"]),
   submit_statement_import_job_artifact: mutate("Create a pending statement preview from canonical rows bound to one exact job, account, and immutable original PDF. Opening values remain evidence and reconciliation inputs; only the closing pair may create a known balance.", ["CREATE"]),
+  start_transaction_list_import_job: mutate("Start or idempotently continue one saved plain-text one-account transaction list and return its complete evidence plus extraction contract; copied noise may be discarded.", ["UPDATE"]),
+  submit_transaction_list_import_job_artifact: mutate("Create a pending one-account transaction-list preview from canonical dated movements without inventing statement balances, categories, or counteraccounts.", ["CREATE"]),
   list_purchase_evidence_job_objects: read("Resolve one copied purchase-evidence job reference and preserve its exact selected suspense batch binding."),
   start_purchase_evidence_job: mutate("Start one exact purchase-evidence job and read its selected charge targets plus the canonical receipt-item contract.", ["UPDATE"]),
   submit_purchase_evidence_job_artifact: mutate("Validate one canonical receipt-item artifact against the exact selected charges and save a pending item-split preview with deterministic tax and signed-adjustment allocation.", ["CREATE"]),

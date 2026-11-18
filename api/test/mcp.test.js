@@ -515,7 +515,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "resolve_accounting_question", "restart_purchase_evidence_job", "retry_transaction_import_exception", "save_balance_assertion",
     "search_transactions", "stage_transaction_import_artifact", "stage_transaction_import_chunk",
     "start_purchase_evidence_job", "start_single_account_statement_import", "start_statement_import_job",
-    "submit_purchase_evidence_job_artifact", "submit_statement_import_job_artifact", "update_account",
+    "start_transaction_list_import_job", "submit_purchase_evidence_job_artifact",
+    "submit_statement_import_job_artifact", "submit_transaction_list_import_job_artifact", "update_account",
   ]);
   assert.deepEqual(objectInputContracts.list_currency_objects, [
     { path: "/currency_id", objectType: "accounting.currency", value: "id", allowUnbound: true },

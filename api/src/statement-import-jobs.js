@@ -7,6 +7,8 @@ import { withPoolTransaction } from "./db.js";
 
 export const STATEMENT_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024;
 export const STATEMENT_EVIDENCE_MEDIA_TYPE = "application/pdf";
+export const TRANSACTION_LIST_EVIDENCE_MAX_BYTES = 2 * 1024 * 1024;
+export const TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE = "text/plain";
 export const STATEMENT_EVIDENCE_DOWNLOAD_CONTRACT_VERSION = 1;
 
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
@@ -38,9 +40,9 @@ function jobId(value) {
   return id;
 }
 
-function safeFileName(value) {
+function safeFileName(value, label = "evidence filename") {
   const normalized = String(value ?? "").replace(/[\u0000-\u001f\u007f/\\]+/gu, " ").trim();
-  if (!normalized) throw statementError("A PDF filename is required.", "STATEMENT_FILE_NAME_REQUIRED");
+  if (!normalized) throw statementError(`An ${label} is required.`, "STATEMENT_FILE_NAME_REQUIRED");
   const characters = [...normalized];
   if (characters.length > 1024) {
     throw statementError("The PDF filename cannot exceed 1,024 characters.", "STATEMENT_FILE_NAME_TOO_LONG");
@@ -65,8 +67,8 @@ export function resolveEvidenceRoot(value = process.env.ACCOUNTING_EVIDENCE_ROOT
   return configured ? path.resolve(configured) : DEFAULT_EVIDENCE_ROOT;
 }
 
-function evidenceStorageKey(personId, digest) {
-  return `owner-${ownerId(personId)}/sha256/${digest}.pdf`;
+function evidenceStorageKey(personId, digest, extension = "pdf") {
+  return `owner-${ownerId(personId)}/sha256/${digest}.${extension}`;
 }
 
 function evidencePath(evidenceRoot, storageKey) {
@@ -78,8 +80,8 @@ function evidencePath(evidenceRoot, storageKey) {
   return resolved;
 }
 
-async function persistEvidenceBytes({ evidenceRoot, personId, digest, bytes }) {
-  const storageKey = evidenceStorageKey(personId, digest);
+async function persistEvidenceBytes({ evidenceRoot, personId, digest, bytes, extension = "pdf" }) {
+  const storageKey = evidenceStorageKey(personId, digest, extension);
   const destination = evidencePath(evidenceRoot, storageKey);
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
   try {
@@ -141,6 +143,16 @@ function copiedPrompt(id) {
   ].join("\n");
 }
 
+function transactionListCopiedPrompt(id) {
+  return [
+    "Process my pending Accounting transaction-list import:",
+    "",
+    `accounting://statement-import-jobs/${id}`,
+    "",
+    "Use the Accounting MCP to start this exact work item as a transaction-list import, retrieve its complete source evidence, and extract the dated movements for the already-selected account. The copied source may contain headings, categories, formatting, navigation, summaries, or other irrelevant text; discard anything that is not needed for the transactions. Keep useful merchant or transaction text in available_text when it helps identify the movement, but do not invent categories. Create a pending import preview, do not commit it, and stop after reporting the summary and asking for my approval.",
+  ].join("\n");
+}
+
 function downloadDescriptor(evidence) {
   return {
     contractVersion: STATEMENT_EVIDENCE_DOWNLOAD_CONTRACT_VERSION,
@@ -184,6 +196,7 @@ function statementJobValue(row) {
     committedAt: row.committed_at == null ? null : String(row.committed_at),
     download: downloadDescriptor(evidence),
     copiedPrompt: copiedPrompt(id),
+    transactionListCopiedPrompt: transactionListCopiedPrompt(id),
   };
 }
 
@@ -252,6 +265,48 @@ export async function createStatementImportFromPdf({
         (statement_import_job_id, owner_person_id, account_id, evidence_file_id, job_status)
        VALUES (?, ?, ?, ?, 'ready')`,
       [statementImportJobId, owner, account, evidenceFileId],
+    );
+  });
+  return getStatementImportJob({ pool, personId: owner, statementImportJobId });
+}
+
+export async function createTransactionListImportFromText({
+  pool, evidenceRoot, personId, accountId, fileName = "pasted-transactions.txt", text,
+}) {
+  const owner = ownerId(personId);
+  const account = positiveId(accountId, "Transaction-list account", "ACCOUNT_NOT_FOUND");
+  const name = safeFileName(fileName, "evidence filename");
+  const content = Buffer.from(String(text ?? ""), "utf8");
+  if (content.length < 1 || content.length > TRANSACTION_LIST_EVIDENCE_MAX_BYTES) {
+    throw statementError(`Transaction-list evidence must contain 1 through ${TRANSACTION_LIST_EVIDENCE_MAX_BYTES} UTF-8 bytes.`,
+      "INVALID_TRANSACTION_LIST_EVIDENCE_SIZE", { maximumBytes: TRANSACTION_LIST_EVIDENCE_MAX_BYTES }, 413);
+  }
+  const digest = createHash("sha256").update(content).digest("hex");
+  const storageKey = await persistEvidenceBytes({ evidenceRoot, personId: owner, digest,
+    bytes: content, extension: "txt" });
+  const statementImportJobId = randomUUID();
+  await withPoolTransaction(pool, async (connection) => {
+    const [accounts] = await connection.query(
+      `SELECT account_id, is_placeholder, archived_at
+         FROM accounts WHERE account_id = ? AND owner_person_id = ? FOR UPDATE`,
+      [account, owner],
+    );
+    if (!accounts.length) throw statementError("Transaction-list account not found.", "ACCOUNT_NOT_FOUND", undefined, 404);
+    if (accounts[0].archived_at != null || Boolean(accounts[0].is_placeholder)) {
+      throw statementError("A transaction list requires an active postable account.", "STATEMENT_ACCOUNT_NOT_POSTABLE");
+    }
+    const [evidenceInsert] = await connection.query(
+      `INSERT INTO accounting_evidence_files
+        (owner_person_id, original_file_name, media_type, byte_size, sha256, storage_key)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE evidence_file_id = LAST_INSERT_ID(evidence_file_id)`,
+      [owner, name, TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE, content.length, digest, storageKey],
+    );
+    await connection.query(
+      `INSERT INTO accounting_statement_import_jobs
+        (statement_import_job_id, owner_person_id, account_id, evidence_file_id, job_status)
+       VALUES (?, ?, ?, ?, 'ready')`,
+      [statementImportJobId, owner, account, Number(evidenceInsert.insertId)],
     );
   });
   return getStatementImportJob({ pool, personId: owner, statementImportJobId });
@@ -342,7 +397,17 @@ export async function listEvidenceFileObjectsPage(pool, personId, {
   return { objects, nextCursor: rows.length > resolvedLimit ? String(objects.at(-1).id) : null };
 }
 
-export async function startStatementImportJob({ pool, personId, statementImportJobId }) {
+export async function startStatementImportJob({ pool, personId, statementImportJobId,
+  expectedMediaType = STATEMENT_EVIDENCE_MEDIA_TYPE }) {
+  const existing = await getStatementImportJob({ pool, personId, statementImportJobId });
+  if (existing.evidenceFile.mediaType !== expectedMediaType) {
+    throw statementError(expectedMediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
+      ? "This work item does not contain a statement PDF."
+      : "This work item does not contain plain-text transaction-list evidence.",
+    expectedMediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
+      ? "STATEMENT_PDF_EVIDENCE_REQUIRED" : "TRANSACTION_LIST_EVIDENCE_REQUIRED",
+    { mediaType: existing.evidenceFile.mediaType }, 409);
+  }
   return withPoolTransaction(pool, async (connection) => {
     await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE",
       [ownerId(personId)]);
@@ -375,6 +440,10 @@ export async function startStatementImportJob({ pool, personId, statementImportJ
     }
     return { job: statementJobValue(row), transitioned };
   });
+}
+
+export async function startTransactionListImportJob(options) {
+  return startStatementImportJob({ ...options, expectedMediaType: TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE });
 }
 
 export async function bindStatementImportPreview({
@@ -513,7 +582,7 @@ export async function sendEvidenceFileContent({
   const range = requestedRange(rangeHeader, size);
   response.set("Accept-Ranges", "bytes");
   response.set("Cache-Control", "private, no-store");
-  response.set("Content-Type", STATEMENT_EVIDENCE_MEDIA_TYPE);
+  response.set("Content-Type", String(row.media_type));
   response.set("Content-Disposition", contentDisposition(row.original_file_name));
   response.set("ETag", `"sha256-${row.sha256}"`);
   response.set("X-Content-SHA256", String(row.sha256));

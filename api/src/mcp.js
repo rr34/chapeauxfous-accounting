@@ -79,6 +79,7 @@ import {
   singleAccountStatementArtifactUpload,
   singleAccountStatementImportCanonicalJsonSchema,
   statementImportJobArtifactUpload,
+  transactionListImportJobArtifactUpload,
   statementObservationAnalysisSchema,
   statementReconciliationContextSchema,
   structuredErrorSchema,
@@ -158,6 +159,7 @@ import {
   resolveEvidenceRoot,
   sendEvidenceFileContent,
   startStatementImportJob,
+  startTransactionListImportJob,
 } from "./statement-import-jobs.js";
 import {
   commitPurchaseEvidenceJob,
@@ -498,6 +500,24 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
   return lines.join("\n");
 }
 
+function transactionListConfirmationInstruction({ accountDisplayName, preview }) {
+  const lines = [
+    `**Transaction-list preview ready for ${accountDisplayName}.**`,
+    "",
+    `**Transactions found:** ${preview.submittedTransactionCount}`,
+    `**New transactions:** ${preview.wouldCreateTransactionCount}`,
+  ];
+  if (preview.wouldReuseTransactionCount) {
+    lines.push(`**Already in the ledger:** ${preview.wouldReuseTransactionCount}`);
+  }
+  if (preview.excludedTransactionCount) {
+    lines.push(`**Temporarily excluded for review:** ${preview.excludedTransactionCount}`);
+  }
+  lines.push("", `The pending review is visible in ${accountDisplayName}. No statement balances were expected or created.`,
+    "", "Nothing has been posted yet. **Approve this import?**");
+  return lines.join("\n");
+}
+
 function statementJobMetadata(job) {
   const { download: _download, ...metadata } = job;
   return metadata;
@@ -622,6 +642,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     listTransactionImportJobObjectsPage: services.listTransactionImportJobObjectsPage ?? listTransactionImportJobObjectsPage,
     getStatementImportJob: services.getStatementImportJob ?? getSingleAccountStatementImportJob,
     startStatementImportJob: services.startStatementImportJob ?? startStatementImportJob,
+    startTransactionListImportJob: services.startTransactionListImportJob ?? startTransactionListImportJob,
     bindStatementImportPreview: services.bindStatementImportPreview ?? bindStatementImportPreview,
     listStatementImportJobObjectsPage: services.listStatementImportJobObjectsPage
       ?? listStatementImportJobObjectsPage,
@@ -1172,7 +1193,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   const evidenceFileObjectSchema = z.object({
     objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
     sourceRef: z.string().min(1), displayName: z.string().min(1), fileName: z.string().min(1),
-    mediaType: z.literal("application/pdf"), byteSize: z.number().int().positive(),
+    mediaType: z.enum(["application/pdf", "text/plain"]), byteSize: z.number().int().positive(),
     sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
     startAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
@@ -1234,6 +1255,21 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     job: statementImportJobSchema,
     download: statementDownloadSchema,
     extraction: z.object(statementJobGuideShape),
+    effectReceipt: effectReceiptSchema,
+  });
+  const transactionListDownloadSchema = statementDownloadSchema.extend({
+    transportId: z.literal("transaction_list_evidence_download"),
+    mediaType: z.literal("text/plain"),
+  });
+  const transactionListImportJobStartOutput = successOutputSchema({
+    job: statementImportJobSchema,
+    download: transactionListDownloadSchema,
+    extraction: z.object({
+      workflow: z.literal("single_account_transaction_list"),
+      canonicalArtifactSchema: z.json(), artifactUpload: z.json(),
+      nextTool: z.literal("submit_transaction_list_import_job_artifact"),
+      rules: z.array(z.string().min(1)),
+    }),
     effectReceipt: effectReceiptSchema,
   });
   const evidenceFileObjectOutput = successOutputSchema({
@@ -2985,6 +3021,44 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         ]) };
   }));
 
+  registerTool("start_transaction_list_import_job", {
+    title: "Start transaction-list import job",
+    description: "Start or idempotently continue one saved plain-text transaction-list job. Return the complete immutable text evidence and the canonical one-account movement schema. Extract only supported dated movements for the already-bound account. Copied evidence may be noisy: discard irrelevant headings, categories, formatting, navigation, summaries, and unrelated text; retain useful merchant or transaction text when available. This does not create a preview or post ledger data.",
+    inputSchema: { statement_import_job_id: z.string().trim().uuid() },
+    outputSchema: transactionListImportJobStartOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["list_statement_import_job_objects"],
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id",
+        role: "transaction_list_import_job" }],
+    }),
+  }, async ({ statement_import_job_id }) => safeToolResult(async () => {
+    const { job, transitioned } = await accounting.startTransactionListImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id });
+    return {
+      job: statementJobMetadata(job),
+      download: { ...job.download, transportId: "transaction_list_evidence_download" },
+      extraction: {
+        workflow: "single_account_transaction_list",
+        canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
+        artifactUpload: transactionListImportJobArtifactUpload,
+        nextTool: "submit_transaction_list_import_job_artifact",
+        rules: [
+          "Extract every supported dated movement for the already-bound account; positive increases its displayed balance and negative decreases it.",
+          "Generate stable source_record_id values and preserve useful merchant, payee, memo, or transaction text in available_text.",
+          "Discard copied headings, incidental categories, formatting, navigation, summaries, and unrelated text when they are not needed to support a movement.",
+          "Do not invent categories, statement dates, opening balances, closing balances, or counteraccounts.",
+          "Accounting resolves its configured same-currency suspense account internally and creates only a pending preview.",
+        ],
+      },
+      effectReceipt: effectReceipt("start_transaction_list_import_job", { statement_import_job_id },
+        transitioned ? "updated" : "unchanged", [
+          { type: "statement_import_job", id: statement_import_job_id },
+          { type: "evidence_file", id: job.evidenceFile.id },
+        ]),
+    };
+  }));
+
   const validateDetermination = (value, context) => {
     if (value.found !== (value.value != null)) {
       context.addIssue({ code: "custom", path: ["value"],
@@ -3013,7 +3087,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
   const previewSingleAccountStatement = async ({ statement_id, account_id,
     statement_import_job_id = null, evidence_file_id = null,
-    start_date, start_amount, end_date, end_amount, line_items }) => {
+    start_date, start_amount, end_date, end_amount, line_items, transaction_list = false }) => {
     const openingBalanceDate = start_date.found && start_amount.found
       ? previousCalendarDate(start_date.value) : null;
     const closingBalanceDate = end_date.found && end_amount.found ? end_date.value : null;
@@ -3090,7 +3164,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         - BigInt(coverage.proposedNewObservationUnits) * BigInt(balanceSign)).toString();
     }
     const preview = await accounting.previewSingleAccountStatementImport({
-      pool, personId, sourceSystem: "single_account_statement", accountId: account_id,
+      pool, personId, sourceSystem: transaction_list ? "single_account_transaction_list" : "single_account_statement", accountId: account_id,
       valuationCurrencyCode: account.currencyCode,
       questionAudience: "human", lines: reviewedRows,
       knownBalanceAssertions,
@@ -3125,11 +3199,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     });
     const imported = transactionPreviewWorkflow(preview, {
       reviewDestination: { accountId: account_id, accountDisplayName },
-      confirmationInstruction: statementConfirmationInstruction({
-        account, accountDisplayName, startDate: start_date, startAmount: start_amount,
-        endDate: end_date, endAmount: end_amount, openingBalanceDate, closingBalanceDate,
-        analysis, preview,
-      }),
+      confirmationInstruction: transaction_list
+        ? transactionListConfirmationInstruction({ accountDisplayName, preview })
+        : statementConfirmationInstruction({
+          account, accountDisplayName, startDate: start_date, startAmount: start_amount,
+          endDate: end_date, endAmount: end_amount, openingBalanceDate, closingBalanceDate,
+          analysis, preview,
+        }),
     });
     return { ...imported, import: imported };
   };
@@ -3294,6 +3370,88 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         ]),
     };
   }, statementImportFailureOptions("submit_statement_import_job_artifact")));
+
+  registerTool("submit_transaction_list_import_job_artifact", {
+    title: "Submit transaction-list extraction",
+    description: "Consume one complete canonical JSON Lines artifact derived from an already-started plain-text transaction-list job. The server binds the artifact, selected account, source SHA-256, and saved preview to that job. This workflow expects no statement period or balances. Accounting screens likely duplicates, supplies its configured same-currency suspense counterlines, and saves a pending review in the selected account register. A successful ready result is not posted until the exact returned plan is approved and committed.",
+    inputSchema: {
+      statement_import_job_id: z.string().trim().uuid(),
+      artifact_id: z.string().trim().uuid(),
+      include_row_details: z.boolean().default(false),
+      dry_run: z.literal(true).default(true),
+    },
+    outputSchema: statementJobArtifactWorkflowOutput,
+    annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.reconciliation", {
+      dependencies: ["start_transaction_list_import_job"],
+      attachmentHints: [
+        "Transform all supported dated movements into the returned canonical schema; irrelevant copied text may be discarded.",
+        "Upload the complete derived JSON Lines artifact through this tool's advertised transport.",
+      ],
+      artifactUpload: transactionListImportJobArtifactUpload,
+      objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id",
+        role: "transaction_list_import_job" }],
+    }),
+  }, async ({ statement_import_job_id, artifact_id, include_row_details }) => safeWorkflowResult(async () => {
+    const job = await accounting.getStatementImportJob({ pool, personId,
+      statementImportJobId: statement_import_job_id });
+    if (job.evidenceFile.mediaType !== "text/plain") throw Object.assign(
+      new Error("This job does not contain plain-text transaction-list evidence."), {
+        code: "TRANSACTION_LIST_EVIDENCE_REQUIRED", status: 409,
+      });
+    if (job.status !== "processing") throw Object.assign(
+      new Error(job.status === "preview_ready"
+        ? "This transaction-list job already has a pending preview. Review or restart it instead."
+        : "Start this ready transaction-list job before submitting its extraction."), {
+        code: job.status === "preview_ready" ? "STATEMENT_PREVIEW_ALREADY_READY" : "STATEMENT_JOB_NOT_PROCESSING",
+        status: 409,
+      });
+    const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
+    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
+      importJobId: statement_import_job_id });
+    const parsed = oneSidedStatementLinesSchema.safeParse(
+      parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type),
+    );
+    if (!parsed.success) throw Object.assign(new Error(
+      "The transaction-list artifact does not match the canonical one-account line schema."), {
+      code: "INVALID_TRANSACTION_LIST_IMPORT_ARTIFACT", details: parsed.error.issues,
+    });
+    const absent = { found: false, value: null };
+    const preview = await previewSingleAccountStatement({
+      statement_id: job.sourceDocumentId,
+      account_id: job.account.id,
+      statement_import_job_id,
+      evidence_file_id: job.evidenceFile.id,
+      start_date: absent, start_amount: absent, end_date: absent, end_amount: absent,
+      line_items: parsed.data,
+      transaction_list: true,
+    });
+    if (!preview.importPlanId) throw Object.assign(new Error(
+      "No transaction-list preview was saved. Restart the job before trying a fresh extraction."), {
+      code: "TRANSACTION_LIST_PREVIEW_NOT_SAVED", status: 409,
+    });
+    const savedJob = await accounting.bindStatementImportPreview({ pool, personId,
+      statementImportJobId: statement_import_job_id, importPlanId: preview.importPlanId,
+      canonicalArtifactId: artifact_id,
+      evidenceMetadata: { startDate: null, startAmountUnits: null, endDate: null,
+        endAmountUnits: null, currencyId: job.account.currencyId },
+    });
+    const visiblePreview = include_row_details ? preview : (() => {
+      const { transactions: _transactions, import: fullImport, ...compactPreview } = preview;
+      const { transactions: _importTransactions, ...compactImport } = fullImport;
+      return { ...compactPreview, import: compactImport };
+    })();
+    return {
+      ...visiblePreview,
+      job: statementJobMetadata(savedJob),
+      effectReceipt: effectReceipt("submit_transaction_list_import_job_artifact",
+        { statement_import_job_id, artifact_id, source_sha256: job.evidenceFile.sha256 }, "created", [
+          { type: "statement_import_job", id: statement_import_job_id },
+          { type: "evidence_file", id: job.evidenceFile.id },
+          { type: "transaction_import_plan", id: preview.importPlanId },
+        ]),
+    };
+  }, statementImportFailureOptions("submit_transaction_list_import_job_artifact")));
 
   registerTool("reconcile_account_through_date", {
     title: "Reconcile account through known balance",

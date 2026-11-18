@@ -27,6 +27,7 @@ import {
 import {
   STATEMENT_EVIDENCE_MAX_BYTES,
   createStatementImportFromPdf,
+  createTransactionListImportFromText,
   getStatementImportJob,
   listStatementImportJobs,
   resolveEvidenceRoot,
@@ -168,6 +169,15 @@ app.post("/api/accounts/:accountId/statement-import-jobs", requireAuth,
       }) });
     } catch (error) { return next(error); }
   });
+
+app.post("/api/accounts/:accountId/transaction-list-import-jobs", requireAuth, async (req, res, next) => {
+  try {
+    res.status(201).json({ job: await createTransactionListImportFromText({
+      pool, evidenceRoot, personId: req.auth.personId, accountId: req.params.accountId,
+      fileName: req.body?.fileName, text: req.body?.text,
+    }) });
+  } catch (error) { next(error); }
+});
 
 app.get("/api/statement-import-jobs/:statementImportJobId", requireAuth, async (req, res, next) => {
   try { res.json({ job: await getStatementImportJob({ pool, personId: req.auth.personId,

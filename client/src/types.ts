@@ -88,6 +88,7 @@ export type StatementImportJob = {
   updatedAt: string;
   committedAt: string | null;
   copiedPrompt: string;
+  transactionListCopiedPrompt: string;
 };
 
 export type AccountLedgerEntry = {

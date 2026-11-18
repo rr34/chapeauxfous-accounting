@@ -8,9 +8,11 @@ import path from "node:path";
 import {
   bindStatementImportPreview,
   createStatementImportFromPdf,
+  createTransactionListImportFromText,
   restartStatementImportJob,
   sendEvidenceFileContent,
   startStatementImportJob,
+  startTransactionListImportJob,
 } from "../src/statement-import-jobs.js";
 
 function statementPool() {
@@ -171,6 +173,35 @@ test("statement processing is serial per owner", async (t) => {
   await assert.rejects(startStatementImportJob({ pool, personId: 7, statementImportJobId: second.id }),
     (error) => error.code === "STATEMENT_PROCESSING_SERIAL_CONFLICT"
       && error.details.activeJobId === first.id);
+});
+
+test("plain copied transaction evidence creates a transaction-list handoff without requiring statement facts", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+  const pool = statementPool();
+  const text = "November 10, 2026 | The Home Depot | Home Improvement | $75.00\nnoise is allowed";
+  const sha256 = createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+
+  const created = await createTransactionListImportFromText({
+    pool, evidenceRoot, personId: 7, accountId: 34, fileName: "copied.txt", text,
+  });
+  assert.equal(created.status, "ready");
+  assert.equal(created.evidenceFile.mediaType, "text/plain");
+  assert.match(created.transactionListCopiedPrompt, /discard anything that is not needed/);
+  assert.deepEqual(await readFile(path.join(evidenceRoot, `owner-7/sha256/${sha256}.txt`)), Buffer.from(text));
+
+  const started = await startTransactionListImportJob({ pool, personId: 7,
+    statementImportJobId: created.id });
+  assert.equal(started.transitioned, true);
+  assert.equal(started.job.status, "processing");
+
+  const response = new TestResponse();
+  const finished = new Promise((resolve, reject) => response.once("finish", resolve).once("error", reject));
+  await sendEvidenceFileContent({ pool, evidenceRoot, personId: 7,
+    evidenceFileId: created.evidenceFile.id, response });
+  await finished;
+  assert.equal(response.headers.get("content-type"), "text/plain");
+  assert.equal(response.body.toString("utf8"), text);
 });
 
 test("binding a statement preview stores each evidence significance field independently", async (t) => {

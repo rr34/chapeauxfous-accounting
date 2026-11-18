@@ -7,6 +7,32 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0024: generalize-one-account-import-evidence-comments
+-- writer downtime: schedule maintenance; MODIFY COLUMN and table COMMENT operations take metadata locks.
+-- deployment order: apply before advertising plain-text transaction-list jobs through the existing one-account import workflow.
+-- recovery: comments are metadata-only; restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE `accounting_evidence_files`
+  MODIFY COLUMN `media_type` varchar(255) NOT NULL
+    COMMENT 'Verified media type of immutable evidence bytes. One-account intake accepts application/pdf statements and normalized text/plain transaction lists.';
+
+ALTER TABLE `accounting_statement_import_jobs`
+  MODIFY COLUMN `statement_import_job_id` char(36) NOT NULL
+    COMMENT 'Opaque disposable UUID for one processing run against immutable one-account source evidence.',
+  MODIFY COLUMN `owner_person_id` int(11) NOT NULL
+    COMMENT 'Person whose ledger and immutable source evidence own this import job.',
+  MODIFY COLUMN `account_id` int(11) NOT NULL
+    COMMENT 'Exact destination account selected before the statement or transaction-list evidence was saved.',
+  MODIFY COLUMN `evidence_file_id` bigint(20) NOT NULL
+    COMMENT 'Immutable original statement PDF or normalized plain-text transaction-list evidence processed by this job.',
+  MODIFY COLUMN `job_status` enum('ready','processing','preview_ready','committed') NOT NULL DEFAULT 'ready'
+    COMMENT 'Current workflow state. ready: available for one agent run. processing: source evidence is being transformed. preview_ready: an uncommitted register review exists. committed: that exact preview posted.';
+
+ALTER TABLE `accounting_statement_import_jobs`
+  COMMENT='Own one disposable serial processing run for immutable one-account source evidence. One row: One fresh job bound to one destination account and evidence file. Rules: A statement PDF may include period and balance facts; a transaction list does not. Restart replaces only the uncommitted job while retaining the evidence file.';
+
+-- end migration 0024
+
 -- migration 0023: complete-purchase-and-merge-storage-comments
 -- writer downtime: schedule maintenance; MODIFY COLUMN statements take metadata locks.
 -- deployment order: apply after migrations 0021 and 0022 before requiring complete schema discovery metadata.

@@ -111,6 +111,8 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .statement-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; margin-top: 1rem; }
 .statement-import-panel { min-width: 0; border: 1px solid #e0e4dd; border-radius: 9px; background: white; padding: 1rem; }
 .statement-workspace label { display: block; margin: .4rem 0; }
+.statement-workspace textarea { width: 100%; margin-top: .3rem; border: 1px solid #ccd4cb; border-radius: 7px; background: white; color: #17231c; padding: .68rem .72rem; resize: vertical; }
+.statement-workspace textarea:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .statement-workspace input[type=file] { margin-top: .3rem; }
 .statement-workspace .secondary, .statement-workspace .primary { width: auto; margin-top: .4rem; }
 .statement-workspace .handoff-copy { min-width: 180px; transition: background-color .15s ease, box-shadow .15s ease; }

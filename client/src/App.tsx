@@ -2736,7 +2736,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong>
           {importReviews.length > 0 && <small>Projected {unitsToDecimal(projectedImportBalanceUnits, account.scale)} {account.currencyCode}</small>}
         </div>
-        <button className="secondary" onClick={onImportStatement}>Import statement</button>
+        <button className="secondary" onClick={onImportStatement}>Import transactions</button>
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
@@ -3802,7 +3802,7 @@ export default function App() {
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
         <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
-          onClick={() => selectWorkspaceView("statements")}>Statements</button>
+          onClick={() => selectWorkspaceView("statements")}>Import</button>
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
           onClick={() => selectWorkspaceView("misfits")}>Import issues
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>

@@ -29,11 +29,13 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   const [accountId, setAccountId] = useState(initialAccountId == null ? "" : String(initialAccountId));
   const [designationId, setDesignationId] = useState("");
   const [statementFile, setStatementFile] = useState<File | null>(null);
+  const [transactionText, setTransactionText] = useState("");
+  const [transactionTextName, setTransactionTextName] = useState("pasted-transactions.txt");
   const [statementJobs, setStatementJobs] = useState<StatementImportJob[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [handoffCopied, setHandoffCopied] = useState(false);
+  const [handoffCopied, setHandoffCopied] = useState<"statement" | "transactions" | "">("");
   const copiedResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const account = postable.find((candidate) => candidate.id === Number(accountId));
   const suspense = postable.find((candidate) => candidate.suspense
@@ -69,7 +71,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   }, []);
 
   useEffect(() => {
-    setHandoffCopied(false);
+    setHandoffCopied("");
   }, [activeStatementJob?.id]);
 
   async function loadStatementJobs() {
@@ -112,20 +114,39 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     finally { setBusy(""); }
   }
 
-  async function copyAgentHandoff() {
+  async function saveTransactionText() {
+    if (!account || !transactionText.trim()) return;
+    setBusy("text-upload"); setError(""); setNotice("");
+    try {
+      const result = await api<{ job: StatementImportJob }>(
+        `/accounts/${account.id}/transaction-list-import-jobs`, {
+          method: "POST", body: JSON.stringify({ fileName: transactionTextName, text: transactionText }),
+        }, token,
+      );
+      setStatementJobs((current) => [result.job, ...current]);
+      setTransactionText("");
+      setNotice("The transaction-list evidence is saved in Accounting. Nothing has been posted.");
+    } catch (nextError) { setError(message(nextError)); }
+    finally { setBusy(""); }
+  }
+
+  async function copyAgentHandoff(kind: "statement" | "transactions") {
     if (!activeStatementJob || !suspense) return;
     try {
-      await navigator.clipboard.writeText(activeStatementJob.copiedPrompt);
-      setHandoffCopied(true);
+      await navigator.clipboard.writeText(kind === "statement"
+        ? activeStatementJob.copiedPrompt : activeStatementJob.transactionListCopiedPrompt);
+      setHandoffCopied(kind);
       if (copiedResetTimer.current != null) clearTimeout(copiedResetTimer.current);
       copiedResetTimer.current = setTimeout(() => {
-        setHandoffCopied(false);
+        setHandoffCopied("");
         copiedResetTimer.current = null;
       }, 3000);
-      setNotice("Agent handoff copied. Paste it into your agent; the agent will retrieve the complete PDF from Accounting.");
+      setNotice(kind === "statement"
+        ? "Statement handoff copied. The agent will retrieve the complete PDF from Accounting."
+        : "Transaction-list handoff copied. The agent may discard irrelevant copied text and will prepare only the dated movements it can support.");
     } catch {
-      setHandoffCopied(false);
-      setError("Clipboard access was blocked. Copy the statement job reference manually.");
+      setHandoffCopied("");
+      setError("Clipboard access was blocked. Copy the import job reference manually.");
     }
   }
 
@@ -146,13 +167,13 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
   }
 
   return <section className="statement-workspace card">
-    <div className="section-heading"><div><p className="eyebrow">Agent statement workflow</p>
-      <h2>One statement, one account</h2></div></div>
-    <p className="muted">Upload the original PDF directly to Accounting. Your agent retrieves that exact document, creates a pending review, and leaves posting for your explicit approval.</p>
+    <div className="section-heading"><div><p className="eyebrow">Agent import workflow</p>
+      <h2>Import transactions for one account</h2></div></div>
+    <p className="muted">Save a statement PDF or noisy copied transaction text in Accounting. Your agent retrieves that exact evidence, creates a pending review in the selected account, and leaves posting for your explicit approval.</p>
     <div className="statement-layout">
       <section className="statement-import-panel">
-        <h3>Statement account</h3>
-        <label>Statement account<select value={accountId} onChange={(event) => {
+        <h3>Destination account</h3>
+        <label>Account receiving these movements<select value={accountId} onChange={(event) => {
           const value = event.target.value;
           setAccountId(value);
           if (value) onAccountSelected(Number(value));
@@ -164,12 +185,25 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         </select></label>
         {latestAssertion && <p className="statement-file">Latest known balance: {latestAssertion.date} · {unitsToDecimal(latestAssertion.knownBalanceUnits, latestAssertion.scale)} {latestAssertion.currencyCode}</p>}
 
-        <h3>1. Upload the original PDF</h3>
+        <h3>1. Save source evidence</h3>
         {!activeStatementJob && <>
           <label>Statement PDF<input type="file" accept="application/pdf,.pdf"
             onChange={(event) => setStatementFile(event.target.files?.[0] ?? null)} /></label>
           <button type="button" className="primary" disabled={!account || !statementFile || Boolean(busy)}
             onClick={() => void uploadStatement()}>{busy === "upload" ? "Uploading…" : "Save PDF in Accounting"}</button>
+          <p className="muted">or paste/upload a one-account transaction list without statement balances</p>
+          <label>Transaction-list file<input type="file" accept="text/plain,text/csv,.txt,.csv"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              setTransactionTextName(file.name);
+              void file.text().then(setTransactionText).catch((nextError) => setError(message(nextError)));
+            }} /></label>
+          <label>Copied transaction text<textarea rows={10} value={transactionText}
+            placeholder="Paste the copied list here. Extra headings, categories, formatting, and unrelated text are okay."
+            onChange={(event) => { setTransactionText(event.target.value); setTransactionTextName("pasted-transactions.txt"); }} /></label>
+          <button type="button" className="secondary" disabled={!account || !transactionText.trim() || Boolean(busy)}
+            onClick={() => void saveTransactionText()}>{busy === "text-upload" ? "Saving…" : "Save transaction evidence"}</button>
         </>}
         {activeStatementJob && <div className="statement-file"><strong>{activeStatementJob.evidenceFile.fileName}</strong>
           <span>{activeStatementJob.status.replaceAll("_", " ")} · {activeStatementJob.evidenceFile.sha256}</span>
@@ -178,7 +212,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
             activeStatementJob.evidenceFile.downloadPath
               ?? `/api/evidence-files/${activeStatementJob.evidenceFile.id}/content`,
             activeStatementJob.evidenceFile.fileName, token,
-          ).catch((nextError) => setError(message(nextError)))}>Download original PDF</button></div>}
+          ).catch((nextError) => setError(message(nextError)))}>Download source evidence</button></div>}
 
         <h3>2. Designate where unknown sides wait</h3>
         {suspense && <p className="statement-file">Suspense account: {paths.get(suspense.id)} · {suspense.currencyCode}</p>}
@@ -196,26 +230,30 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
         </>}
         {account && !account.suspense && !suspense && !sameCurrencyBuckets.length && <p className="statement-warning">Create a postable “Ask Accountant” account in {account.currencyCode}, then designate it here.</p>}
 
-        <h3>3. Continue in your agent</h3>
-        <ol className="statement-agent-questions">
+        <h3>3. Choose the agent handoff</h3>
+        {activeStatementJob?.evidenceFile.mediaType === "application/pdf" && <ol className="statement-agent-questions">
           <li>Statement start date, determined independently.</li>
           <li>Opening balance, determined independently.</li>
           <li>Statement end date, determined independently.</li>
           <li>Closing balance, determined independently.</li>
           <li>Every dated line item, signed by its effect on the displayed balance.</li>
           <li>All available text for every line item.</li>
-        </ol>
-        <p className="muted">No category guessing happens during intake. Each unknown counterline remains an open question in the suspense account for later matching or classification.</p>
-        <button type="button" className={`primary handoff-copy${handoffCopied ? " copied" : ""}`}
+        </ol>}
+        <p className="muted">Transaction-list intake needs only each movement’s date, signed amount, and useful identifying text. The agent may discard headings, incidental categories, formatting, navigation, and other copied noise. No category guessing happens during intake; unknown counterlines wait in the designated suspense account.</p>
+        {activeStatementJob?.evidenceFile.mediaType === "application/pdf" && <button type="button" className={`primary handoff-copy${handoffCopied === "statement" ? " copied" : ""}`}
           disabled={!activeStatementJob || !suspense || Boolean(busy)}
-          onClick={() => void copyAgentHandoff()} aria-live="polite">
-          {handoffCopied ? "✓ Copied to clipboard" : "Copy agent handoff"}</button>
+          onClick={() => void copyAgentHandoff("statement")} aria-live="polite">
+          {handoffCopied === "statement" ? "✓ Copied to clipboard" : "Copy statement-import handoff"}</button>}
+        {activeStatementJob?.evidenceFile.mediaType === "text/plain" && <button type="button"
+          className={`primary handoff-copy${handoffCopied === "transactions" ? " copied" : ""}`}
+          disabled={!suspense || Boolean(busy)} onClick={() => void copyAgentHandoff("transactions")} aria-live="polite">
+          {handoffCopied === "transactions" ? "✓ Copied to clipboard" : "Copy transaction-list handoff"}</button>}
         {activeStatementJob && activeStatementJob.status !== "committed" && <button type="button" className="secondary"
           disabled={Boolean(busy)} onClick={() => void restartStatementJob()}>
-          {busy === "restart" ? "Restarting…" : "Restart from original PDF"}</button>}
+          {busy === "restart" ? "Restarting…" : "Restart from source evidence"}</button>}
         {activeStatementJob && <button type="button" className="link-button" disabled={Boolean(busy)}
           onClick={() => void loadStatementJobs().catch((nextError) => setError(message(nextError)))}>
-          Refresh statement status</button>}
+          Refresh import status</button>}
       </section>
     </div>
     {notice && <p className="statement-success" role="status">{notice}</p>}
