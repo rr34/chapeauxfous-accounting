@@ -2585,6 +2585,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     finally { setImportReviewBusy(""); }
   }
 
+  async function reverseImportReviewSigns(review: TransactionImportReview) {
+    const busyKey = `${review.importPlanId}:reverse-signs`;
+    setImportReviewBusy(busyKey); setImportReviewError("");
+    try {
+      const result = await api<{ review: TransactionImportReview }>(
+        `/accounts/${account.id}/import-reviews/${review.importPlanId}/reverse-signs`,
+        { method: "POST", body: "{}" }, token);
+      setImportReviews((current) => current.map((item) =>
+        item.importPlanId === review.importPlanId ? result.review : item));
+    } catch (nextError) { setImportReviewError(errorMessage(nextError)); }
+    finally { setImportReviewBusy(""); }
+  }
+
   async function acceptImportReview(review: TransactionImportReview) {
     const newCount = review.statementSummary?.newTransactionCount ?? review.includedCount;
     const excludedCount = review.statementSummary?.excludedTransactionCount ?? review.excludedCount;
@@ -2745,7 +2758,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
-      <div><strong>Pending statement import · not posted</strong>
+      <div><strong>{review.sourceSystem === "single_account_transaction_list"
+        ? "Pending transaction-list import" : "Pending statement import"} · not posted</strong>
         {review.statementSummary ? <div className="register-import-summary">
           <span><b>Beginning</b>{statementSummaryDateAmount(review.statementSummary.beginningDate,
             review.statementSummary.beginningAmountUnits, review.statementSummary.currencyCode,
@@ -2764,10 +2778,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             ? "Could not be verified"
             : `${unitsToDecimal(review.statementSummary.balanceCheck.resultingEndingUnits ?? "0", review.statementSummary.scale)} ${review.statementSummary.currencyCode} ${review.statementSummary.balanceCheck.status === "matches" ? "matches" : `does not match ${unitsToDecimal(review.statementSummary.balanceCheck.statementEndingUnits ?? "0", review.statementSummary.scale)} ${review.statementSummary.currencyCode}`}`}</span>
         </div> : <small>{review.rows.length} proposed rows ({review.includedCount} included · {review.excludedCount} excluded) · {importReviewDateRange(review)}</small>}
+        {review.signInterpretation && <small><b>Sign interpretation:</b> {review.signInterpretation.summary}
+          {review.signsReversed ? " Signs have been reversed by the user in this preview." : ""}</small>}
         <small>Saved in this account register. Review the highlighted rows below, then accept to post them. Expires {formatImportReviewExpiry(review.expiresAt)}.</small></div>
-      <button type="button" className="primary" disabled={importReviewBusy !== ""}
-        onClick={() => void acceptImportReview(review)}>
-        {importReviewBusy === review.importPlanId ? "Accepting…" : "Accept import settings"}</button>
+      <div className="register-heading-actions">
+        {review.sourceSystem === "single_account_transaction_list" && <button type="button"
+          className="secondary" disabled={importReviewBusy !== ""}
+          onClick={() => void reverseImportReviewSigns(review)}>
+          {importReviewBusy === `${review.importPlanId}:reverse-signs` ? "Reversing…"
+            : review.signsReversed ? "Restore original signs" : "Reverse all movement signs"}</button>}
+        <button type="button" className="primary" disabled={importReviewBusy !== ""}
+          onClick={() => void acceptImportReview(review)}>
+          {importReviewBusy === review.importPlanId ? "Accepting…" : "Accept import settings"}</button>
+      </div>
     </div>)}
     {account.suspense && <section className={`suspense-group-review ${suspenseReviewOpen ? "open" : ""}`}>
       {!suspenseReviewOpen ? <><div><strong>Classify unresolved suspense lines in groups</strong>

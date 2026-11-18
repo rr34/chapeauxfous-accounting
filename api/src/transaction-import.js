@@ -231,7 +231,22 @@ function normalizeImportReview(review, transactions) {
       balanceSign,
     };
   }
+  let signInterpretation = null;
+  if (review.signInterpretation != null) {
+    const confidence = String(review.signInterpretation.confidence ?? "").trim();
+    if (!new Set(["explicit", "strong_inference", "ambiguous"]).has(confidence)) {
+      throw importError("Import sign-interpretation confidence is invalid.", "INVALID_IMPORT_REVIEW");
+    }
+    signInterpretation = {
+      sourceConvention: limitedRequiredText(review.signInterpretation.sourceConvention,
+        "source sign convention", 80),
+      summary: limitedRequiredText(review.signInterpretation.summary,
+        "source sign interpretation", 1000),
+      confidence,
+    };
+  }
   return { accountId, statementId, statementJobId, evidenceFileId, statementSummaryBasis,
+    signInterpretation, signsReversed: Boolean(review.signsReversed),
     decisions: [...byExternalId.values()] };
 }
 
@@ -811,6 +826,56 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
   };
 }
 
+function reversedDecimal(value) {
+  const normalized = String(value);
+  if (/^[+-]?0(?:\.0+)?$/.test(normalized)) return normalized.replace(/^[+-]/, "");
+  if (normalized.startsWith("-")) return normalized.slice(1);
+  if (normalized.startsWith("+")) return `-${normalized.slice(1)}`;
+  return `-${normalized}`;
+}
+
+async function saveChangedImportReview(connection, personId, normalized, plan) {
+  const entries = await analyzeTransactionImport(connection, personId, normalized, false);
+  if (entries.some((entry) => entry.status === "rejected")) {
+    throw importError("The import changed while it was being reviewed. Create a new preview.",
+      "IMPORT_PLAN_NO_LONGER_VALID", summarize(normalized, entries), 409);
+  }
+  normalized.previewResolutionDigest = importResolutionDigest(entries);
+  const reconciliationValidation = await validateReconciliation(connection, personId,
+    normalized.reconciliation ?? null, entries);
+  const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
+    normalized.knownBalanceAssertions ?? []);
+  const preview = { ...summarize(normalized, entries),
+    ...(balanceAssertions.length ? { balanceAssertions } : {}),
+    ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
+  const transactionSummaryValue = {
+    transactionsCreated: preview.wouldCreateTransactionCount,
+    transactionsReused: preview.wouldReuseTransactionCount,
+    transactionsExcluded: preview.excludedTransactionCount,
+    lineItemsCreated: preview.wouldCreateLineItemCount,
+    lineItemsReused: preview.wouldReuseLineItemCount,
+    rejectedTransactions: preview.rejectedTransactionCount,
+    statementSummary: statementReviewSummary(normalized, entries, balanceAssertions),
+  };
+  const payloadJson = JSON.stringify(normalized);
+  const previewHash = payloadHash(JSON.stringify({ preview,
+    reviewState: {
+      decisions: normalized.importReview?.decisions ?? null,
+      signsReversed: Boolean(normalized.importReview?.signsReversed),
+      previewResolutionDigest: normalized.previewResolutionDigest,
+    } }));
+  const payloadSha256 = payloadHash(payloadJson);
+  const summaryJson = JSON.stringify(transactionSummaryValue);
+  await connection.query(
+    `UPDATE accounting_import_plans
+        SET payload_json = ?, payload_sha256 = ?, preview_sha256 = ?, summary_json = ?
+      WHERE import_plan_id = ? AND owner_person_id = ?`,
+    [payloadJson, payloadSha256, previewHash, summaryJson, plan.import_plan_id, personId],
+  );
+  return importReviewView(normalized, { ...plan, payload_json: payloadJson,
+    payload_sha256: payloadSha256, preview_sha256: previewHash, summary_json: summaryJson });
+}
+
 async function loadContext(connection, personId, lock) {
   const suffix = lock ? " FOR UPDATE" : "";
   const [accountRows] = await connection.query(
@@ -1078,6 +1143,8 @@ function importReviewView(normalized, plan) {
     accountId: review.accountId,
     statementId: review.statementId,
     sourceSystem: normalized.sourceSystem,
+    signInterpretation: review.signInterpretation ?? null,
+    signsReversed: Boolean(review.signsReversed),
     statementSummary: storedSummary.statementSummary ?? null,
     rows,
     includedCount: rows.filter((row) => row.decision === "include").length,
@@ -1153,40 +1220,48 @@ export async function updateTransactionImportReviewDecision({ pool, personId, im
       ? "The user selected this statement row for import."
       : "The user excluded this statement row from import.";
 
-    const entries = await analyzeTransactionImport(connection, personId, normalized, false);
-    if (entries.some((entry) => entry.status === "rejected")) {
-      throw importError("The import changed while it was being reviewed. Create a new preview.",
-        "IMPORT_PLAN_NO_LONGER_VALID", summarize(normalized, entries), 409);
-    }
-    normalized.previewResolutionDigest = importResolutionDigest(entries);
-    const reconciliationValidation = await validateReconciliation(connection, personId,
-      normalized.reconciliation ?? null, entries);
-    const balanceAssertions = await inspectKnownBalanceAssertions(connection, personId,
-      normalized.knownBalanceAssertions ?? []);
-    const preview = { ...summarize(normalized, entries),
-      ...(balanceAssertions.length ? { balanceAssertions } : {}),
-      ...(reconciliationValidation == null ? {} : { reconciliationValidation }) };
-    const transactionSummaryValue = {
-      transactionsCreated: preview.wouldCreateTransactionCount,
-      transactionsReused: preview.wouldReuseTransactionCount,
-      transactionsExcluded: preview.excludedTransactionCount,
-      lineItemsCreated: preview.wouldCreateLineItemCount,
-      lineItemsReused: preview.wouldReuseLineItemCount,
-      rejectedTransactions: preview.rejectedTransactionCount,
-      statementSummary: statementReviewSummary(normalized, entries, balanceAssertions),
-    };
-    const payloadJson = JSON.stringify(normalized);
-    const previewHash = payloadHash(JSON.stringify(preview));
-    await connection.query(
-      `UPDATE accounting_import_plans
-          SET payload_json = ?, payload_sha256 = ?, preview_sha256 = ?, summary_json = ?
-        WHERE import_plan_id = ? AND owner_person_id = ?`,
-      [payloadJson, payloadHash(payloadJson), previewHash, JSON.stringify(transactionSummaryValue),
-        resolvedPlanId, personId],
+    return saveChangedImportReview(connection, personId, normalized, plan);
+  });
+}
+
+export async function reverseTransactionImportReviewSigns({ pool, personId, importPlanId, accountId }) {
+  const resolvedPlanId = limitedRequiredText(importPlanId, "import plan ID", 36);
+  return withPoolTransaction(pool, async (connection) => {
+    const [rows] = await connection.query(
+      `SELECT import_plan_id, source_system, plan_status, payload_sha256, preview_sha256,
+              payload_json, summary_json, expires_at, expires_at <= UTC_TIMESTAMP(6) AS is_expired
+         FROM accounting_import_plans
+        WHERE import_plan_id = ? AND owner_person_id = ? AND import_kind = 'transactions'
+        FOR UPDATE`,
+      [resolvedPlanId, personId],
     );
-    return importReviewView(normalized, { ...plan, payload_json: payloadJson,
-      payload_sha256: payloadHash(payloadJson), preview_sha256: previewHash,
-      summary_json: JSON.stringify(transactionSummaryValue) });
+    const plan = rows[0];
+    if (!plan) throw importError("Transaction import plan not found.", "IMPORT_PLAN_NOT_FOUND", undefined, 404);
+    if (plan.plan_status !== "ready" || Boolean(plan.is_expired)) {
+      throw importError("This transaction import can no longer be changed.",
+        "IMPORT_PLAN_STATE_CONFLICT", undefined, 409);
+    }
+    if (payloadHash(plan.payload_json) !== String(plan.payload_sha256)) {
+      throw importError("Stored transaction import plan failed its integrity check.",
+        "IMPORT_PLAN_INTEGRITY_FAILURE", undefined, 500);
+    }
+    const normalized = parsePlanJson(plan.payload_json, "payload");
+    if (Number(normalized.importReview?.accountId) !== Number(accountId)) {
+      throw importError("Transaction import review not found for this account.",
+        "IMPORT_REVIEW_NOT_FOUND", undefined, 404);
+    }
+    if (normalized.sourceSystem !== "single_account_transaction_list") {
+      throw importError("Only a transaction-list review can reverse every movement sign.",
+        "IMPORT_REVIEW_SIGN_REVERSAL_UNAVAILABLE", undefined, 409);
+    }
+    for (const transaction of normalized.transactions) {
+      for (const line of transaction.lineItems) {
+        line.amountDecimal = reversedDecimal(line.amountDecimal);
+        if (line.valueDecimal != null) line.valueDecimal = reversedDecimal(line.valueDecimal);
+      }
+    }
+    normalized.importReview.signsReversed = !Boolean(normalized.importReview.signsReversed);
+    return saveChangedImportReview(connection, personId, normalized, plan);
   });
 }
 

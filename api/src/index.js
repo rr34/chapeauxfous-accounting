@@ -54,6 +54,7 @@ import {
 import {
   commitTransactionImportPlan,
   listAccountTransactionImportReviews,
+  reverseTransactionImportReviewSigns,
   updateTransactionImportReviewDecision,
 } from "./transaction-import.js";
 
@@ -214,6 +215,14 @@ app.patch("/api/accounts/:accountId/import-reviews/:importPlanId/rows/:externalI
       res.json({ review: await updateTransactionImportReviewDecision({ pool, personId: req.auth.personId,
         accountId: req.params.accountId, importPlanId: req.params.importPlanId,
         externalId: req.params.externalId, decision: req.body?.decision }) });
+    } catch (error) { next(error); }
+  });
+
+app.post("/api/accounts/:accountId/import-reviews/:importPlanId/reverse-signs", requireAuth,
+  async (req, res, next) => {
+    try {
+      res.json({ review: await reverseTransactionImportReviewSigns({ pool, personId: req.auth.personId,
+        accountId: req.params.accountId, importPlanId: req.params.importPlanId }) });
     } catch (error) { next(error); }
   });
 

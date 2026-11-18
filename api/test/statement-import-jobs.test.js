@@ -53,7 +53,8 @@ function statementPool() {
         if (!job || job.owner_person_id !== owner) return [[]];
         const evidence = state.evidence.get(job.evidence_file_id);
         return [[{ ...job, ...evidence, evidence_created_at: evidence.created_at,
-          account_currency_id: 1, AccountName: "Checking", CurrencyAbbreviation: "USD", scale: 2,
+          account_currency_id: 1, AccountName: "Checking", AccountType: "asset",
+          CurrencyAbbreviation: "USD", scale: 2,
           evidence_currency_id: evidence.currency_id,
           evidence_currency_code: evidence.currency_id == null ? null : "USD",
           evidence_currency_scale: evidence.currency_id == null ? null : 2 }]];

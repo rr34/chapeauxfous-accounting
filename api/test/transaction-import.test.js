@@ -12,6 +12,7 @@ const {
   listAccountTransactionImportReviews,
   normalizeTransactionImport,
   previewTransactionImport,
+  reverseTransactionImportReviewSigns,
   updateTransactionImportReviewDecision,
 } = await import("../src/transaction-import.js");
 const {
@@ -542,6 +543,36 @@ test("account review lists plan rows and a user toggle changes the atomic commit
 
   await commitTransactionImportPlan({ pool, personId: 7, importPlanId: preview.importPlanId });
   assert.deepEqual(pool.state.transactions.map((transaction) => transaction.source_id), ["source-tx-2"]);
+});
+
+test("a transaction-list review can reverse every balanced movement sign and restore it", async () => {
+  const pool = memoryPool();
+  const transaction = importedTransactions()[0];
+  const preview = await previewTransactionImport({
+    pool, personId: 7, sourceSystem: "single_account_transaction_list", transactions: [transaction],
+    importReview: {
+      accountId: 11, statementId: "unsigned-card-purchases",
+      signInterpretation: { sourceConvention: "unsigned merchant charges",
+        summary: "Unsigned values were interpreted as decreases.", confidence: "strong_inference" },
+      decisions: [{ externalId: transaction.externalId, decision: "include", sourceRecordId: "row-1" }],
+    },
+  });
+
+  const reversed = await reverseTransactionImportReviewSigns({
+    pool, personId: 7, accountId: 11, importPlanId: preview.importPlanId,
+  });
+  assert.equal(reversed.rows[0].amountDecimal, "12.34");
+  assert.equal(reversed.rows[0].otherLines[0].amountDecimal, "-12.34");
+  assert.equal(reversed.signsReversed, true);
+  assert.equal(reversed.signInterpretation.summary, "Unsigned values were interpreted as decreases.");
+  assert.notEqual(reversed.previewDigest, preview.previewDigest);
+
+  const restored = await reverseTransactionImportReviewSigns({
+    pool, personId: 7, accountId: 11, importPlanId: preview.importPlanId,
+  });
+  assert.equal(restored.rows[0].amountDecimal, "-12.34");
+  assert.equal(restored.rows[0].otherLines[0].amountDecimal, "12.34");
+  assert.equal(restored.signsReversed, false);
 });
 
 test("statement arithmetic remains verifiable when the beginning amount has no date", async () => {

@@ -185,6 +185,7 @@ function statementJobValue(row) {
       id: Number(row.account_id),
       sourceRef: `accounting://accounts/${row.account_id}`,
       displayName: accountDisplayName(row),
+      type: String(row.AccountType),
       currencyId: Number(row.account_currency_id),
       currencyCode: String(row.CurrencyAbbreviation).trim(),
       scale: Number(row.scale),
@@ -209,7 +210,7 @@ const statementJobSelect = `
          ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
          ef.currency_id AS evidence_currency_id,
          ec.CurrencyAbbreviation AS evidence_currency_code, ec.scale AS evidence_currency_scale,
-         ef.created_at AS evidence_created_at, a.AccountName, a.account_currency_id,
+         ef.created_at AS evidence_created_at, a.AccountName, a.AccountType, a.account_currency_id,
          c.CurrencyAbbreviation, c.scale
     FROM accounting_statement_import_jobs sij
     JOIN accounting_evidence_files ef

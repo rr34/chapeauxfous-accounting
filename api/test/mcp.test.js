@@ -86,7 +86,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     displayName: `statement.pdf · Wallet · ${status}`,
     status,
     account: { objectType: "accounting.account", id: 10, sourceRef: "accounting://accounts/10",
-      displayName: "Wallet", currencyId: 1, currencyCode: "USD", scale: 2 },
+      displayName: "Wallet", type: "asset", currencyId: 1, currencyCode: "USD", scale: 2 },
     evidenceFile: { objectType: "accounting.evidence_file", id: 81,
       sourceRef: "accounting://evidence-files/81", displayName: "statement.pdf", fileName: "statement.pdf",
       mediaType: "application/pdf", byteSize: 2048, sha256: `sha256:${"9".repeat(64)}`,
@@ -1177,6 +1177,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(statementGuide.structuredContent.orderedQuestions.map((question) => question.key),
     ["start_date", "start_amount", "end_date", "end_amount", "line_items", "available_text"]);
   assert.equal(statementGuide.structuredContent.suspenseAccount, null);
+  assert.equal(statementGuide.structuredContent.account.type, "asset");
+  assert.equal(statementGuide.structuredContent.signConvention.accountType, "asset");
+  assert.match(statementGuide.structuredContent.signConvention.canonicalAmountMeaning,
+    /normal balance.*not a generic cash-flow sign/i);
   assert.match(statementGuide.structuredContent.orderedQuestions[0].prompt,
     /period start date independently of the opening balance/);
   assert.equal(Object.hasOwn(statementGuide.structuredContent.orderedQuestions[0].answerShape,
@@ -1237,6 +1241,10 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(startedTransactionListJob.structuredContent.download, null);
   assert.equal(startedTransactionListJob.structuredContent.textAccess.nextTool,
     "read_one_account_import_evidence_text");
+  assert.equal(startedTransactionListJob.structuredContent.job.account.type, "asset");
+  assert.equal(startedTransactionListJob.structuredContent.extraction.signConvention.accountType, "asset");
+  assert.match(startedTransactionListJob.structuredContent.extraction.rules.join(" "),
+    /Do not negate a merchant purchase merely because it represents spending/);
   const textEvidence = await client.callTool({
     name: "read_one_account_import_evidence_text", arguments: {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3", offset: 0, max_characters: 20000,

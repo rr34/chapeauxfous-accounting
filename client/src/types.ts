@@ -137,6 +137,12 @@ export type TransactionImportReview = {
   accountId: number;
   statementId: string;
   sourceSystem: string;
+  signInterpretation: {
+    sourceConvention: string;
+    summary: string;
+    confidence: "explicit" | "strong_inference" | "ambiguous";
+  } | null;
+  signsReversed: boolean;
   statementSummary: {
     beginningDate: string | null;
     beginningAmountUnits: string | null;

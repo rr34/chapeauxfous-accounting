@@ -501,7 +501,7 @@ function statementConfirmationInstruction({ account, accountDisplayName, startDa
   return lines.join("\n");
 }
 
-function transactionListConfirmationInstruction({ accountDisplayName, preview }) {
+function transactionListConfirmationInstruction({ accountDisplayName, preview, signInterpretation }) {
   const lines = [
     `**Transaction-list preview ready for ${accountDisplayName}.**`,
     "",
@@ -513,6 +513,9 @@ function transactionListConfirmationInstruction({ accountDisplayName, preview })
   }
   if (preview.excludedTransactionCount) {
     lines.push(`**Temporarily excluded for review:** ${preview.excludedTransactionCount}`);
+  }
+  if (signInterpretation) {
+    lines.push(`**Sign interpretation:** ${signInterpretation.summary}`);
   }
   lines.push("", `The pending review is visible in ${accountDisplayName}. No statement balances were expected or created.`,
     "", "Nothing has been posted yet. **Approve this import?**");
@@ -1170,6 +1173,58 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     analysis: statementObservationAnalysisSchema,
     resultMetadata: resultMetadataSchema,
   });
+  const accountTypeSchema = z.enum(["asset", "liability", "equity", "income", "expense"]);
+  const signConventionSchema = z.object({
+    accountType: accountTypeSchema,
+    canonicalAmountMeaning: z.string().min(1),
+    positiveMeaning: z.string().min(1),
+    negativeMeaning: z.string().min(1),
+    sourceInterpretationRule: z.string().min(1),
+    examples: z.array(z.string().min(1)).min(1),
+  });
+  const submittedSignInterpretationSchema = z.object({
+    source_convention: z.string().trim().min(1).max(80),
+    summary: z.string().trim().min(1).max(1000),
+    confidence: z.enum(["explicit", "strong_inference", "ambiguous"]),
+  }).strict();
+  const accountSignConvention = (account) => {
+    const meanings = {
+      asset: {
+        positive: "Increases money or value held in the asset account.",
+        negative: "Decreases money or value held in the asset account.",
+        examples: ["A bank deposit is normally positive.", "A bank withdrawal or purchase paid from the account is normally negative."],
+      },
+      liability: {
+        positive: "Increases the amount owed in the liability account.",
+        negative: "Decreases the amount owed in the liability account.",
+        examples: ["A credit-card purchase or charge is normally positive.", "A card payment, refund, or statement credit is normally negative."],
+      },
+      expense: {
+        positive: "Increases the expense account's normal balance.",
+        negative: "Decreases the expense account's normal balance.",
+        examples: ["An incurred expense is normally positive.", "An expense refund or reversal is normally negative."],
+      },
+      income: {
+        positive: "Increases the income account's normal balance.",
+        negative: "Decreases the income account's normal balance.",
+        examples: ["Earned income is normally positive.", "An income reversal is normally negative."],
+      },
+      equity: {
+        positive: "Increases the equity account's normal balance.",
+        negative: "Decreases the equity account's normal balance.",
+        examples: ["An equity increase is positive; an equity reduction is negative."],
+      },
+    };
+    const meaning = meanings[account.type];
+    return {
+      accountType: account.type,
+      canonicalAmountMeaning: "amount_decimal is the signed effect on the selected account's displayed normal balance, not a generic cash-flow sign and not a raw debit/credit posting.",
+      positiveMeaning: meaning.positive,
+      negativeMeaning: meaning.negative,
+      sourceInterpretationRule: "Determine whether the source uses signed balance effects, cash-flow signs, debit/credit columns, or unsigned semantic amounts. Map its meaning to this account before creating amount_decimal. Do not negate a merchant purchase merely because it represents spending. Ask only when the evidence is genuinely ambiguous.",
+      examples: meaning.examples,
+    };
+  };
   const singleAccountStatementGuideShape = {
     workflow: z.literal("single_account_statement"),
     workflowState: z.literal("instructions_only"),
@@ -1177,8 +1232,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     account: z.object({
       objectType: z.literal("accounting.account"), id: z.number().int().positive(),
       sourceRef: z.string().min(1), displayName: z.string().min(1), currencyCode: z.string().min(1),
-      scale: z.number().int().min(0).max(18),
+      scale: z.number().int().min(0).max(18), type: accountTypeSchema,
     }),
+    signConvention: signConventionSchema,
     suspenseAccount: z.object({ id: z.number().int().positive(), sourceRef: z.string().min(1),
       displayName: z.string().min(1), currencyCode: z.string().min(1) }).nullable(),
     orderedQuestions: z.array(z.object({
@@ -1235,6 +1291,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     account: z.object({
       objectType: z.literal("accounting.account"), id: z.number().int().positive(),
       sourceRef: z.string().min(1), displayName: z.string().min(1),
+      type: accountTypeSchema,
       currencyId: z.number().int().positive(), currencyCode: z.string().min(1),
       scale: z.number().int().min(0).max(18),
     }),
@@ -1278,6 +1335,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     extraction: z.object({
       workflow: z.literal("single_account_transaction_list"),
       canonicalArtifactSchema: z.json(), artifactUpload: z.json(),
+      signConvention: signConventionSchema,
       nextTool: z.literal("submit_transaction_list_import_job_artifact"),
       rules: z.array(z.string().min(1)),
     }),
@@ -2847,8 +2905,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       completionNote: "No import workflow or preview has been saved by this read-only call. Continue to the preview tool in the same request.",
       account: {
         objectType: "accounting.account", id: account.id, sourceRef: `accounting://accounts/${account.id}`,
-        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode, scale: account.scale,
+        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode,
+        scale: account.scale, type: account.type,
       },
+      signConvention: accountSignConvention(account),
       suspenseAccount: designated == null ? null : {
         id: designated.id, sourceRef: `accounting://accounts/${designated.id}`,
         displayName: paths.get(designated.id) ?? designated.name, currencyCode: designated.currencyCode,
@@ -2867,7 +2927,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           prompt: "Determine the closing balance independently of the period end date. Extract the signed amount exactly even when it appears elsewhere in the document.",
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
         { order: 5, key: "line_items",
-          prompt: "What are all line items shown for this account? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.",
+          prompt: "What are all line items shown for this account? Extract each date and map its effect to the selected account's displayed normal balance using signConvention; positive increases that balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.",
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
         { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text from the document without inventing a category.",
@@ -2879,6 +2939,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       inlineNextTool: "import_single_account_statement",
       rules: [
         "Use only evidence visible in this one statement.",
+        "Interpret source signs in the context of the bound account type and the returned signConvention. Do not treat every purchase as negative generic spending.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text, including zero-amount line items such as $0.00. Accounting retains each zero-amount row as a balanced statement-and-suspense transaction with no balance effect.",
         "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
@@ -2908,8 +2969,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       completionNote: "The original evidence is saved in Accounting and this job is processing. Submit one complete canonical artifact to create a pending preview; no ledger data has been posted.",
       account: {
         objectType: "accounting.account", id: account.id, sourceRef: `accounting://accounts/${account.id}`,
-        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode, scale: account.scale,
+        displayName: paths.get(account.id) ?? account.name, currencyCode: account.currencyCode,
+        scale: account.scale, type: account.type,
       },
+      signConvention: accountSignConvention(account),
       suspenseAccount: designated == null ? null : {
         id: designated.id, sourceRef: `accounting://accounts/${designated.id}`,
         displayName: paths.get(designated.id) ?? designated.name, currencyCode: designated.currencyCode,
@@ -2928,7 +2991,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           prompt: `Determine the closing balance across the ${sourceLabel} independently of the period end date. Extract the signed amount exactly wherever it appears.`,
           answerShape: { found: "boolean", value: "decimal string or null", available_text: "string or null" } },
         { order: 5, key: "line_items",
-          prompt: `What are all line items shown for this account across the ${sourceLabel}? Extract each date and signed change to the statement balance; positive increases the displayed balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.`,
+          prompt: `What are all line items shown for this account across the ${sourceLabel}? Extract each date and map its effect to the selected account's displayed normal balance using signConvention; positive increases that balance and negative decreases it. Retain printed zero-amount line items, such as $0.00, as ledger evidence.`,
           answerShape: [{ source_record_id: "stable row id", transaction_date: "YYYY-MM-DD", amount_decimal: "signed string" }] },
         { order: 6, key: "available_text",
           prompt: "For every extracted line item, copy the available payee, description, memo, reference, or other transaction text without inventing a category.",
@@ -2946,6 +3009,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
           ? "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document."
           : "Read every saved-text chunk through the textAccess tool until complete; do not require a PDF or search native Files merely because this is a statement workflow.",
         "Use only evidence visible in this one statement.",
+        "Interpret source signs in the context of the bound account type and the returned signConvention. Do not treat every purchase as negative generic spending.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
         "Preserve every printed amount and all useful transaction text, including zero-amount line items such as $0.00. Accounting retains each zero-amount row as a balanced statement-and-suspense transaction with no balance effect.",
         "The statement start date and opening balance remain evidence and support arithmetic validation. Accounting never saves an opening balance as a ledger known-balance assertion; only a closing date and closing balance can create one.",
@@ -3097,12 +3161,15 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         workflow: "single_account_transaction_list",
         canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
         artifactUpload: transactionListImportJobArtifactUpload,
+        signConvention: accountSignConvention(job.account),
         nextTool: "submit_transaction_list_import_job_artifact",
         rules: [
           job.evidenceFile.mediaType === "text/plain"
             ? "Call read_one_account_import_evidence_text from offset 0 through every returned nextOffset until complete is true. Do not search native Files for this Accounting-owned evidence."
             : "Process the complete authenticated PDF supplied in download; do not omit pages.",
-          "Extract every supported dated movement for the already-bound account; positive increases its displayed balance and negative decreases it.",
+          "Extract every supported dated movement for the already-bound account. Map source meaning to the returned signConvention; positive increases the account's displayed normal balance and negative decreases it.",
+          "Determine the source sign convention before materializing rows. Unsigned merchant purchases in a liability account normally increase the amount owed and are therefore positive; payments, refunds, and credits normally decrease it and are negative.",
+          "Do not negate a merchant purchase merely because it represents spending. The canonical sign describes movement of the selected account, not generic cash flow.",
           "Generate stable source_record_id values and preserve useful merchant, payee, memo, or transaction text in available_text.",
           "Discard copied headings, incidental categories, formatting, navigation, summaries, and unrelated text when they are not needed to support a movement.",
           "Do not invent categories, statement dates, opening balances, closing balances, or counteraccounts.",
@@ -3145,7 +3212,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
   const previewSingleAccountStatement = async ({ statement_id, account_id,
     statement_import_job_id = null, evidence_file_id = null,
-    start_date, start_amount, end_date, end_amount, line_items, transaction_list = false }) => {
+    start_date, start_amount, end_date, end_amount, line_items, transaction_list = false,
+    sign_interpretation = null }) => {
     const openingBalanceDate = start_date.found && start_amount.found
       ? previousCalendarDate(start_date.value) : null;
     const closingBalanceDate = end_date.found && end_amount.found ? end_date.value : null;
@@ -3231,6 +3299,11 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         statementId: statement_id,
         ...(statement_import_job_id == null ? {} : { statementJobId: statement_import_job_id }),
         ...(evidence_file_id == null ? {} : { evidenceFileId: evidence_file_id }),
+        ...(sign_interpretation == null ? {} : { signInterpretation: {
+          sourceConvention: sign_interpretation.source_convention,
+          summary: sign_interpretation.summary,
+          confidence: sign_interpretation.confidence,
+        } }),
         statementSummaryBasis: {
           beginningDate: start_date.found ? start_date.value : null,
           beginningAmountUnits: start_amount.found
@@ -3258,7 +3331,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     const imported = transactionPreviewWorkflow(preview, {
       reviewDestination: { accountId: account_id, accountDisplayName },
       confirmationInstruction: transaction_list
-        ? transactionListConfirmationInstruction({ accountDisplayName, preview })
+        ? transactionListConfirmationInstruction({ accountDisplayName, preview,
+          signInterpretation: sign_interpretation })
         : statementConfirmationInstruction({
           account, accountDisplayName, startDate: start_date, startAmount: start_amount,
           endDate: end_date, endAmount: end_amount, openingBalanceDate, closingBalanceDate,
@@ -3435,6 +3509,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
+      sign_interpretation: submittedSignInterpretationSchema.describe(
+        "The source convention the agent inferred and how it mapped source values to the bound account's normal-balance movements."),
       include_row_details: z.boolean().default(false),
       dry_run: z.literal(true).default(true),
     },
@@ -3450,7 +3526,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       objectInputs: [{ path: "/statement_import_job_id", objectType: "accounting.statement_import_job", value: "id",
         role: "transaction_list_import_job" }],
     }),
-  }, async ({ statement_import_job_id, artifact_id, include_row_details }) => safeWorkflowResult(async () => {
+  }, async ({ statement_import_job_id, artifact_id, sign_interpretation,
+    include_row_details }) => safeWorkflowResult(async () => {
     const job = await accounting.getStatementImportJob({ pool, personId,
       statementImportJobId: statement_import_job_id });
     if (job.status !== "processing") throw Object.assign(
@@ -3479,6 +3556,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       start_date: absent, start_amount: absent, end_date: absent, end_amount: absent,
       line_items: parsed.data,
       transaction_list: true,
+      sign_interpretation,
     });
     if (!preview.importPlanId) throw Object.assign(new Error(
       "No transaction-list preview was saved. Restart the job before trying a fresh extraction."), {
