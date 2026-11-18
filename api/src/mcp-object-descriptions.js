@@ -214,7 +214,7 @@ export const evidenceFileObjectDescription = Object.freeze({
     reference: { field: "sourceRef", summary: "Stable accounting://evidence-files/{id} reference." },
     display: { field: "displayName", summary: "Safe original filename." },
     qualifiers: [
-      { field: "mediaType", summary: "Verified media type, including application/pdf statements and text/plain transaction lists." },
+      { field: "mediaType", summary: "Verified application/pdf or text/plain format; interpretation as a statement or transaction list is selected separately." },
       { field: "byteSize", summary: "Exact immutable byte count." },
       { field: "sha256", summary: "SHA-256 integrity identity of the complete bytes." },
       { field: "startDate", summary: "Optional first accounting-significant date, such as a receipt date or statement period start." },

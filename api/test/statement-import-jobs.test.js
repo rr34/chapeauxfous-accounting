@@ -204,6 +204,26 @@ test("plain copied transaction evidence creates a transaction-list handoff witho
   assert.equal(response.body.toString("utf8"), text);
 });
 
+test("PDF and text evidence can each use either one-account interpretation", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+
+  const pdfPool = statementPool();
+  const pdf = await createStatementImportFromPdf({ pool: pdfPool, evidenceRoot, personId: 7, accountId: 34,
+    fileName: "transactions.pdf", mediaType: "application/pdf",
+    bytes: Buffer.from("%PDF-1.4\ntransaction list\n%%EOF", "ascii") });
+  const pdfAsList = await startTransactionListImportJob({ pool: pdfPool, personId: 7,
+    statementImportJobId: pdf.id });
+  assert.equal(pdfAsList.job.evidenceFile.mediaType, "application/pdf");
+
+  const textPool = statementPool();
+  const text = await createTransactionListImportFromText({ pool: textPool, evidenceRoot,
+    personId: 8, accountId: 34, fileName: "statement.txt", text: "Statement ending balance $12.34" });
+  const textAsStatement = await startStatementImportJob({ pool: textPool, personId: 8,
+    statementImportJobId: text.id });
+  assert.equal(textAsStatement.job.evidenceFile.mediaType, "text/plain");
+});
+
 test("binding a statement preview stores each evidence significance field independently", async (t) => {
   const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
   t.after(() => rm(evidenceRoot, { recursive: true, force: true }));

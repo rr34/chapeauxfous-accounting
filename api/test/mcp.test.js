@@ -807,11 +807,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   }
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(manifest.server.instructions,
-    /statement uploaded to Accounting.*start_statement_import_job.*complete immutable original PDF/s);
+    /workflow independently of file format.*start_statement_import_job.*start_transaction_list_import_job.*PDF or saved text evidence/s);
   assert.match(transactionCapability.guidance,
     /Route every file listing movements for one named account through accounting\.reconciliation/);
   assert.match(referenceRateCapability.guidance,
-    /call start_statement_import_job directly; do not insert get_statement_import_job/);
+    /File format does not choose the workflow.*start_statement_import_job.*start_transaction_list_import_job/s);
   assert.match(transactionCapability.attachmentHints.join(" "),
     /transaction CSV.*start_single_account_statement_import.*do not create a generic transaction import job/);
   assert.match(transactionCapability.attachmentHints.join(" "), /accounting\.accounts\.active_paths.*resolve its full path and currency once/);
@@ -828,9 +828,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "start_single_account_statement_import").description,
     /CSV transaction list.*known balance.*instead of get_transaction_import_schema/s);
   assert.match(tools.tools.find((tool) => tool.name === "get_statement_import_job").description,
-    /Do not select this tool in the normal initial processing path.*returns no PDF download descriptor/s);
+    /Do not select this tool in the normal initial processing path.*returns no evidence download descriptor/s);
   assert.match(tools.tools.find((tool) => tool.name === "start_statement_import_job").description,
-    /return the exact original-PDF download descriptor.*exact replay.*safe/s);
+    /return the exact original-evidence download descriptor.*PDF or saved text.*exact replay.*safe/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
     /Present nextAction\.instruction.*do not replace it with internal line-item or include\/exclude counts.*do not enumerate every row/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact").description,
@@ -1398,7 +1398,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     arguments: { import_plan_id: "55555555-5555-4555-8555-555555555555" },
   });
   assert.equal(statementCommit.structuredContent.completionNote,
-    "Statement import succeeded. Added 1 new transaction. Recorded 1 new known balance. 1 imported transaction still needs a category. The original PDF remains linked as evidence.");
+    "Statement import succeeded. Added 1 new transaction. Recorded 1 new known balance. 1 imported transaction still needs a category. The original source remains linked as evidence.");
   assert.equal(statementCommit.structuredContent.import.completionNote,
     statementCommit.structuredContent.completionNote);
   assert.doesNotMatch(statementCommit.structuredContent.completionNote,

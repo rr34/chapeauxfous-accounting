@@ -133,13 +133,15 @@ function accountDisplayName(row) {
   return String(row.AccountName);
 }
 
-function copiedPrompt(id) {
+function copiedPrompt(id, mediaType) {
+  const source = mediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
+    ? "complete original PDF" : "complete saved text evidence";
   return [
     "Process my pending Accounting statement import:",
     "",
     `accounting://statement-import-jobs/${id}`,
     "",
-    "Use the Accounting MCP to resolve this exact work item, obtain the complete original PDF and current extraction requirements, and create a pending import preview. Do not commit the preview. Stop after reporting the summary and asking for my approval.",
+    `Use the Accounting MCP to resolve this exact work item, obtain the ${source} and current statement extraction requirements, and create a pending import preview. Do not commit the preview. Stop after reporting the summary and asking for my approval.`,
   ].join("\n");
 }
 
@@ -195,7 +197,7 @@ function statementJobValue(row) {
     updatedAt: String(row.updated_at),
     committedAt: row.committed_at == null ? null : String(row.committed_at),
     download: downloadDescriptor(evidence),
-    copiedPrompt: copiedPrompt(id),
+    copiedPrompt: copiedPrompt(id, evidence.mediaType),
     transactionListCopiedPrompt: transactionListCopiedPrompt(id),
   };
 }
@@ -397,16 +399,12 @@ export async function listEvidenceFileObjectsPage(pool, personId, {
   return { objects, nextCursor: rows.length > resolvedLimit ? String(objects.at(-1).id) : null };
 }
 
-export async function startStatementImportJob({ pool, personId, statementImportJobId,
-  expectedMediaType = STATEMENT_EVIDENCE_MEDIA_TYPE }) {
+export async function startStatementImportJob({ pool, personId, statementImportJobId }) {
   const existing = await getStatementImportJob({ pool, personId, statementImportJobId });
-  if (existing.evidenceFile.mediaType !== expectedMediaType) {
-    throw statementError(expectedMediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
-      ? "This work item does not contain a statement PDF."
-      : "This work item does not contain plain-text transaction-list evidence.",
-    expectedMediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
-      ? "STATEMENT_PDF_EVIDENCE_REQUIRED" : "TRANSACTION_LIST_EVIDENCE_REQUIRED",
-    { mediaType: existing.evidenceFile.mediaType }, 409);
+  if (![STATEMENT_EVIDENCE_MEDIA_TYPE, TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE]
+    .includes(existing.evidenceFile.mediaType)) {
+    throw statementError("This work item does not contain supported one-account evidence.",
+      "UNSUPPORTED_ONE_ACCOUNT_EVIDENCE", { mediaType: existing.evidenceFile.mediaType }, 409);
   }
   return withPoolTransaction(pool, async (connection) => {
     await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE",
@@ -443,7 +441,7 @@ export async function startStatementImportJob({ pool, personId, statementImportJ
 }
 
 export async function startTransactionListImportJob(options) {
-  return startStatementImportJob({ ...options, expectedMediaType: TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE });
+  return startStatementImportJob(options);
 }
 
 export async function bindStatementImportPreview({
