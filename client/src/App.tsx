@@ -254,27 +254,90 @@ function AccountCombobox({ value, choices, onChange, label, placeholder = "Type 
   value: string; choices: AccountChoice[]; onChange: (value: string) => void; label: string; placeholder?: string;
 }) {
   const listId = useId();
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const interactingWithList = useRef(false);
   const selected = choices.find((choice) => choice.value === value) ?? null;
   const [query, setQuery] = useState(selected?.label ?? "");
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
   useEffect(() => { if (!open) setQuery(selected?.label ?? ""); }, [selected?.label, open]);
   const normalized = query.trim().toLocaleLowerCase("en-US");
   const matches = normalized
     ? choices.filter((choice) => `${choice.label} ${choice.currencyCode}`.toLocaleLowerCase("en-US").includes(normalized)).slice(0, 40)
     : [];
 
-  return <div className="account-combobox">
-    <input role="combobox" aria-label={label} aria-expanded={open} aria-controls={listId}
+  useEffect(() => {
+    if (!open || activeIndex < 0) return;
+    document.getElementById(`${listId}-option-${activeIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, listId, open]);
+
+  useEffect(() => {
+    const closeFromOutsidePointer = (event: PointerEvent) => {
+      if (wrapperRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+      setActiveIndex(-1);
+    };
+    const finishListInteraction = () => {
+      if (!interactingWithList.current) return;
+      interactingWithList.current = false;
+      inputRef.current?.focus({ preventScroll: true });
+    };
+    window.addEventListener("pointerdown", closeFromOutsidePointer);
+    window.addEventListener("pointerup", finishListInteraction);
+    window.addEventListener("pointercancel", finishListInteraction);
+    return () => {
+      window.removeEventListener("pointerdown", closeFromOutsidePointer);
+      window.removeEventListener("pointerup", finishListInteraction);
+      window.removeEventListener("pointercancel", finishListInteraction);
+    };
+  }, []);
+
+  const choose = (choice: AccountChoice) => {
+    onChange(choice.value);
+    setQuery(choice.label);
+    setOpen(false);
+    setActiveIndex(-1);
+  };
+
+  return <div className="account-combobox" ref={wrapperRef} onBlur={(event) => {
+    if (!event.relatedTarget || event.currentTarget.contains(event.relatedTarget)) return;
+    setOpen(false);
+    setActiveIndex(-1);
+  }}>
+    <input ref={inputRef} role="combobox" aria-label={label} aria-expanded={open} aria-controls={listId}
+      aria-activedescendant={open && activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined}
       aria-autocomplete="list" autoComplete="off" value={query}
       placeholder={placeholder}
-      onFocus={() => { setOpen(true); setQuery(""); }}
-      onBlur={() => { setOpen(false); setQuery(selected?.label ?? ""); }}
-      onChange={(event) => { setQuery(event.target.value); setOpen(true); onChange(""); }} />
-    {open && <div className="account-combobox-list" id={listId} role="listbox">
+      onFocus={() => { if (!open) { setOpen(true); setQuery(""); setActiveIndex(-1); } }}
+      onChange={(event) => { setQuery(event.target.value); setOpen(true); setActiveIndex(-1); onChange(""); }}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowDown" && matches.length) {
+          event.preventDefault();
+          setOpen(true);
+          setActiveIndex((current) => current < matches.length - 1 ? current + 1 : 0);
+        } else if (event.key === "ArrowUp" && matches.length) {
+          event.preventDefault();
+          setOpen(true);
+          setActiveIndex((current) => current > 0 ? current - 1 : matches.length - 1);
+        } else if (event.key === "Enter" && open && activeIndex >= 0 && matches[activeIndex]) {
+          event.preventDefault();
+          choose(matches[activeIndex]);
+        } else if (event.key === "Escape" && open) {
+          event.preventDefault();
+          setOpen(false);
+          setActiveIndex(-1);
+          setQuery(selected?.label ?? "");
+        }
+      }} />
+    {open && <div className="account-combobox-list" id={listId} role="listbox"
+      onPointerDownCapture={() => { interactingWithList.current = true; }}>
       {!normalized && <span>Type part of an account name to filter.</span>}
-      {normalized && matches.map((choice) => <button type="button" role="option" key={choice.value}
-        aria-selected={choice.value === value} onMouseDown={(event) => event.preventDefault()}
-        onClick={() => { onChange(choice.value); setQuery(choice.label); setOpen(false); }}>
+      {normalized && matches.map((choice, index) => <button type="button" role="option" key={choice.value}
+        id={`${listId}-option-${index}`} aria-selected={index === activeIndex}
+        className={index === activeIndex ? "active" : undefined}
+        onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActiveIndex(index)}
+        onClick={() => choose(choice)}>
         <strong>{choice.label}</strong><small>{choice.currencyCode}</small>
       </button>)}
       {normalized && !matches.length && <span>No postable accounts match “{query}”.</span>}
