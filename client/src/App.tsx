@@ -594,6 +594,10 @@ type EditableImportRecord = Omit<CanonicalImportRecord, "value_decimal"> & {
   rateChanges: "amount" | "value";
   autoBalance: boolean;
 };
+type TransactionCardSave = {
+  transactionId: number;
+  lineItems: Array<{ id: number | null; accountId: number }>;
+};
 
 function amountForSide(amount: string, side: "debit" | "credit") {
   const trimmed = amount.trim();
@@ -807,7 +811,7 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
   initialDateEditorOpen?: boolean;
   knownBalanceAction?: React.ReactNode;
   layout?: "standard" | "register" | "register-edit"; token: string;
-  onSaved: () => Promise<void>; onCancel?: () => void;
+  onSaved: (saved: TransactionCardSave) => Promise<void>; onCancel?: () => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
@@ -1047,7 +1051,8 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
         if (rate) ratesByCurrency.set(account.currencyId, { fromCurrencyId: account.currencyId,
           toCurrencyId: resolvedValuationCurrencyId, ...rate });
       }
-      await api(initialTransaction ? `/transactions/${initialTransaction.id}` : "/transactions",
+      const saved = await api<{ transactionId: number }>(initialTransaction
+        ? `/transactions/${initialTransaction.id}` : "/transactions",
         { method: initialTransaction ? "PATCH" : "POST", body: JSON.stringify({ description, transactionDate: date,
         transactionAt: transactionAt.trim() || null,
         valuationCurrencyId: resolvedValuationCurrencyId, lineItems: payloadLines,
@@ -1057,7 +1062,8 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
           blankLine(initialAccountId == null ? "" : String(initialAccountId)),
         ]);
       }
-      setShowValuationDetails(false); await onSaved();
+      setShowValuationDetails(false); await onSaved({ transactionId: saved.transactionId,
+        lineItems: payloadLines.map((line) => ({ id: line.id, accountId: line.accountId })) });
     } catch (nextError) { setError(errorMessage(nextError)); }
     finally { setBusy(false); }
   }
@@ -1979,7 +1985,17 @@ type AccountRegisterRow =
 type RegisterSortKey = "date" | "description" | "thisAccount" | "runningBalance"
   | "knownBalance" | "splitAccounts" | "otherAmounts";
 type RegisterSort = { key: RegisterSortKey; direction: "asc" | "desc" };
-type RegisterAccountingQuestion = { lineItemId: number };
+type RegisterAccountingQuestion = {
+  lineItemId: number;
+  transactionId: number;
+  transactionDate: string;
+  transactionDescription: string | null;
+  accountId: number;
+  accountFullName: string;
+  currencyId: number;
+  amountUnits: string;
+  memo: string | null;
+};
 type SuspenseDescriptionReviewGroup = {
   kind: "description";
   id: string;
@@ -1993,7 +2009,19 @@ type SuspenseTransferReviewGroup = {
   dateGapDays: number;
   rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
 };
-type SuspenseReviewGroup = SuspenseDescriptionReviewGroup | SuspenseTransferReviewGroup;
+type SuspenseTransferFollowUp = {
+  remainingLineItemId: number;
+  departedTransactionId: number;
+  departedDescription: string;
+  destinationAccountLabel: string;
+};
+type SuspenseTransferFollowUpGroup = SuspenseTransferFollowUp & {
+  kind: "transfer-follow-up";
+  id: string;
+  rows: Array<Extract<AccountRegisterRow, { kind: "entry" }>>;
+};
+type SuspenseReviewGroup = SuspenseDescriptionReviewGroup | SuspenseTransferReviewGroup
+  | SuspenseTransferFollowUpGroup;
 type PurchaseEvidenceJob = {
   id: string;
   sourceRef: string;
@@ -2188,6 +2216,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [suspenseReviewBusy, setSuspenseReviewBusy] = useState("");
   const [suspenseReviewError, setSuspenseReviewError] = useState("");
   const [suspenseReviewNotice, setSuspenseReviewNotice] = useState("");
+  const [suspenseTransferFollowUp, setSuspenseTransferFollowUp] = useState<SuspenseTransferFollowUp | null>(null);
   const [purchaseEvidenceJobs, setPurchaseEvidenceJobs] = useState<PurchaseEvidenceJob[]>([]);
   const [purchaseEvidenceCopiedJobId, setPurchaseEvidenceCopiedJobId] = useState<string | null>(null);
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
@@ -2260,23 +2289,51 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     }), [entries]);
 
   const openSuspenseQuestionIds = useMemo(() =>
-    new Set(openSuspenseQuestions.map((question) => question.lineItemId)), [openSuspenseQuestions]);
+    new Set(openSuspenseQuestions.filter((question) => question.accountId === account.id)
+      .map((question) => question.lineItemId)), [account.id, openSuspenseQuestions]);
   const suspenseReviewGroups = useMemo<SuspenseReviewGroup[]>(() => {
     if (!suspenseReviewOpen) return [];
     const openRows = suspenseReviewRows.filter((row) => openSuspenseQuestionIds.has(row.entry.lineItemId));
     const rowByLineItemId = new Map(openRows.map((row) => [row.entry.lineItemId, row]));
-    const transferPairs = findUnambiguousSuspenseTransferPairs(openRows
+    const currentCandidates = openRows
+      .filter((row) => row.entry.lineItemId !== suspenseTransferFollowUp?.remainingLineItemId)
       .filter((row) => row.entry.purchaseEvidence == null).map((row) => ({
-      lineItemId: row.entry.lineItemId,
-      transactionId: row.entry.transactionId,
-      date: row.date,
-      amountUnits: row.totalAmountUnits,
-      counterpartAccountIds: [...new Set(row.entry.splits
-        .filter((split) => split.accountId !== account.id).map((split) => split.accountId))],
-      })));
-    const pairedLineItemIds = new Set(transferPairs.flatMap((pair) =>
+        lineItemId: row.entry.lineItemId,
+        transactionId: row.entry.transactionId,
+        date: row.date,
+        amountUnits: row.totalAmountUnits,
+        counterpartAccountIds: [...new Set(row.entry.splits
+          .filter((split) => split.accountId !== account.id).map((split) => split.accountId))],
+      }));
+    const externalQuestions = openSuspenseQuestions.filter((question) => question.accountId !== account.id
+      && question.currencyId === account.currencyId);
+    const externalQuestionByLineItemId = new Map(externalQuestions.map((question) =>
+      [question.lineItemId, question]));
+    const localTransferPairs = findUnambiguousSuspenseTransferPairs(currentCandidates);
+    const recoveryPairs = findUnambiguousSuspenseTransferPairs([
+      ...currentCandidates,
+      ...externalQuestions.map((question) => ({
+        lineItemId: question.lineItemId,
+        transactionId: question.transactionId,
+        date: question.transactionDate,
+        amountUnits: question.amountUnits,
+        // A moved question's current account is its destination, not its original statement counterpart.
+        counterpartAccountIds: [-question.lineItemId],
+      })),
+    ]);
+    const recoveredFollowUpPairs = recoveryPairs.flatMap((pair) => {
+      const localRow = rowByLineItemId.get(pair.firstLineItemId) ?? rowByLineItemId.get(pair.secondLineItemId);
+      const externalQuestion = externalQuestionByLineItemId.get(pair.firstLineItemId)
+        ?? externalQuestionByLineItemId.get(pair.secondLineItemId);
+      return localRow && externalQuestion ? [{ localRow, externalQuestion }] : [];
+    });
+    const pairedLineItemIds = new Set(localTransferPairs.flatMap((pair) =>
       [pair.firstLineItemId, pair.secondLineItemId]));
-    const transferGroups: SuspenseTransferReviewGroup[] = transferPairs.map((pair) => ({
+    for (const pair of recoveredFollowUpPairs) pairedLineItemIds.add(pair.localRow.entry.lineItemId);
+    const followUpRow = suspenseTransferFollowUp == null ? null
+      : rowByLineItemId.get(suspenseTransferFollowUp.remainingLineItemId) ?? null;
+    if (followUpRow) pairedLineItemIds.add(followUpRow.entry.lineItemId);
+    const transferGroups: SuspenseTransferReviewGroup[] = localTransferPairs.map((pair) => ({
       kind: "transfer",
       id: `transfer:${Math.min(pair.firstLineItemId, pair.secondLineItemId)}:${Math.max(pair.firstLineItemId, pair.secondLineItemId)}`,
       dateGapDays: pair.dateGapDays,
@@ -2304,9 +2361,27 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     })
       .map((group) => ({ ...group, rows: [...group.rows].sort((left, right) =>
         right.date.localeCompare(left.date) || left.order - right.order) }));
-    return [...transferGroups, ...descriptionGroups];
-  }, [account.id, fullAccountNames, openSuspenseQuestionIds, suspenseReviewRows,
-    registerSort.direction, suspenseReviewOpen]);
+    const savedFollowUpGroup: SuspenseTransferFollowUpGroup[] = followUpRow && suspenseTransferFollowUp ? [{
+      kind: "transfer-follow-up",
+      id: `transfer-follow-up:${followUpRow.entry.lineItemId}`,
+      ...suspenseTransferFollowUp,
+      rows: [followUpRow],
+    }] : [];
+    const recoveredFollowUpGroups: SuspenseTransferFollowUpGroup[] = recoveredFollowUpPairs
+      .filter(({ localRow }) => localRow.entry.lineItemId !== followUpRow?.entry.lineItemId)
+      .map(({ localRow, externalQuestion }) => ({
+        kind: "transfer-follow-up",
+        id: `transfer-follow-up:${localRow.entry.lineItemId}`,
+        remainingLineItemId: localRow.entry.lineItemId,
+        departedTransactionId: externalQuestion.transactionId,
+        departedDescription: externalQuestion.memo || externalQuestion.transactionDescription
+          || `Transaction #${externalQuestion.transactionId}`,
+        destinationAccountLabel: externalQuestion.accountFullName,
+        rows: [localRow],
+      }));
+    return [...savedFollowUpGroup, ...recoveredFollowUpGroups, ...transferGroups, ...descriptionGroups];
+  }, [account.currencyId, account.id, fullAccountNames, openSuspenseQuestionIds, openSuspenseQuestions,
+    suspenseReviewRows, registerSort.direction, suspenseReviewOpen, suspenseTransferFollowUp]);
   const displayedRegisterRows = suspenseReviewOpen
     ? suspenseReviewGroups.flatMap((group) => group.rows) : registerRows;
   const suspenseGroupStartByLineItemId = useMemo(() => new Map(suspenseReviewGroups
@@ -2333,7 +2408,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     let cursor: string | null = null;
     do {
       const result: { questions: RegisterAccountingQuestion[]; nextCursor: string | null } = await api(
-        `/accounting-questions?status=open&accountId=${account.id}&limit=500${cursor
+        `/accounting-questions?status=open&limit=500${cursor
           ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {}, token,
       );
       questions.push(...result.questions);
@@ -2639,6 +2714,49 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     setDateEditorOpen(false); setSelectionError("");
   }
 
+  async function finishTransactionCardSave(saved: TransactionCardSave,
+    group: SuspenseReviewGroup | undefined, currentEntry: AccountLedgerEntry) {
+    const savedRegisterLine = saved.lineItems.find((line) => line.id === currentEntry.lineItemId);
+    const movedOutOfSuspense = savedRegisterLine != null && savedRegisterLine.accountId !== account.id;
+    const remainingPairRow = group?.kind === "transfer" ? group.rows.find((candidate) =>
+      candidate.entry.transactionId !== saved.transactionId) : null;
+    const [questions] = suspenseReviewOpen
+      ? await Promise.all([loadOpenSuspenseQuestions(), onTransactionCreated()])
+      : [null, await onTransactionCreated()];
+    if (questions) setOpenSuspenseQuestions(questions);
+
+    if (movedOutOfSuspense && remainingPairRow) {
+      const destinationAccount = accountById.get(savedRegisterLine.accountId);
+      const destinationAccountLabel = destinationAccount
+        ? fullAccountNames.get(destinationAccount.id) ?? destinationAccount.name
+        : `account #${savedRegisterLine.accountId}`;
+      const followUp: SuspenseTransferFollowUp = {
+        remainingLineItemId: remainingPairRow.entry.lineItemId,
+        departedTransactionId: saved.transactionId,
+        departedDescription: currentEntry.memo || currentEntry.description || `Transaction #${saved.transactionId}`,
+        destinationAccountLabel,
+      };
+      const remainingQuestionIsOpen = questions?.some((question) =>
+        question.lineItemId === remainingPairRow.entry.lineItemId) ?? true;
+      if (remainingQuestionIsOpen) {
+        const result = await api<{ transaction: TransactionDetail }>(
+          `/transactions/${remainingPairRow.entry.transactionId}`, {}, token);
+        selectionRequest.current += 1;
+        setSuspenseTransferFollowUp(followUp);
+        setSelectedTransaction(result.transaction);
+        setSelectedLineItemId(remainingPairRow.entry.lineItemId);
+        setSelectingTransactionId(null); setDateEditorOpen(false); setSelectionError("");
+        setSuspenseReviewNotice(`Assigned transaction ${saved.transactionId} to ${destinationAccountLabel}. Its matching transaction is open next and remains in this suspense account.`);
+        return;
+      }
+    }
+
+    const finishedFollowUp = group?.kind === "transfer-follow-up";
+    if (finishedFollowUp) setSuspenseTransferFollowUp(null);
+    closeSelectedTransaction();
+    if (finishedFollowUp) setSuspenseReviewNotice("Finished reviewing both sides of the likely transfer pair.");
+  }
+
   function changeRegisterView(nextView: "basic" | "auto-split" | "journal") {
     if (view === nextView) return;
     if (selectedTransaction) {
@@ -2781,7 +2899,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           onClick={() => void toggleSuspenseReview()}>
           {suspenseReviewBusy === "load" ? "Loading questions…" : "Review groups"}</button></>
       : <><div className="suspense-group-review-heading"><div><strong>Likely transfers first, then split account → similar description prefix</strong>
-        <small>{openSuspenseQuestions.length} unresolved line{openSuspenseQuestions.length === 1 ? "" : "s"} in {suspenseReviewGroups.length} group{suspenseReviewGroups.length === 1 ? "" : "s"}. Unique exact opposite amounts within three days are shown as transfer pairs. Remaining rows ignore dates, reference IDs, and long number tokens for description grouping; every original description remains visible below.</small></div>
+        <small>{openSuspenseQuestionIds.size} unresolved line{openSuspenseQuestionIds.size === 1 ? "" : "s"} in {suspenseReviewGroups.length} group{suspenseReviewGroups.length === 1 ? "" : "s"}. Unique exact opposite amounts within three days are shown as transfer pairs. Remaining rows ignore dates, reference IDs, and long number tokens for description grouping; every original description remains visible below.</small></div>
         <button type="button" className="link-button" disabled={Boolean(suspenseReviewBusy)}
           onClick={() => void toggleSuspenseReview()}>Done</button></div>
         <div className="suspense-bulk-actions">
@@ -2994,12 +3112,17 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               {suspenseGroup.kind === "transfer" ? <>
                 <strong>Likely transfer pair</strong>
                 <span>Exact opposite amounts · {suspenseGroup.dateGapDays} day{suspenseGroup.dateGapDays === 1 ? "" : "s"} apart</span>
+              </> : suspenseGroup.kind === "transfer-follow-up" ? <>
+                <strong>Remaining side of likely transfer</strong>
+                <span>Transaction #{suspenseGroup.departedTransactionId} was assigned to {suspenseGroup.destinationAccountLabel}</span>
               </> : <>
                 <strong>{suspenseGroup.splitAccountLabel}</strong>
                 <span>Similar description: {suspenseGroup.descriptionFamily}</span>
               </>}</div>
               <small>{suspenseGroup.kind === "transfer"
                 ? "Choose which imported transaction supplies the surviving date and header. Both statement postings and their evidence remain connected to it."
+                : suspenseGroup.kind === "transfer-follow-up"
+                  ? `The matching transaction “${suspenseGroup.departedDescription}” no longer appears here because it no longer posts to this suspense account. Review this side next.`
                 : `${suspenseGroup.rows.length} unresolved line${suspenseGroup.rows.length === 1 ? "" : "s"}`}</small></div>
               {suspenseGroup.kind === "transfer" ? <div className="suspense-transfer-actions">
                 {suspenseGroup.rows.map((candidate) => <button type="button" className="secondary"
@@ -3008,7 +3131,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   {suspenseReviewBusy === `transfer:${candidate.entry.transactionId}` ? "Merging…"
                     : `Keep ${formatRegisterDate(candidate.date)} · ${(registerRowSplitAccounts(candidate, account.id, fullAccountNames) ?? "transaction").split("\u0000").join(" + ")}`}
                 </button>)}
-              </div> : <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+              </div> : suspenseGroup.kind === "transfer-follow-up"
+                ? <span className="suspense-follow-up-status">Next in pair</span>
+                : <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
                 onClick={() => toggleSuspenseGroup(suspenseGroup)}>
                 {suspenseGroupSelectedCount === suspenseGroup.rows.length
                   ? `Clear all ${suspenseGroup.rows.length}` : `Select all ${suspenseGroup.rows.length}`}</button>}
@@ -3048,9 +3173,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 initialTransaction={selectedTransaction}
                 initialDateEditorOpen={dateEditorOpen}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
-                onCancel={closeSelectedTransaction} onSaved={async () => {
-                  await onTransactionCreated(); closeSelectedTransaction();
-                }} />
+                onCancel={closeSelectedTransaction} onSaved={(saved) =>
+                  finishTransactionCardSave(saved, rowSuspenseGroup, entry)} />
               {!newRowsAtTop && rowBalanceForm}
             </Fragment>;
           }
