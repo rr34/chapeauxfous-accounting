@@ -798,14 +798,14 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
   </div>;
 }
 
-function TransactionComposer({ accounts, currencies, initialAccountId, initialTransaction = null,
-  initialLineItemId = null, initialDateEditorOpen = false, runningBalanceUnits = null,
-  knownBalanceAction = null, journalHeader = false,
+function TransactionCard({ accounts, currencies, initialAccountId, initialTransaction = null,
+  initialLineItemId = null, initialDateEditorOpen = false,
+  knownBalanceAction = null,
   layout = "standard", token, onSaved, onCancel }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
-  initialDateEditorOpen?: boolean; runningBalanceUnits?: string | null;
-  knownBalanceAction?: React.ReactNode; journalHeader?: boolean;
+  initialDateEditorOpen?: boolean;
+  knownBalanceAction?: React.ReactNode;
   layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: () => Promise<void>; onCancel?: () => void;
 }) {
@@ -827,7 +827,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       return layout === "register" ? [firstLine, { ...blankLine(), autoBalance: true }] : [firstLine];
     }
     const valuationScale = currencyMap.get(initialTransaction.valuationCurrencyId)?.scale ?? 2;
-    const transactionLines = initialLineItemId == null || journalHeader ? initialTransaction.lineItems
+    const transactionLines = initialLineItemId == null ? initialTransaction.lineItems
       : [...initialTransaction.lineItems].sort((left, right) =>
         Number(right.id === initialLineItemId) - Number(left.id === initialLineItemId));
     const editableLines = transactionLines.map((line) => {
@@ -887,7 +887,11 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
     if (otherTotal == null) return current;
     const value = negateDecimal(otherTotal);
     const target = current[balanceIndex];
-    const accountId = isRegisterEdit ? "" : target.accountId;
+    const suspenseBalanceAccount = accounts.find((account) => account.suspense && !account.placeholder
+      && !account.archivedAt && account.currencyId === nextValuationCurrencyId);
+    const accountId = isRegisterEdit
+      ? value === "0" ? "" : String(suspenseBalanceAccount?.id ?? "")
+      : target.accountId;
     const account = accountMap.get(Number(accountId));
     const rate = decimalParts(target.rateDecimal);
     let amount = account && account.currencyId !== nextValuationCurrencyId ? "" : value;
@@ -961,7 +965,6 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
   }
 
   function addBalancingLine() {
-    if (isRegisterEdit && lines.at(-1)?.autoBalance) return;
     setLines((current) => rebalanceLines([...current.map((line) => ({ ...line, autoBalance: false })),
       { ...blankLine(), autoBalance: true }]));
   }
@@ -1097,41 +1100,20 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
   }
 
   if (isRegisterEdit) {
-    const mainLine = lines[0];
-    const currentAccountTotal = initialAccount ? sumDecimals(lines
-      .filter((line) => !line.autoBalance && Number(line.accountId) === initialAccount.id)
-      .map((line) => line.amount), { ignoreBlank: true }) : null;
-    const totalParts = decimalParts(currentAccountTotal);
-    const otherAccountNames = [...new Map(lines.filter((line) => !line.autoBalance
-      && line.accountId && Number(line.accountId) !== initialAccountId)
-      .map((line) => [line.accountId, accountMap.get(Number(line.accountId))?.name ?? "Unassigned"])).values()];
-    const otherAccountLabel = otherAccountNames.length === 0 ? "—"
-      : otherAccountNames.length === 1 ? otherAccountNames[0] : "Split";
     return <>
-      <tr className={`register-entry-row register-edit-transaction-row ${journalHeader ? "register-journal-header" : ""}`}>
+      <tr className="register-entry-row register-edit-transaction-row register-transaction-card-header">
         <td><button type="button" className="register-date-edit" aria-label={`Edit date for transaction ${initialTransaction.id}`}
           aria-expanded={showDateEditor} onClick={() => setShowDateEditor((current) => !current)}>
           {formatRegisterDate(date)} <span aria-hidden="true">✎</span></button></td>
         <td className="register-description"><textarea aria-label="Transaction description" value={description}
           onChange={(event) => setDescription(event.target.value)} rows={2} />
-          {!journalHeader && <input className="register-main-memo" aria-label="Memo for selected account line"
-            value={mainLine.memo} onChange={(event) => updateLine(0, { memo: event.target.value })}
-            placeholder="Memo for this account line" />}
           <button type="button" className="register-values-toggle" aria-expanded={showValuationDetails}
             onClick={() => setShowValuationDetails((current) => !current)}>
             {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button></td>
-        <td className={`amount ${journalHeader && totalParts && initialAccount
-          ? movementEffectClass(totalParts.units.toString(), initialAccount.type) : ""}`}>
-          {journalHeader && initialAccount
-            ? signedAccountMovementDecimal(currentAccountTotal, initialAccount)
-            : registerMovementInput(mainLine, 0)}</td>
+        <td /><td />
+        <td><span className="register-transaction-label">Transaction header</span></td>
         <td />
-        <td>{journalHeader ? <span className="register-transaction-label">Transaction</span>
-          : <strong>{otherAccountLabel}</strong>}</td>
-        <td className="amount balance" title="Running balance before these edits; updates after save">
-          {runningBalanceUnits != null && initialAccount
-            ? unitsToDecimal(runningBalanceUnits, initialAccount.scale) : "—"}</td>
-        <td className="amount known-balance">{date === initialTransaction.date ? knownBalanceAction : null}</td>
+        <td>{date === initialTransaction.date ? knownBalanceAction : null}</td>
       </tr>
       {showDateEditor && <tr className="register-inline-date-row"><td colSpan={7}>
         <div className="register-inline-date-controls">
@@ -1143,25 +1125,24 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
           <button type="button" className="link-button" onClick={() => setShowDateEditor(false)}>Done</button>
         </div>
       </td></tr>}
-      {!journalHeader && registerEditValueRow(mainLine, 0)}
-      {(journalHeader ? lines : lines.slice(1)).map((line, offset) => {
-        const index = journalHeader ? offset : offset + 1;
-        const isSelectedAccountLine = journalHeader && line.id === initialLineItemId;
+      {activeLines.map((line, index) => {
+        const isSelectedAccountLine = line.id === initialLineItemId;
         const isThisAccount = Number(line.accountId) === initialAccountId;
         return <Fragment key={line.id ?? `new-${index}`}>
-          <tr className={`register-inline-line ${journalHeader ? "register-journal-line" : ""} ${line.autoBalance ? "auto-balanced" : ""}`}>
+          <tr className={`register-inline-line register-transaction-card-line ${isSelectedAccountLine ? "register-context-line" : ""} ${line.autoBalance ? "auto-balanced" : ""}`}>
             <td><span className="register-line-marker" aria-hidden="true">↳</span></td>
             <td><input aria-label={`Memo for line ${index + 1}`} value={line.memo}
               onChange={(event) => updateLine(index, { memo: event.target.value })}
               placeholder={line.autoBalance ? "New line or balancing line" : isSelectedAccountLine ? "Memo for this account line" : "Memo"} /></td>
             <td>{isThisAccount && registerMovementInput(line, index)}</td>
             <td>{!isThisAccount && registerMovementInput(line, index)}</td>
-            <td>{isSelectedAccountLine && initialAccount
-              ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
-              : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
+            <td><AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
               choices={accountChoices} placeholder={line.autoBalance ? "Unassigned — choose account" : undefined}
-              onChange={(accountId) => updateLine(index, { accountId })} />}
-              {line.autoBalance && line.value && <small>Balancing value {line.value} {valuationCurrency?.code ?? ""}; choose an account to see its signed amount and save.</small>}
+              onChange={(accountId) => updateLine(index, { accountId })} />
+              {isSelectedAccountLine && initialAccount && <small>Opened from {fullNames.get(initialAccount.id) ?? initialAccount.name}</small>}
+              {line.autoBalance && line.value && <small>Automatic balancing posting to {line.accountId
+                ? fullNames.get(Number(line.accountId)) ?? "the designated suspense account"
+                : "the designated suspense account"}.</small>}
               {!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
               aria-label={`Remove line ${index + 1}`}
               onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}</td>
@@ -1172,6 +1153,7 @@ function TransactionComposer({ accounts, currencies, initialAccountId, initialTr
       })}
       <tr className="register-inline-actions-row"><td /><td colSpan={6}>
         <div className="register-inline-actions">
+          <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add posting</button>
           <label className="register-inline-currency">Transaction value currency<select required value={valuationCurrencyId}
             onChange={(event) => {
               const nextId = event.target.value ? Number(event.target.value) : "";
@@ -2622,7 +2604,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     void activateTransaction(entry);
   }, [openTransaction, loading, entries]);
 
-  const newTransactionRows = showNewTransaction && <TransactionComposer key={`new-${account.id}`}
+  const newTransactionRows = showNewTransaction && <TransactionCard key={`new-${account.id}`}
     accounts={accounts} currencies={currencies} initialAccountId={account.id} layout="register" token={token}
     onCancel={() => setShowNewTransaction(false)} onSaved={async () => {
       await onTransactionCreated(); setShowNewTransaction(false);
@@ -3060,12 +3042,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             return <Fragment key={entry.lineItemId}>
               {suspenseGroupHeader}
               {newRowsAtTop && rowBalanceForm}
-              <TransactionComposer key={`${entry.transactionId}:${entry.lineItemId}`}
+              <TransactionCard key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
                 initialTransaction={selectedTransaction}
-                journalHeader={view === "journal" || row.currentAccountLineCount > 1}
-                initialDateEditorOpen={dateEditorOpen} runningBalanceUnits={row.projectedBalanceUnits}
+                initialDateEditorOpen={dateEditorOpen}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
                 onCancel={closeSelectedTransaction} onSaved={async () => {
                   await onTransactionCreated(); closeSelectedTransaction();
