@@ -6,7 +6,25 @@ process.env.MYSQL_USER = "test";
 process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
-const { listBalanceAssertions, listMatchingBalanceCheckpoints } = await import("../src/balance-assertions.js");
+const { deleteBalanceAssertion, listBalanceAssertions, listMatchingBalanceCheckpoints } = await import("../src/balance-assertions.js");
+
+test("deleting a balance assertion is owner-scoped", async () => {
+  const pool = {
+    async query(sql, params) {
+      assert.match(sql, /DELETE FROM account_balance_assertions/);
+      assert.deepEqual(params, [12, 7]);
+      return [{ affectedRows: 1 }];
+    },
+  };
+
+  assert.deepEqual(await deleteBalanceAssertion(pool, 7, 12), { deleted: true, assertionId: 12 });
+});
+
+test("deleting an unavailable balance assertion reports not found", async () => {
+  const pool = { async query() { return [{ affectedRows: 0 }]; } };
+  await assert.rejects(() => deleteBalanceAssertion(pool, 7, 99), (error) =>
+    error.status === 404 && error.code === "BALANCE_ASSERTION_NOT_FOUND");
+});
 
 test("a balance assertion reports the exact known-minus-ledger difference", async () => {
   const pool = {

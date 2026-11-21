@@ -166,6 +166,22 @@ export async function getBalanceAssertion(pool, personId, assertionId) {
   return (await attachAssertionEvidence(pool, personId, [mapAssertion(rows[0])]))[0];
 }
 
+export async function deleteBalanceAssertion(pool, personId, assertionId) {
+  const resolvedAssertionId = Number(assertionId);
+  if (!Number.isInteger(resolvedAssertionId) || resolvedAssertionId <= 0) {
+    throw applicationError("Balance assertion not found.", 404, "BALANCE_ASSERTION_NOT_FOUND");
+  }
+  const [result] = await pool.query(
+    `DELETE FROM account_balance_assertions
+      WHERE account_balance_assertion_id = ? AND owner_person_id = ?`,
+    [resolvedAssertionId, personId],
+  );
+  if (Number(result.affectedRows) !== 1) {
+    throw applicationError("Balance assertion not found.", 404, "BALANCE_ASSERTION_NOT_FOUND");
+  }
+  return { deleted: true, assertionId: resolvedAssertionId };
+}
+
 export async function saveBalanceAssertion({ personId, accountId, balanceDate, knownBalanceUnits }) {
   const resolvedAccountId = Number(accountId);
   if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {

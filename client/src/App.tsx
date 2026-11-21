@@ -2264,7 +2264,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [knownBalanceDate, setKnownBalanceDate] = useState(today());
   const [knownBalance, setKnownBalance] = useState("");
   const [knownBalanceError, setKnownBalanceError] = useState("");
-  const [knownBalanceBusy, setKnownBalanceBusy] = useState(false);
+  const [knownBalanceAssertionId, setKnownBalanceAssertionId] = useState<number | null>(null);
+  const [knownBalanceBusy, setKnownBalanceBusy] = useState<"" | "save" | "delete">("");
   const [reconcilingAssertionId, setReconcilingAssertionId] = useState<number | null>(null);
   const [reconciliationMessage, setReconciliationMessage] = useState("");
   const [reconciliationError, setReconciliationError] = useState("");
@@ -2831,6 +2832,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
 
   function editKnownBalance(assertion: BalanceAssertion) {
     setKnownBalanceAnchorDate(assertion.date);
+    setKnownBalanceAssertionId(assertion.id);
     setKnownBalanceDate(assertion.date);
     setKnownBalance(unitsToDecimal(assertion.knownBalanceUnits, assertion.scale));
     setKnownBalanceError(""); setKnownBalanceFormMode("edit-row");
@@ -2838,6 +2840,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
 
   function addKnownBalance(date: string) {
     setKnownBalanceAnchorDate(date);
+    setKnownBalanceAssertionId(null);
     setKnownBalanceDate(date);
     setKnownBalance("");
     setKnownBalanceError(""); setKnownBalanceFormMode("add-row");
@@ -2845,22 +2848,36 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
 
   function addKnownBalanceForAnotherDate() {
     setKnownBalanceAnchorDate(null);
+    setKnownBalanceAssertionId(null);
     setKnownBalanceDate(today());
     setKnownBalance("");
     setKnownBalanceError(""); setKnownBalanceFormMode("manual");
   }
 
   async function saveKnownBalance(event: FormEvent) {
-    event.preventDefault(); setKnownBalanceBusy(true); setKnownBalanceError("");
+    event.preventDefault(); setKnownBalanceBusy("save"); setKnownBalanceError("");
     try {
       await api("/balance-assertions", { method: "POST", body: JSON.stringify({
         accountId: account.id,
         balanceDate: knownBalanceDate,
         knownBalanceUnits: decimalToUnits(knownBalance, account.scale),
       }) }, token);
-      await onChanged(); setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null); setKnownBalance("");
+      await onChanged(); setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null);
+      setKnownBalanceAssertionId(null); setKnownBalance("");
     } catch (nextError) { setKnownBalanceError(errorMessage(nextError)); }
-    finally { setKnownBalanceBusy(false); }
+    finally { setKnownBalanceBusy(""); }
+  }
+
+  async function deleteKnownBalance() {
+    if (knownBalanceFormMode !== "edit-row" || knownBalanceAssertionId == null) return;
+    if (!window.confirm(`Delete the known balance for ${formatRegisterDate(knownBalanceDate)}?`)) return;
+    setKnownBalanceBusy("delete"); setKnownBalanceError("");
+    try {
+      await api(`/balance-assertions/${knownBalanceAssertionId}`, { method: "DELETE" }, token);
+      await onChanged(); setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null);
+      setKnownBalanceAssertionId(null); setKnownBalance("");
+    } catch (nextError) { setKnownBalanceError(errorMessage(nextError)); }
+    finally { setKnownBalanceBusy(""); }
   }
 
   async function reconcileThroughKnownBalance(assertion: BalanceAssertion) {
@@ -2897,11 +2914,14 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       onChange={(event) => setKnownBalanceDate(event.target.value)} /></label>
     <label>Known ending balance ({account.currencyCode})<input required placeholder="Known balance" value={knownBalance}
       onChange={(event) => setKnownBalance(event.target.value)} /></label>
-    <div className="known-balance-form-actions"><button className="secondary" disabled={knownBalanceBusy}>
-      {knownBalanceBusy ? "Saving…" : "Save balance"}</button>
+    <div className="known-balance-form-actions"><button className="secondary" disabled={knownBalanceBusy !== ""}>
+      {knownBalanceBusy === "save" ? "Saving…" : "Save balance"}</button>
+      {knownBalanceFormMode === "edit-row" && <button type="button" className="danger-button"
+        disabled={knownBalanceBusy !== ""} onClick={() => void deleteKnownBalance()}>
+        {knownBalanceBusy === "delete" ? "Deleting…" : "Delete known balance"}</button>}
       <button type="button" className="link-button" onClick={() => {
-        setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null);
-      }}>Cancel</button></div>
+        setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null); setKnownBalanceAssertionId(null);
+      }} disabled={knownBalanceBusy !== ""}>Cancel</button></div>
     {knownBalanceError && <p className="error">{knownBalanceError}</p>}
   </form>;
 

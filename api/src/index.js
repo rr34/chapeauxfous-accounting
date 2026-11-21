@@ -6,7 +6,7 @@ import { requireAuth } from "./auth.js";
 import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { getUser, loginUser, registerUser } from "./users.js";
-import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
+import { deleteBalanceAssertion, listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
   createAccount, createTransaction, getTransaction, listAccountLedger, listAccounts,
   listTransactions, recordAccountView, updateAccount, updateTransaction, verifyAllPostedTransactions,
@@ -277,6 +277,10 @@ app.post("/api/balance-assertions", requireAuth, async (req, res, next) => {
   try {
     res.status(201).json({ assertion: await saveBalanceAssertion({ personId: req.auth.personId, ...req.body }) });
   } catch (error) { next(error); }
+});
+
+app.delete("/api/balance-assertions/:assertionId", requireAuth, async (req, res, next) => {
+  try { res.json(await deleteBalanceAssertion(pool, req.auth.personId, req.params.assertionId)); } catch (error) { next(error); }
 });
 
 app.post("/api/accounts/:accountId/reconcile", requireAuth, async (req, res, next) => {
