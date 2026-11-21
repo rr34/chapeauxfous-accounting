@@ -9,7 +9,7 @@ import { getUser, loginUser, registerUser } from "./users.js";
 import { listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
   createAccount, createTransaction, getTransaction, listAccountLedger, listAccounts,
-  listTransactions, updateAccount, updateTransaction, verifyAllPostedTransactions,
+  listTransactions, recordAccountView, updateAccount, updateTransaction, verifyAllPostedTransactions,
 } from "./accounting.js";
 import { createCurrency, listCurrencies, updateCurrency } from "./currencies.js";
 import { commitAccountDeletion, previewAccountDeletion } from "./account-delete.js";
@@ -145,6 +145,10 @@ app.get("/api/accounts", requireAuth, async (req, res, next) => {
 
 app.get("/api/accounts/:accountId/ledger", requireAuth, async (req, res, next) => {
   try { res.json(await listAccountLedger(pool, req.auth.personId, req.params.accountId)); } catch (error) { next(error); }
+});
+
+app.post("/api/accounts/:accountId/view", requireAuth, async (req, res, next) => {
+  try { res.json(await recordAccountView(pool, req.auth.personId, req.params.accountId)); } catch (error) { next(error); }
 });
 
 app.get("/api/accounts/:accountId/import-reviews", requireAuth, async (req, res, next) => {

@@ -3667,6 +3667,23 @@ export default function App() {
     setRecentAccountState({ personId: user.personId, ids });
   }, [user?.personId]);
 
+  useEffect(() => {
+    if (!user || accounts.length === 0) return;
+    const availableIds = new Set(accounts.map((account) => account.id));
+    const persistedIds = accounts.filter((account) => account.lastViewedAt != null)
+      .sort((left, right) => String(right.lastViewedAt).localeCompare(String(left.lastViewedAt)) || right.id - left.id)
+      .map((account) => account.id);
+    setRecentAccountState((current) => {
+      const localIds = current.personId === user.personId ? current.ids : [];
+      const ids = [...persistedIds, ...localIds.filter((id) => !persistedIds.includes(id))]
+        .filter((id) => availableIds.has(id)).slice(0, 10);
+      if (current.personId === user.personId && ids.length === current.ids.length
+        && ids.every((id, index) => id === current.ids[index])) return current;
+      localStorage.setItem(recentAccountsKey(user.personId), JSON.stringify(ids));
+      return { personId: user.personId, ids };
+    });
+  }, [accounts, user?.personId]);
+
   function revealMainContent() {
     requestAnimationFrame(() => {
       const content = mainContentRef.current;
@@ -3677,7 +3694,7 @@ export default function App() {
   }
 
   function rememberAccount(account: Account) {
-    if (!user) return;
+    if (!user || !token) return;
     setSelectedAccountId(account.id);
     setRecentAccountState((current) => {
       const currentIds = current.personId === user.personId
@@ -3686,6 +3703,10 @@ export default function App() {
       localStorage.setItem(recentAccountsKey(user.personId), JSON.stringify(ids));
       return { personId: user.personId, ids };
     });
+    void api<{ accountId: number; lastViewedAt: string }>(`/accounts/${account.id}/view`, { method: "POST" }, token)
+      .then((result) => setAccounts((current) => current.map((candidate) => candidate.id === result.accountId
+        ? { ...candidate, lastViewedAt: result.lastViewedAt } : candidate)))
+      .catch(() => { /* Keep the local recent-account fallback when persistence is temporarily unavailable. */ });
   }
 
   function selectAccount(account: Account) {

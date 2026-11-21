@@ -7,6 +7,18 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0025: remember-account-views
+-- writer downtime: schedule maintenance; ADD COLUMN takes a metadata lock on accounts.
+-- deployment order: apply before deploying API and client code that reads or records account views.
+-- recovery: restore the verified pre-migration backup if rollback is required.
+
+ALTER TABLE `accounts`
+  ADD COLUMN `last_viewed_at` datetime(6) NULL DEFAULT NULL
+    COMMENT 'UTC instant when the owner most recently opened this account in the interactive application; null means no durable view has been recorded.'
+    AFTER `archived_at`;
+
+-- end migration 0025
+
 -- migration 0024: generalize-one-account-import-evidence-comments
 -- writer downtime: schedule maintenance; MODIFY COLUMN and table COMMENT operations take metadata locks.
 -- deployment order: apply before advertising format-independent statement and transaction-list interpretations.

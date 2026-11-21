@@ -45,6 +45,7 @@ export type Account = {
   balanceUnits: string;
   latestReconciledDate: string | null;
   archivedAt: string | null;
+  lastViewedAt: string | null;
 };
 
 export type EvidenceFile = {

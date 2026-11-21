@@ -223,7 +223,8 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     async listAccounts(_pool, personId) {
       seen.push(personId);
       return [{ id: 10, name: "Wallet", description: null, placeholder: false, suspense: false, parentAccountId: null,
-        type: "asset", currencyId: 1, currencyCode: "USD", scale: 2, balanceUnits: "123", archivedAt: null }];
+        type: "asset", currencyId: 1, currencyCode: "USD", scale: 2, balanceUnits: "123", archivedAt: null,
+        lastViewedAt: null }];
     },
     async searchTransactionsPage(_pool, personId, options) {
       searchedTransactionFilters = { personId, options };

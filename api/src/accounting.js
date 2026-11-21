@@ -52,6 +52,7 @@ function mapAccount(row) {
     scale: Number(row.scale), balanceUnits: normalBalanceUnits(row.AccountType, row.balance_units),
     latestReconciledDate: row.latest_reconciled_date == null ? null : String(row.latest_reconciled_date),
     archivedAt: row.archived_at,
+    lastViewedAt: row.last_viewed_at == null ? null : timestampFromDatabase(row.last_viewed_at),
   };
 }
 
@@ -63,7 +64,7 @@ export async function listAccounts(pool, personId) {
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
             MAX(CASE WHEN t.TransactionState = 'posted' AND li.reconciliation_state = 'reconciled'
                      THEN li.reconciled_at END) AS latest_reconciled_date,
-            a.archived_at
+            a.archived_at, a.last_viewed_at
        FROM accounts a
        JOIN currencies c ON c.currency_id = a.account_currency_id
        LEFT JOIN line_items li ON li.account_id = a.account_id
@@ -71,7 +72,7 @@ export async function listAccounts(pool, personId) {
       WHERE a.owner_person_id = ?
       GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
                a.parent_account_id, a.AccountType,
-               a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
+               a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at, a.last_viewed_at
       ORDER BY a.account_id`,
     [personId],
   );
@@ -89,7 +90,7 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
             COALESCE(SUM(CASE WHEN t.TransactionState = 'posted' THEN li.amount_units ELSE 0 END), 0) AS balance_units,
             MAX(CASE WHEN t.TransactionState = 'posted' AND li.reconciliation_state = 'reconciled'
                      THEN li.reconciled_at END) AS latest_reconciled_date,
-            a.archived_at
+            a.archived_at, a.last_viewed_at
        FROM accounts a
        JOIN currencies c ON c.currency_id = a.account_currency_id
        LEFT JOIN line_items li ON li.account_id = a.account_id
@@ -97,7 +98,7 @@ export async function listAccountsPage(pool, personId, { limit = 100, afterAccou
       WHERE a.owner_person_id = ? AND a.account_id > ?
       GROUP BY a.account_id, a.AccountName, a.description, a.is_placeholder, a.is_suspense,
                a.parent_account_id, a.AccountType,
-               a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at
+               a.account_currency_id, c.CurrencyAbbreviation, c.scale, a.archived_at, a.last_viewed_at
       ORDER BY a.account_id
       LIMIT ?`,
     [personId, cursor, resolvedLimit + 1],
@@ -119,6 +120,28 @@ export async function getAccount(pool, personId, accountId) {
     throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
   }
   return account;
+}
+
+export async function recordAccountView(pool, personId, accountId) {
+  const resolvedAccountId = Number(accountId);
+  if (!Number.isInteger(resolvedAccountId) || resolvedAccountId <= 0) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+  const [result] = await pool.query(
+    "UPDATE accounts SET last_viewed_at = UTC_TIMESTAMP(6) WHERE account_id = ? AND owner_person_id = ?",
+    [resolvedAccountId, personId],
+  );
+  if (Number(result.affectedRows) !== 1) {
+    throw applicationError("Account not found.", 404, "ACCOUNT_NOT_FOUND");
+  }
+  const [rows] = await pool.query(
+    "SELECT last_viewed_at FROM accounts WHERE account_id = ? AND owner_person_id = ?",
+    [resolvedAccountId, personId],
+  );
+  return {
+    accountId: resolvedAccountId,
+    lastViewedAt: timestampFromDatabase(rows[0].last_viewed_at),
+  };
 }
 
 export async function listAccountLedger(pool, personId, accountId) {

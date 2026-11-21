@@ -17,7 +17,10 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+  const accountViewMigration = migrations.find((migration) => migration.version === 25);
+  assert.match(accountViewMigration.sql, /ADD COLUMN `last_viewed_at` datetime\(6\) NULL DEFAULT NULL/);
+  assert.match(accountViewMigration.sql, /COMMENT 'UTC instant when the owner most recently opened this account/);
   const generalEvidenceMigration = migrations.find((migration) => migration.version === 24);
   assert.match(generalEvidenceMigration.sql, /selected workflow, not this format/);
   const storageCommentMigration = migrations.find((migration) => migration.version === 23);

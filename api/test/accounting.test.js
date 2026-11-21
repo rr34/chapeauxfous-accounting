@@ -7,7 +7,7 @@ process.env.MYSQL_PASSWORD = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 
 const { createAccount, createTransaction, deleteAccount, getTransaction, listAccountLedger, listAccounts,
-  listTransactionsPage, updateAccount, updateTransaction,
+  listTransactionsPage, recordAccountView, updateAccount, updateTransaction,
   validateTransaction } = await import("../src/accounting.js");
 
 test("ledger reads expose an optional UTC source instant while ordering by accounting date", async () => {
@@ -56,6 +56,7 @@ test("account balances follow each account type's normal side", async () => {
         parent_account_id: null, AccountType: type, account_currency_id: 1,
         CurrencyAbbreviation: "USD", scale: 2, balance_units: rawBalance,
         latest_reconciled_date: index === 0 ? "2026-10-31" : null, archived_at: null,
+        last_viewed_at: index === 0 ? "2026-11-21 15:04:05.123456" : null,
       }))];
     },
   };
@@ -64,6 +65,33 @@ test("account balances follow each account type's normal side", async () => {
   assert.deepEqual(accounts.map((account) => account.balanceUnits), accountTypes.map(([, , expected]) => expected));
   assert.equal(accounts[0].latestReconciledDate, "2026-10-31");
   assert.equal(accounts[1].latestReconciledDate, null);
+  assert.equal(accounts[0].lastViewedAt, "2026-11-21T15:04:05.123Z");
+  assert.equal(accounts[1].lastViewedAt, null);
+});
+
+test("recording an account view updates only an account owned by the authenticated person", async () => {
+  const statements = [];
+  const pool = { async query(sql, params) {
+    statements.push({ sql, params });
+    if (sql.startsWith("UPDATE accounts")) return [{ affectedRows: 1 }];
+    if (sql.startsWith("SELECT last_viewed_at")) return [[{ last_viewed_at: "2026-11-21 16:17:18.654321" }]];
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+
+  const result = await recordAccountView(pool, 7, 12);
+
+  assert.deepEqual(result, { accountId: 12, lastViewedAt: "2026-11-21T16:17:18.654Z" });
+  assert.deepEqual(statements.map((statement) => statement.params), [[12, 7], [12, 7]]);
+  assert.match(statements[0].sql, /account_id = \? AND owner_person_id = \?/);
+});
+
+test("recording a view does not reveal an account owned by another person", async () => {
+  const pool = { async query(sql, params) {
+    assert.match(sql, /^UPDATE accounts/);
+    assert.deepEqual(params, [12, 7]);
+    return [{ affectedRows: 0 }];
+  } };
+  await assert.rejects(() => recordAccountView(pool, 7, 12), { status: 404, code: "ACCOUNT_NOT_FOUND" });
 });
 
 test("an account ledger groups split accounts and calculates its running balance", async () => {

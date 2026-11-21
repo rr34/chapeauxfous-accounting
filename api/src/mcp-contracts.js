@@ -106,6 +106,8 @@ export const accountSchema = z.object({
   scale: z.number().int().min(0).max(18).describe("Decimal places in the account's native-unit display."),
   balanceUnits: z.string().regex(/^-?\d+$/).describe("Normal account balance in native units: debit minus credit for assets and expenses; credit minus debit for liabilities, income, and equity."),
   archivedAt: z.string().nullable().describe("Archive timestamp, or null while the account is active."),
+  lastViewedAt: z.string().datetime().nullable()
+    .describe("UTC instant when the owner most recently opened this account in the interactive application, or null if no durable view is recorded."),
 });
 
 export const transactionListItemSchema = z.object({
