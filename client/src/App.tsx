@@ -2043,7 +2043,8 @@ type AccountRegisterRow =
       reconciledThrough: string | null; projectedBalanceUnits: string }
   | { kind: "import"; date: string; order: number; importPlanId: string;
       row: TransactionImportReview["rows"][number]; amountUnits: string; projectedBalanceUnits: string }
-  | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion };
+  | { kind: "assertion"; date: string; order: number; assertion: BalanceAssertion;
+      projectedBalanceUnits: string };
 
 type RegisterSortKey = "date" | "description" | "thisAccount" | "runningBalance"
   | "knownBalance" | "splitAccounts" | "otherAmounts";
@@ -2161,7 +2162,7 @@ function registerRowSortValue(row: AccountRegisterRow, key: RegisterSortKey,
     return units * (debitIncreasesAccount(account.type) ? 1n : -1n);
   }
   if (key === "knownBalance") return row.kind === "assertion" ? BigInt(row.assertion.knownBalanceUnits) : null;
-  return BigInt(row.kind === "assertion" ? row.assertion.calculatedBalanceUnits : row.projectedBalanceUnits);
+  return row.kind === "assertion" ? null : BigInt(row.projectedBalanceUnits);
 }
 
 function compareRegisterSortValues(left: string | bigint | number | null,
@@ -2334,7 +2335,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       || left.order - right.order);
     let projectedBalance = 0n;
     const withBalances = chronological.map((row) => {
-      if (row.kind === "assertion") return row;
+      if (row.kind === "assertion") return { ...row, projectedBalanceUnits: projectedBalance.toString() };
       const amount = row.kind === "entry" ? BigInt(row.totalAmountUnits)
         : row.row.decision === "include" ? BigInt(row.amountUnits) : 0n;
       projectedBalance += amount * (debitIncreasesAccount(account.type) ? 1n : -1n);
@@ -3094,11 +3095,17 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
         <tbody>{!suspenseReviewOpen && newRowsAtTop && newTransactionRows}{displayedRegisterRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
-            return <Fragment key={`assertion-${assertion.id}`}><tr className={`register-assertion-row ${assertion.matches ? "matches" : "mismatch"}`}>
+            const projectedDifferenceUnits = (BigInt(assertion.knownBalanceUnits)
+              - BigInt(row.projectedBalanceUnits)).toString();
+            const projectedMatches = projectedDifferenceUnits === "0";
+            const comparisonIncludesPendingImports = row.projectedBalanceUnits !== assertion.calculatedBalanceUnits;
+            const canReconcile = assertion.matches && projectedMatches;
+            return <Fragment key={`assertion-${assertion.id}`}><tr className={`register-assertion-row ${projectedMatches ? "matches" : "mismatch"}`}>
               <td>{formatRegisterDate(assertion.date)}</td>
-              <td><strong>Known balance</strong><small>{assertion.matches
-                ? "Matches the ledger"
-                : `Difference ${unitsToDecimal(assertion.differenceUnits, assertion.scale)} ${assertion.currencyCode}`}</small>
+              <td><strong>Known balance</strong><small>{projectedMatches
+                ? comparisonIncludesPendingImports ? "Matches the projected register" : "Matches the ledger"
+                : `Difference ${unitsToDecimal(projectedDifferenceUnits, assertion.scale)} ${assertion.currencyCode}${comparisonIncludesPendingImports ? " from the projected register" : ""}`}</small>
+                {comparisonIncludesPendingImports && <small>Pending included imports are part of this comparison.</small>}
                 {assertion.evidenceFiles?.map((evidence) => <button type="button" className="register-evidence-link"
                   key={evidence.id} onClick={() => void downloadEvidenceFile(
                     evidence.downloadPath ?? `/api/evidence-files/${evidence.id}/content`, evidence.fileName, token,
@@ -3106,16 +3113,16 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   PDF evidence · {evidence.fileName}</button>)}</td>
               <td></td>
               <td></td><td>—</td>
-              <td className="amount balance">{unitsToDecimal(assertion.calculatedBalanceUnits, assertion.scale)}</td>
+              <td></td>
               <td className="amount known-balance"><div className="known-balance-controls">
-                <button type="button" className={assertion.matches ? "known-balance-reconcile" : "known-balance-edit"}
-                  aria-label={assertion.matches ? `Reconcile ${account.name} through ${assertion.date}` : `Edit known balance for ${assertion.date}`}
+                <button type="button" className={canReconcile ? "known-balance-reconcile" : "known-balance-edit"}
+                  aria-label={canReconcile ? `Reconcile ${account.name} through ${assertion.date}` : `Edit known balance for ${assertion.date}`}
                   disabled={reconcilingAssertionId != null}
-                  onClick={() => void reconcileThroughKnownBalance(assertion)}>
+                  onClick={() => canReconcile ? void reconcileThroughKnownBalance(assertion) : editKnownBalance(assertion)}>
                   {unitsToDecimal(assertion.knownBalanceUnits, assertion.scale)}
-                  {assertion.matches && <small>{reconcilingAssertionId === assertion.id ? "Reconciling…" : "Reconcile"}</small>}
+                  {canReconcile && <small>{reconcilingAssertionId === assertion.id ? "Reconciling…" : "Reconcile"}</small>}
                 </button>
-                {assertion.matches && <button type="button" className="known-balance-edit-icon"
+                {canReconcile && <button type="button" className="known-balance-edit-icon"
                   aria-label={`Edit known balance for ${assertion.date}`} title="Edit known balance"
                   disabled={reconcilingAssertionId != null} onClick={() => editKnownBalance(assertion)}>✎</button>}
               </div></td>
