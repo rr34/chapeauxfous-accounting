@@ -649,6 +649,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(tools.tools.some((tool) => tool.name === "list_evidence_file_objects"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "get_statement_import_job"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "start_statement_import_job"), true);
+  const transactionListStartContract = tools.tools.find((tool) =>
+    tool.name === "start_transaction_list_import_job");
+  for (const mediaType of ["image/png", "image/jpeg", "image/webp"]) {
+    assert.match(JSON.stringify(transactionListStartContract.outputSchema), new RegExp(mediaType));
+  }
   assert.equal(tools.tools.some((tool) => tool.name === "submit_statement_import_job_artifact"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "list_purchase_evidence_job_objects"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "start_purchase_evidence_job"), true);
@@ -1610,7 +1615,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.17.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.18.0");
 
   await handler.close();
 });

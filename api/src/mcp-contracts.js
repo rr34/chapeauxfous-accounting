@@ -8,7 +8,7 @@ import {
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
-export const MCP_SERVER_VERSION = "0.17.0";
+export const MCP_SERVER_VERSION = "0.18.0";
 
 export const entityReferenceSchema = z.object({
   type: z.string().min(1),
