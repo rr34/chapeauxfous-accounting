@@ -868,13 +868,14 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
 function TransactionCard({ accounts, currencies, initialAccountId, initialTransaction = null,
   initialLineItemId = null, initialDateEditorOpen = false,
   knownBalanceAction = null,
-  layout = "standard", token, onSaved, onCancel }: {
+  layout = "standard", token, onSaved, onCancel, onDelete }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
   initialDateEditorOpen?: boolean;
   knownBalanceAction?: React.ReactNode;
   layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: (saved: TransactionCardSave) => Promise<void>; onCancel?: () => void;
+  onDelete?: () => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
@@ -1223,6 +1224,8 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
       <tr className="register-inline-actions-row"><td /><td colSpan={6}>
         <div className="register-inline-actions">
           <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add posting</button>
+          {onDelete && <button type="button" className="danger-button" disabled={busy} onClick={onDelete}>
+            Delete transaction</button>}
           <label className="register-inline-currency">Transaction value currency<select required value={valuationCurrencyId}
             onChange={(event) => {
               const nextId = event.target.value ? Number(event.target.value) : "";
@@ -2255,6 +2258,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [registerSort, setRegisterSort] = useState<RegisterSort>({ key: "date", direction: "desc" });
   const [showNewTransaction, setShowNewTransaction] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionDetail | null>(null);
+  const [deletingTransactionId, setDeletingTransactionId] = useState<number | null>(null);
   const [selectedLineItemId, setSelectedLineItemId] = useState<number | null>(null);
   const [dateEditorOpen, setDateEditorOpen] = useState(false);
   const [selectingTransactionId, setSelectingTransactionId] = useState<number | null>(null);
@@ -2927,11 +2931,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   </form>;
 
   return <><section className="account-register card">
-    <div className="section-heading"><div><p className="eyebrow">Account register</p>
+    <div className="section-heading"><div>
       <div className="register-account-name"><h2>{account.name}</h2>
         <button type="button" className="register-account-edit-button" aria-label={`Edit account ${account.name}`}
-          title="Edit account" onClick={() => setShowAccountEditor(true)}>✎</button></div>
-      <p className="register-subtitle">Posted transactions · {account.currencyCode}</p></div>
+          title="Edit account" onClick={() => setShowAccountEditor(true)}>✎</button>
+        <span className="register-account-currency" aria-label={`Account currency ${account.currencyCode}`}>
+          · {account.currencyCode}</span></div></div>
       <div className="register-heading-actions">
         <div className="register-current-balance">
           <span>Current balance</span>
@@ -3059,19 +3064,20 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       {suspenseReviewNotice && <p className="suspense-review-notice" role="status">{suspenseReviewNotice}</p>}
       {suspenseReviewError && <p className="error" role="alert">{suspenseReviewError}</p>}
     </section>}
-    {!account.placeholder && !account.archivedAt && <div className="register-known-balance-actions">
-      <button type="button" className="link-button" onClick={addKnownBalanceForAnotherDate}>
-        Add known balance for another date</button>
-    </div>}
-    {knownBalanceFormMode === "manual" && knownBalanceForm}
-    <div className="register-view-controls" role="group" aria-label="Register view">
-      <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
-        onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
-      <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
-        onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
-      <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
-        onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
+    <div className="register-control-row">
+      <div className="register-view-controls" role="group" aria-label="Register view">
+        <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
+          onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
+        <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
+          onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
+        <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
+          onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
+      </div>
+      {!account.placeholder && !account.archivedAt && <button type="button"
+        className="link-button register-known-balance-action" onClick={addKnownBalanceForAnotherDate}>
+        Add known balance for another date</button>}
     </div>
+    {knownBalanceFormMode === "manual" && knownBalanceForm}
     {error && <p className="error">{error}</p>}
     {importReviewError && <p className="error" aria-live="assertive">{importReviewError}</p>}
     {selectionError && <p className="error">{selectionError}</p>}
@@ -3264,6 +3270,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 initialTransaction={selectedTransaction}
                 initialDateEditorOpen={dateEditorOpen}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
+                onDelete={() => setDeletingTransactionId(entry.transactionId)}
                 onCancel={closeSelectedTransaction} onSaved={(saved) =>
                   finishTransactionCardSave(saved, rowSuspenseGroup, entry)} />
               {!newRowsAtTop && rowBalanceForm}
@@ -3353,6 +3360,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   </section>
     {showAccountEditor && <AccountEditDialog key={account.id} account={account} accounts={accounts} currencies={currencies}
       token={token} onClose={() => setShowAccountEditor(false)} onChanged={onChanged} />}
+    {deletingTransactionId != null && <TransactionDeletionDialog scope="selected"
+      transactionIds={[deletingTransactionId]} deleteAccounts={false} deleteImportHistory={false}
+      token={token} onClose={() => setDeletingTransactionId(null)} onDeleted={async () => {
+        closeSelectedTransaction(); await onChanged();
+      }} />}
   </>;
 }
 

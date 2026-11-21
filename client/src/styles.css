@@ -61,10 +61,12 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .register-inline-value-controls label > small { display: block; margin-top: .2rem; color: #748078; font-size: .67rem; }
 .register-inline-date-row td { background: #eef2ec; }.register-inline-date-controls { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(260px, 1.4fr) auto; gap: .7rem; align-items: end; }.register-inline-date-controls label { margin: 0; }.register-inline-date-controls input { margin-top: .2rem; padding: .45rem .5rem; }.register-inline-date-controls .link-button { padding: .5rem; }
 .register-account-name { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem; }
+.register-account-currency { color: #748078; font-size: .78rem; font-weight: 700; white-space: nowrap; }
 .account-register .register-account-edit-button { display: grid; place-items: center; width: 1.8rem; height: 1.8rem; border: 0; background: transparent; color: #748078; padding: 0; font-size: 1rem; line-height: 1; }
 .account-register .register-account-edit-button:hover, .account-register .register-account-edit-button:focus-visible { background: #e4ebe2; color: #315d3b; }
-.register-known-balance-actions { display: flex; justify-content: flex-end; margin: .45rem 0 -.45rem; }
-.register-known-balance-actions .link-button { padding: .2rem 0; font-size: .73rem; }
+.register-control-row { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: .65rem; margin-top: .65rem; border-bottom: 1px solid #dce2da; padding-bottom: .55rem; }
+.register-control-row .register-view-controls { flex: 1 1 auto; margin-top: 0; border-bottom: 0; padding-bottom: 0; }
+.register-known-balance-action { flex: 0 0 auto; padding: .25rem 0; font-size: .73rem; white-space: nowrap; }
 .known-balance-form-actions { display: flex; align-items: center; gap: .5rem; }
 .known-balance-form-actions .link-button { padding: .5rem; }
 .account-register .register-table .known-balance-add { min-width: 1.8rem; min-height: 1.8rem; margin: 0; }
