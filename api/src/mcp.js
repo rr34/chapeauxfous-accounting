@@ -1248,10 +1248,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     rules: z.array(z.string().min(1)),
   };
   const singleAccountStatementGuideOutput = successOutputSchema(singleAccountStatementGuideShape);
+  const evidenceMediaTypeSchema = z.enum([
+    "application/pdf", "text/plain", "image/png", "image/jpeg", "image/webp",
+  ]);
   const evidenceFileObjectSchema = z.object({
     objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
     sourceRef: z.string().min(1), displayName: z.string().min(1), fileName: z.string().min(1),
-    mediaType: z.enum(["application/pdf", "text/plain"]), byteSize: z.number().int().positive(),
+    mediaType: evidenceMediaTypeSchema, byteSize: z.number().int().positive(),
     sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
     startAmountUnits: z.string().regex(/^-?\d+$/).nullable(),
@@ -1263,7 +1266,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   const statementDownloadSchema = z.object({
     contractVersion: z.literal(1), transportId: z.literal("statement_evidence_download"),
     evidenceFileId: z.number().int().positive(), sourceRef: z.string().min(1),
-    fileName: z.string().min(1), mediaType: z.enum(["application/pdf", "text/plain"]),
+    fileName: z.string().min(1), mediaType: evidenceMediaTypeSchema,
     byteSize: z.number().int().positive(), sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     method: z.literal("GET"), endpointPath: z.string().startsWith("/mcp/evidence-files/"),
     acceptsByteRanges: z.literal(true),
@@ -2962,7 +2965,10 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .map((item) => [item.accountId, item.fullName]));
     const designated = accounts.find((candidate) => candidate.suspense && candidate.currencyId === account.currencyId
       && !candidate.placeholder && candidate.archivedAt == null);
-    const sourceLabel = mediaType === "application/pdf" ? "complete original PDF" : "complete saved text evidence";
+    const isText = mediaType === "text/plain";
+    const isPdf = mediaType === "application/pdf";
+    const sourceLabel = isText ? "complete saved text evidence"
+      : isPdf ? "complete original PDF" : "complete original image";
     return {
       workflow: "single_account_statement",
       workflowState: "instructions_only",
@@ -3002,12 +3008,16 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       nextTool: "submit_statement_import_job_artifact",
       inlineNextTool: "import_single_account_statement",
       rules: [
-        mediaType === "application/pdf"
+        isPdf
           ? "Process the complete original PDF supplied by Accounting. Do not substitute server-extracted text, filter small print, or preselect pages."
-          : "Process the complete saved text evidence supplied by Accounting, including statement facts that may appear outside the transaction rows.",
-        mediaType === "application/pdf"
+          : isText
+            ? "Process the complete saved text evidence supplied by Accounting, including statement facts that may appear outside the transaction rows."
+            : "Process the complete original image supplied by Accounting. Inspect all visible regions at high detail and do not omit small print.",
+        isPdf
           ? "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document."
-          : "Read every saved-text chunk through the textAccess tool until complete; do not require a PDF or search native Files merely because this is a statement workflow.",
+          : isText
+            ? "Read every saved-text chunk through the textAccess tool until complete; do not require a PDF or search native Files merely because this is a statement workflow."
+            : "Give the vision-capable model the original image as a high-detail image input. Do not rely on filename or metadata as a substitute for inspecting the pixels.",
         "Use only evidence visible in this one statement.",
         "Interpret source signs in the context of the bound account type and the returned signConvention. Do not treat every purchase as negative generic spending.",
         "Do not guess the other side of any line item; Accounting places it in the designated same-currency suspense account.",
@@ -3108,7 +3118,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("start_statement_import_job", {
     title: "Start statement import job",
-    description: "Atomically start one ready statement job in the owner's serial workflow and return the exact original-evidence download descriptor plus the current extraction requirements. Evidence may be a PDF or saved text. Retrieve and process the complete source directly; for PDFs do not substitute server-side extracted text. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
+    description: "Atomically start one ready statement job in the owner's serial workflow and return the exact original-evidence access contract plus the current extraction requirements. Evidence may be a PDF, image, or saved text. Retrieve and process the complete source directly; do not substitute filename or server metadata for document inspection. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
     inputSchema: { statement_import_job_id: z.string().trim().uuid() },
     outputSchema: statementImportJobStartOutput,
     annotations: idempotentWrite,
@@ -3119,13 +3129,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, async ({ statement_import_job_id }) => safeToolResult(async () => {
     const { job, transitioned } = await accounting.startStatementImportJob({ pool, personId,
       statementImportJobId: statement_import_job_id });
-    const isPdf = job.evidenceFile.mediaType === "application/pdf";
-    return { job: statementJobMetadata(job), download: isPdf ? job.download : null,
-      textAccess: isPdf ? null : {
+    const isText = job.evidenceFile.mediaType === "text/plain";
+    return { job: statementJobMetadata(job), download: isText ? null : job.download,
+      textAccess: isText ? {
         nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
         evidenceFileId: job.evidenceFile.id, fileName: job.evidenceFile.fileName,
         sha256: job.evidenceFile.sha256,
-      },
+      } : null,
       extraction: await statementJobExtractionGuide(job.account.id, job.evidenceFile.mediaType),
       effectReceipt: effectReceipt("start_statement_import_job", { statement_import_job_id },
         transitioned ? "updated" : "unchanged", [
@@ -3136,7 +3146,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("start_transaction_list_import_job", {
     title: "Start transaction-list import job",
-    description: "Start or idempotently continue one saved transaction-list job from PDF or text evidence. Return the complete immutable evidence and canonical one-account movement schema. Extract only supported dated movements for the already-bound account. Evidence may be noisy: discard irrelevant headings, categories, formatting, navigation, summaries, and unrelated text; retain useful merchant or transaction text when available. This does not create a preview or post ledger data.",
+    description: "Start or idempotently continue one saved transaction-list job from PDF, image, or text evidence. Return the complete immutable evidence and canonical one-account movement schema. Extract only supported dated movements for the already-bound account. Evidence may be noisy: discard irrelevant headings, categories, formatting, navigation, summaries, and unrelated text; retain useful merchant or transaction text when available. This does not create a preview or post ledger data.",
     inputSchema: { statement_import_job_id: z.string().trim().uuid() },
     outputSchema: transactionListImportJobStartOutput,
     annotations: idempotentWrite,
@@ -3150,7 +3160,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       statementImportJobId: statement_import_job_id });
     return {
       job: statementJobMetadata(job),
-      download: job.evidenceFile.mediaType === "application/pdf"
+      download: job.evidenceFile.mediaType !== "text/plain"
         ? { ...job.download, transportId: "transaction_list_evidence_download" } : null,
       textAccess: job.evidenceFile.mediaType === "text/plain" ? {
         nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
@@ -3166,7 +3176,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         rules: [
           job.evidenceFile.mediaType === "text/plain"
             ? "Call read_one_account_import_evidence_text from offset 0 through every returned nextOffset until complete is true. Do not search native Files for this Accounting-owned evidence."
-            : "Process the complete authenticated PDF supplied in download; do not omit pages.",
+            : job.evidenceFile.mediaType === "application/pdf"
+              ? "Process the complete authenticated PDF supplied in download; do not omit pages."
+              : "Process the complete authenticated image supplied in download as a high-detail vision input; inspect every visible region.",
           "Extract every supported dated movement for the already-bound account. Map source meaning to the returned signConvention; positive increases the account's displayed normal balance and negative decreases it.",
           "Determine the source sign convention before materializing rows. Unsigned merchant purchases in a liability account normally increase the amount owed and are therefore positive; payments, refunds, and credits normally decrease it and are negative.",
           "Do not negate a merchant purchase merely because it represents spending. The canonical sign describes movement of the selected account, not generic cash flow.",
@@ -3419,7 +3431,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("submit_statement_import_job_artifact", {
     title: "Submit statement job extraction",
-    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF or text evidence of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. Opening values remain evidence and reconciliation inputs only; only the closing date and closing balance may create a ledger known-balance assertion. A successful ready result saves a pending, unposted preview in the account register and returns nextAction.instruction as the provider-written statement summary and exact confirmation question. Present that wording instead of internal line-item or include/exclude counts. The original source remains the evidence file; JSON Lines is disposable operational data.",
+    description: "Consume one complete canonical JSON Lines artifact derived from the exact original PDF, image, or text evidence of an already-started statement job. The server binds the artifact, account, evidence SHA-256, and saved preview to that job; callers cannot substitute another account or source identity. Opening values remain evidence and reconciliation inputs only; only the closing date and closing balance may create a ledger known-balance assertion. A successful ready result saves a pending, unposted preview in the account register and returns nextAction.instruction as the provider-written statement summary and exact confirmation question. Present that wording instead of internal line-item or include/exclude counts. The original source remains the evidence file; JSON Lines is disposable operational data.",
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),
@@ -3505,7 +3517,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("submit_transaction_list_import_job_artifact", {
     title: "Submit transaction-list extraction",
-    description: "Consume one complete canonical JSON Lines artifact derived from an already-started transaction-list job backed by PDF or text evidence. The server binds the artifact, selected account, source SHA-256, and saved preview to that job. This workflow expects no statement period or balances. Accounting screens likely duplicates, supplies its configured same-currency suspense counterlines, and saves a pending review in the selected account register. A successful ready result is not posted until the exact returned plan is approved and committed.",
+    description: "Consume one complete canonical JSON Lines artifact derived from an already-started transaction-list job backed by PDF, image, or text evidence. The server binds the artifact, selected account, source SHA-256, and saved preview to that job. This workflow expects no statement period or balances. Accounting screens likely duplicates, supplies its configured same-currency suspense counterlines, and saves a pending review in the selected account register. A successful ready result is not posted until the exact returned plan is approved and committed.",
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       artifact_id: z.string().trim().uuid(),

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, downloadEvidenceFile, uploadStatementPdf } from "./api";
+import { api, downloadEvidenceFile, uploadEvidenceFile } from "./api";
 import { unitsToDecimal } from "./money";
 import type { Account, BalanceAssertion, StatementImportJob } from "./types";
 
@@ -107,12 +107,13 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
     setBusy("upload"); setError(""); setNotice("");
     try {
       const lowerName = sourceFile.name.toLowerCase();
-      const isPdf = sourceFile.type === "application/pdf" || lowerName.endsWith(".pdf");
+      const isBinaryEvidence = ["application/pdf", "image/png", "image/jpeg", "image/webp"]
+        .includes(sourceFile.type) || /\.(pdf|png|jpe?g|webp)$/u.test(lowerName);
       const isText = ["text/plain", "text/csv", "application/csv"].includes(sourceFile.type)
         || lowerName.endsWith(".txt") || lowerName.endsWith(".csv");
-      if (!isPdf && !isText) throw new Error("Choose a PDF, TXT, or CSV file.");
-      const result = isPdf
-        ? await uploadStatementPdf<{ job: StatementImportJob }>(account.id, sourceFile, token)
+      if (!isBinaryEvidence && !isText) throw new Error("Choose a PDF, PNG, JPEG, WebP, TXT, or CSV file.");
+      const result = isBinaryEvidence
+        ? await uploadEvidenceFile<{ job: StatementImportJob }>(account.id, sourceFile, token)
         : await api<{ job: StatementImportJob }>(
           `/accounts/${account.id}/transaction-list-import-jobs`, {
             method: "POST", body: JSON.stringify({ fileName: sourceFile.name, text: await sourceFile.text() }),
@@ -121,7 +122,7 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
       setStatementJobs((current) => [result.job, ...current]);
       setSourceFile(null);
       if (sourceFileInput.current) sourceFileInput.current.value = "";
-      setNotice(`${isPdf ? "The original PDF" : "The uploaded text"} evidence is saved in Accounting. Nothing has been posted.`);
+      setNotice(`${isBinaryEvidence ? "The original file" : "The uploaded text"} evidence is saved in Accounting. Nothing has been posted.`);
     } catch (nextError) { setError(message(nextError)); }
     finally { setBusy(""); }
   }
@@ -216,8 +217,8 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
 
         <h3>1. Save source evidence</h3>
         {!activeStatementJob && <>
-          <label>Evidence file (PDF, TXT, or CSV)<input ref={sourceFileInput} type="file"
-            accept="application/pdf,text/plain,text/csv,.pdf,.txt,.csv"
+          <label>Evidence file (PDF, image, TXT, or CSV)<input ref={sourceFileInput} type="file"
+            accept="application/pdf,image/png,image/jpeg,image/webp,text/plain,text/csv,.pdf,.png,.jpg,.jpeg,.webp,.txt,.csv"
             onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)} /></label>
           <button type="button" className="primary" disabled={!account || !sourceFile || Boolean(busy)}
             onClick={() => void uploadSourceEvidence()}>{busy === "upload" ? "Uploading…" : "Save uploaded file"}</button>

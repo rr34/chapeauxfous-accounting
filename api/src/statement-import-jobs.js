@@ -7,6 +7,9 @@ import { withPoolTransaction } from "./db.js";
 
 export const STATEMENT_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024;
 export const STATEMENT_EVIDENCE_MEDIA_TYPE = "application/pdf";
+export const STATEMENT_EVIDENCE_MEDIA_TYPES = Object.freeze([
+  STATEMENT_EVIDENCE_MEDIA_TYPE, "image/png", "image/jpeg", "image/webp",
+]);
 export const TRANSACTION_LIST_EVIDENCE_MAX_BYTES = 2 * 1024 * 1024;
 export const TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE = "text/plain";
 export const STATEMENT_EVIDENCE_DOWNLOAD_CONTRACT_VERSION = 1;
@@ -50,16 +53,31 @@ function safeFileName(value, label = "evidence filename") {
   return normalized;
 }
 
-function pdfBytes(value) {
+function binaryEvidenceBytes(value, mediaType) {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
   if (bytes.length < 1 || bytes.length > STATEMENT_EVIDENCE_MAX_BYTES) {
-    throw statementError(`The statement PDF must contain 1 through ${STATEMENT_EVIDENCE_MAX_BYTES} bytes.`,
+    throw statementError(`The evidence file must contain 1 through ${STATEMENT_EVIDENCE_MAX_BYTES} bytes.`,
       "INVALID_STATEMENT_FILE_SIZE", { maximumBytes: STATEMENT_EVIDENCE_MAX_BYTES }, 413);
   }
-  if (!bytes.subarray(0, Math.min(bytes.length, 1024)).includes(Buffer.from("%PDF-", "ascii"))) {
-    throw statementError("The uploaded file is not a recognizable PDF.", "INVALID_STATEMENT_PDF", undefined, 415);
+  const recognized = mediaType === "application/pdf"
+    ? bytes.subarray(0, Math.min(bytes.length, 1024)).includes(Buffer.from("%PDF-", "ascii"))
+    : mediaType === "image/png"
+      ? bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      : mediaType === "image/jpeg"
+        ? bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+        : mediaType === "image/webp"
+          ? bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF"
+            && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+          : false;
+  if (!recognized) {
+    throw statementError("The uploaded bytes do not match the declared PDF or image format.",
+      "INVALID_STATEMENT_EVIDENCE_CONTENT", { mediaType }, 415);
   }
   return bytes;
+}
+
+function evidenceExtension(mediaType) {
+  return { "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" }[mediaType];
 }
 
 export function resolveEvidenceRoot(value = process.env.ACCOUNTING_EVIDENCE_ROOT) {
@@ -134,8 +152,9 @@ function accountDisplayName(row) {
 }
 
 function copiedPrompt(id, mediaType) {
-  const source = mediaType === STATEMENT_EVIDENCE_MEDIA_TYPE
-    ? "complete original PDF" : "complete saved text evidence";
+  const source = mediaType === TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE
+    ? "complete saved text evidence"
+    : mediaType === STATEMENT_EVIDENCE_MEDIA_TYPE ? "complete original PDF" : "complete original image";
   return [
     "Process my pending Accounting statement import:",
     "",
@@ -231,19 +250,21 @@ async function loadStatementJob(connection, personId, statementImportJobId, { lo
   return rows[0];
 }
 
-export async function createStatementImportFromPdf({
+export async function createStatementImportFromFile({
   pool, evidenceRoot, personId, accountId, fileName, mediaType, bytes,
 }) {
   const owner = ownerId(personId);
   const account = positiveId(accountId, "Statement account", "ACCOUNT_NOT_FOUND");
   const name = safeFileName(fileName);
-  if (String(mediaType ?? "").split(";", 1)[0].trim().toLowerCase() !== STATEMENT_EVIDENCE_MEDIA_TYPE) {
-    throw statementError("Statement upload currently accepts application/pdf.",
-      "UNSUPPORTED_STATEMENT_MEDIA_TYPE", { acceptedMediaTypes: [STATEMENT_EVIDENCE_MEDIA_TYPE] }, 415);
+  const normalizedMediaType = String(mediaType ?? "").split(";", 1)[0].trim().toLowerCase();
+  if (!STATEMENT_EVIDENCE_MEDIA_TYPES.includes(normalizedMediaType)) {
+    throw statementError("Evidence upload accepts PDF, PNG, JPEG, or WebP.",
+      "UNSUPPORTED_STATEMENT_MEDIA_TYPE", { acceptedMediaTypes: STATEMENT_EVIDENCE_MEDIA_TYPES }, 415);
   }
-  const content = pdfBytes(bytes);
+  const content = binaryEvidenceBytes(bytes, normalizedMediaType);
   const digest = createHash("sha256").update(content).digest("hex");
-  const storageKey = await persistEvidenceBytes({ evidenceRoot, personId: owner, digest, bytes: content });
+  const storageKey = await persistEvidenceBytes({ evidenceRoot, personId: owner, digest, bytes: content,
+    extension: evidenceExtension(normalizedMediaType) });
   const statementImportJobId = randomUUID();
   await withPoolTransaction(pool, async (connection) => {
     const [accounts] = await connection.query(
@@ -260,7 +281,7 @@ export async function createStatementImportFromPdf({
         (owner_person_id, original_file_name, media_type, byte_size, sha256, storage_key)
        VALUES (?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE evidence_file_id = LAST_INSERT_ID(evidence_file_id)`,
-      [owner, name, STATEMENT_EVIDENCE_MEDIA_TYPE, content.length, digest, storageKey],
+      [owner, name, normalizedMediaType, content.length, digest, storageKey],
     );
     const evidenceFileId = Number(evidenceInsert.insertId);
     await connection.query(
@@ -272,6 +293,8 @@ export async function createStatementImportFromPdf({
   });
   return getStatementImportJob({ pool, personId: owner, statementImportJobId });
 }
+
+export const createStatementImportFromPdf = createStatementImportFromFile;
 
 export async function createTransactionListImportFromText({
   pool, evidenceRoot, personId, accountId, fileName = "pasted-transactions.txt", text,
@@ -402,7 +425,7 @@ export async function listEvidenceFileObjectsPage(pool, personId, {
 
 export async function startStatementImportJob({ pool, personId, statementImportJobId }) {
   const existing = await getStatementImportJob({ pool, personId, statementImportJobId });
-  if (![STATEMENT_EVIDENCE_MEDIA_TYPE, TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE]
+  if (![...STATEMENT_EVIDENCE_MEDIA_TYPES, TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE]
     .includes(existing.evidenceFile.mediaType)) {
     throw statementError("This work item does not contain supported one-account evidence.",
       "UNSUPPORTED_ONE_ACCOUNT_EVIDENCE", { mediaType: existing.evidenceFile.mediaType }, 409);

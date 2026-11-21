@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   bindStatementImportPreview,
+  createStatementImportFromFile,
   createStatementImportFromPdf,
   createTransactionListImportFromText,
   deleteStatementImportJob,
@@ -225,6 +226,33 @@ test("plain copied transaction evidence creates a transaction-list handoff witho
   await finished;
   assert.equal(response.headers.get("content-type"), "text/plain");
   assert.equal(response.body.toString("utf8"), text);
+});
+
+test("a single image is retained and served as original one-account evidence", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+  const pool = statementPool();
+  const bytes = Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    Buffer.from("receipt screenshot pixels", "utf8"),
+  ]);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const created = await createStatementImportFromFile({
+    pool, evidenceRoot, personId: 7, accountId: 34,
+    fileName: "receipt.png", mediaType: "image/png", bytes,
+  });
+  assert.equal(created.evidenceFile.mediaType, "image/png");
+  assert.equal(created.download.mediaType, "image/png");
+  assert.match(created.copiedPrompt, /complete original image/);
+  assert.deepEqual(await readFile(path.join(evidenceRoot, `owner-7/sha256/${digest}.png`)), bytes);
+
+  const response = new TestResponse();
+  const finished = new Promise((resolve, reject) => response.once("finish", resolve).once("error", reject));
+  await sendEvidenceFileContent({ pool, evidenceRoot, personId: 7,
+    evidenceFileId: created.evidenceFile.id, response });
+  await finished;
+  assert.equal(response.headers.get("content-type"), "image/png");
+  assert.deepEqual(response.body, bytes);
 });
 
 test("clearing an uncommitted import removes unreferenced source evidence bytes", async (t) => {

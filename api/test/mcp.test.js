@@ -822,7 +822,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   }
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(manifest.server.instructions,
-    /workflow independently of file format.*start_statement_import_job.*start_transaction_list_import_job.*PDF or saved text evidence/s);
+    /workflow independently of file format.*start_statement_import_job.*start_transaction_list_import_job.*PDF, image, or saved text evidence/s);
   assert.match(transactionCapability.guidance,
     /Route every file listing movements for one named account through accounting\.reconciliation/);
   assert.match(referenceRateCapability.guidance,
@@ -845,7 +845,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "get_statement_import_job").description,
     /Do not select this tool in the normal initial processing path.*returns no evidence download descriptor/s);
   assert.match(tools.tools.find((tool) => tool.name === "start_statement_import_job").description,
-    /return the exact original-evidence download descriptor.*PDF or saved text.*exact replay.*safe/s);
+    /return the exact original-evidence access contract.*PDF, image, or saved text.*exact replay.*safe/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
     /Present nextAction\.instruction.*do not replace it with internal line-item or include\/exclude counts.*do not enumerate every row/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact").description,

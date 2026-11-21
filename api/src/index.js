@@ -26,7 +26,8 @@ import {
 } from "./artifact-upload.js";
 import {
   STATEMENT_EVIDENCE_MAX_BYTES,
-  createStatementImportFromPdf,
+  STATEMENT_EVIDENCE_MEDIA_TYPES,
+  createStatementImportFromFile,
   createTransactionListImportFromText,
   deleteStatementImportJob,
   getStatementImportJob,
@@ -159,14 +160,14 @@ app.get("/api/accounts/:accountId/statement-import-jobs", requireAuth, async (re
 });
 
 app.post("/api/accounts/:accountId/statement-import-jobs", requireAuth,
-  express.raw({ type: "application/pdf", limit: STATEMENT_EVIDENCE_MAX_BYTES }), async (req, res, next) => {
+  express.raw({ type: STATEMENT_EVIDENCE_MEDIA_TYPES, limit: STATEMENT_EVIDENCE_MAX_BYTES }), async (req, res, next) => {
     try {
       let fileName;
       try { fileName = decodeURIComponent(String(req.get("X-File-Name") ?? "")); } catch {
         return res.status(400).json({ error: "INVALID_STATEMENT_FILE_NAME",
           message: "The statement filename header is invalid." });
       }
-      return res.status(201).json({ job: await createStatementImportFromPdf({
+      return res.status(201).json({ job: await createStatementImportFromFile({
         pool, evidenceRoot, personId: req.auth.personId, accountId: req.params.accountId,
         fileName, mediaType: req.get("Content-Type"), bytes: req.body,
       }) });

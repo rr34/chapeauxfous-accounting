@@ -37,12 +37,17 @@ export async function api<T>(path: string, options: RequestInit = {}, token?: st
   return payload as T;
 }
 
-export async function uploadStatementPdf<T>(accountId: number, file: File, token: string): Promise<T> {
+export async function uploadEvidenceFile<T>(accountId: number, file: File, token: string): Promise<T> {
+  const lowerName = file.name.toLowerCase();
+  const mediaType = file.type || (lowerName.endsWith(".pdf") ? "application/pdf"
+    : lowerName.endsWith(".png") ? "image/png"
+      : lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") ? "image/jpeg"
+        : lowerName.endsWith(".webp") ? "image/webp" : "application/octet-stream");
   const response = await fetch(`${apiBase}/accounts/${accountId}/statement-import-jobs`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/pdf",
+      "Content-Type": mediaType,
       "X-File-Name": encodeURIComponent(file.name),
     },
     body: file,
