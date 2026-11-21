@@ -3154,7 +3154,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                       : `${line.amountDecimal} ${account.currencyCode}`}</span>;
                 })}</td>
                 <td>{otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
-                <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
+                <td className="amount balance">{row.row.decision === "include"
+                  ? unitsToDecimal(row.projectedBalanceUnits, account.scale) : ""}</td>
                 <td></td>
               </tr>
               {view !== "basic" && [
