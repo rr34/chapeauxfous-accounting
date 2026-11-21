@@ -3,6 +3,7 @@ import { getTransaction, validateTransaction } from "./accounting.js";
 import { accountingQuestionTagKeys } from "./accounting-questions.js";
 
 export const SUSPENSE_TRANSFER_MAX_DATE_GAP_DAYS = 3;
+const LINE_MEMO_MAX_LENGTH = 16000;
 
 function mergeError(message, code, details = undefined, status = 400) {
   return Object.assign(new Error(message), { message, code, details, status });
@@ -20,6 +21,18 @@ function calendarDayNumber(value) {
   if (!match) throw mergeError("A transfer transaction has an invalid accounting date.",
     "INVALID_SUSPENSE_TRANSFER_DATE", undefined, 409);
   return Math.floor(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86400000);
+}
+
+function appendAbsorbedHeaderToMemo(memo, description) {
+  const existingMemo = memo == null ? "" : String(memo);
+  const absorbedHeader = description == null ? "" : String(description);
+  if (!absorbedHeader.trim() || existingMemo === absorbedHeader
+    || existingMemo.endsWith(`\n${absorbedHeader}`)) return existingMemo || null;
+  const mergedMemo = existingMemo ? `${existingMemo}\n${absorbedHeader}` : absorbedHeader;
+  if (mergedMemo.length > LINE_MEMO_MAX_LENGTH) throw mergeError(
+    "The absorbed transaction header cannot fit in the statement posting memo.",
+    "SUSPENSE_TRANSFER_MEMO_TOO_LONG", { maximumLength: LINE_MEMO_MAX_LENGTH }, 409);
+  return mergedMemo;
 }
 
 export async function mergeSuspenseTransferPair({
@@ -105,7 +118,7 @@ export async function mergeSuspenseTransferPair({
 
     const txPlaceholders = transactionIds.map(() => "?").join(", ");
     const [lines] = await connection.query(
-      `SELECT li.line_item_id, li.transaction_id, li.account_id, li.amount_units, li.value_units,
+      `SELECT li.line_item_id, li.transaction_id, li.account_id, li.amount_units, li.value_units, li.memo,
               a.account_currency_id, a.AccountName
          FROM line_items li
          JOIN accounts a ON a.account_id = li.account_id
@@ -166,8 +179,9 @@ export async function mergeSuspenseTransferPair({
       "UPDATE accounting_transaction_import_items SET ledger_transaction_id = ? WHERE ledger_transaction_id = ?",
       [retainedId, absorbedId],
     );
-    await connection.query("UPDATE line_items SET transaction_id = ? WHERE line_item_id = ?",
-      [retainedId, Number(absorbedOther.line_item_id)]);
+    const movedLineMemo = appendAbsorbedHeaderToMemo(absorbedOther.memo, absorbedSelected.description);
+    await connection.query("UPDATE line_items SET transaction_id = ?, memo = ? WHERE line_item_id = ?",
+      [retainedId, movedLineMemo, Number(absorbedOther.line_item_id)]);
     await connection.query(`DELETE FROM line_items WHERE line_item_id IN (${placeholders})`, ids);
     await connection.query("DELETE FROM transactions WHERE transaction_id = ? AND owner_person_id = ?",
       [absorbedId, ownerId]);

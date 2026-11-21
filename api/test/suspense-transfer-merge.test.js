@@ -23,13 +23,13 @@ function mergeFixture() {
   ];
   const originalLines = [
     { line_item_id: "901", transaction_id: "81", account_id: "30", amount_units: "-9700",
-      value_units: "-9700", account_currency_id: "1", AccountName: "Ask Accountant" },
+      value_units: "-9700", memo: null, account_currency_id: "1", AccountName: "Ask Accountant" },
     { line_item_id: "902", transaction_id: "81", account_id: "31", amount_units: "9700",
-      value_units: "9700", account_currency_id: "1", AccountName: "CC CapOne x7334" },
+      value_units: "9700", memo: null, account_currency_id: "1", AccountName: "CC CapOne x7334" },
     { line_item_id: "903", transaction_id: "82", account_id: "30", amount_units: "9700",
-      value_units: "9700", account_currency_id: "1", AccountName: "Ask Accountant" },
+      value_units: "9700", memo: null, account_currency_id: "1", AccountName: "Ask Accountant" },
     { line_item_id: "904", transaction_id: "82", account_id: "44", amount_units: "-9700",
-      value_units: "-9700", account_currency_id: "1", AccountName: "Checking" },
+      value_units: "-9700", memo: "Imported checking memo", account_currency_id: "1", AccountName: "Checking" },
   ];
   const mergedLines = [
     { line_item_id: "902", amount_units: "9700", value_units: "9700", account_id: "31",
@@ -38,6 +38,7 @@ function mergeFixture() {
       account_owner_person_id: "7", account_currency_id: "1", is_placeholder: 0 },
   ];
   const writes = [];
+  const queryCalls = [];
   const responses = [
     [selected], [[]], [originalLines], [[]], [[]],
     [{ insertId: 1 }], [{ affectedRows: 0 }], [{ affectedRows: 1 }], [{ affectedRows: 1 }],
@@ -50,8 +51,10 @@ function mergeFixture() {
     async commit() { writes.push("COMMIT"); },
     async rollback() { writes.push("ROLLBACK"); },
     release() { writes.push("RELEASE"); },
-    async query(sql) {
-      writes.push(sql.replace(/\s+/gu, " ").trim());
+    async query(sql, params) {
+      const normalizedSql = sql.replace(/\s+/gu, " ").trim();
+      writes.push(normalizedSql);
+      queryCalls.push({ sql: normalizedSql, params });
       const response = responses.shift();
       assert.ok(response, `Unexpected connection query: ${sql}`);
       return response;
@@ -65,7 +68,8 @@ function mergeFixture() {
         reconciled_at: null, memo: null, account_id: "31", AccountName: "CC CapOne x7334",
         account_currency_id: "1", CurrencyAbbreviation: "USD", scale: "2" },
       { line_item_id: "904", amount_units: "-9700", value_units: "-9700", reconciliation_state: "cleared",
-        reconciled_at: null, memo: null, account_id: "44", AccountName: "Checking",
+        reconciled_at: null, memo: "Imported checking memo\nCAPITAL ONE PAYMENT",
+        account_id: "44", AccountName: "Checking",
         account_currency_id: "1", CurrencyAbbreviation: "USD", scale: "2" },
     ]],
     [[]], [[]],
@@ -83,7 +87,7 @@ function mergeFixture() {
       return response;
     },
   };
-  return { pool, writes, responses, readResponses };
+  return { pool, writes, queryCalls, responses, readResponses };
 }
 
 test("merges exact opposite suspense imports into the user-selected transaction", async () => {
@@ -96,10 +100,14 @@ test("merges exact opposite suspense imports into the user-selected transaction"
   assert.equal(merged.movedLineItemId, 904);
   assert.deepEqual(merged.transaction.lineItems.map((line) => line.id), [902, 904]);
   assert.equal(merged.transaction.lineItems[1].reconciliationState, "cleared");
+  assert.equal(merged.transaction.lineItems[1].memo, "Imported checking memo\nCAPITAL ONE PAYMENT");
   assert.equal(merged.transaction.mergedTransactions[0].absorbedTransactionId, 82);
   assert.equal(fixture.responses.length, 0);
   assert.equal(fixture.readResponses.length, 0);
   assert.ok(fixture.writes.some((sql) => sql.includes("UPDATE accounting_transaction_import_items")));
+  assert.deepEqual(fixture.queryCalls.find((call) =>
+    call.sql.startsWith("UPDATE line_items SET transaction_id = ?, memo = ?"))?.params,
+  [81, "Imported checking memo\nCAPITAL ONE PAYMENT", 904]);
   assert.ok(fixture.writes.some((sql) => sql.includes("DELETE FROM transactions")));
   assert.deepEqual(fixture.writes.filter((entry) => ["BEGIN", "COMMIT", "ROLLBACK", "RELEASE"].includes(entry)),
     ["BEGIN", "COMMIT", "RELEASE"]);
