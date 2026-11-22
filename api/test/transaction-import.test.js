@@ -16,6 +16,8 @@ const {
   updateTransactionImportReviewDecision,
 } = await import("../src/transaction-import.js");
 const {
+  SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS,
+  SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } = await import("../src/transaction-import-limits.js");
@@ -391,6 +393,23 @@ test("transaction normalization enforces the aggregate line-item limit", () => {
     () => normalizeTransactionImport({ sourceSystem: "too_many_lines", transactions }),
     (error) => error.code === "TOO_MANY_LINE_ITEMS" && /At most 10000 line items/.test(error.message),
   );
+});
+
+test("constrained one-account imports accept one intact batch through 10,000 movements", () => {
+  assert.equal(SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS, 10000);
+  assert.equal(SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS, 20000);
+  const transactions = Array.from(
+    { length: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS },
+    (_, index) => generatedTransaction(index),
+  );
+  const normalized = normalizeTransactionImport({
+    sourceSystem: "single_account_statement",
+    transactions,
+    maximumTransactions: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
+    maximumLineItems: SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS,
+  });
+  assert.equal(normalized.transactions.length, 10000);
+  assert.equal(normalized.submittedLineItemCount, 20000);
 });
 
 test("a 1,000-transaction statement is preserved as one durable atomic plan", async () => {

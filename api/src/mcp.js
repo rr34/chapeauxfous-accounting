@@ -147,6 +147,7 @@ import {
 import { analyzeStatementObservations } from "./statement-analysis.js";
 import { getStatementReconciliationContext } from "./statement-reconciliation.js";
 import {
+  SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
   TRANSACTION_IMPORT_MAX_LINE_ITEMS,
   TRANSACTION_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
@@ -1243,6 +1244,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     })).length(6),
     canonicalArtifactSchema: z.json(),
     artifactUpload: z.json(),
+    maximumRecords: z.number().int().positive(),
     nextTool: z.literal("import_single_account_statement_artifact"),
     inlineNextTool: z.literal("import_single_account_statement"),
     rules: z.array(z.string().min(1)),
@@ -1338,6 +1340,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     extraction: z.object({
       workflow: z.literal("single_account_transaction_list"),
       canonicalArtifactSchema: z.json(), artifactUpload: z.json(),
+      maximumRecords: z.number().int().positive(),
       signConvention: signConventionSchema,
       nextTool: z.literal("submit_transaction_list_import_job_artifact"),
       rules: z.array(z.string().min(1)),
@@ -2938,6 +2941,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       ],
       canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
       artifactUpload: singleAccountStatementArtifactUpload,
+      maximumRecords: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
       nextTool: "import_single_account_statement_artifact",
       inlineNextTool: "import_single_account_statement",
       rules: [
@@ -3005,6 +3009,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       ],
       canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
       artifactUpload: statementImportJobArtifactUpload,
+      maximumRecords: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
       nextTool: "submit_statement_import_job_artifact",
       inlineNextTool: "import_single_account_statement",
       rules: [
@@ -3170,6 +3175,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         workflow: "single_account_transaction_list",
         canonicalArtifactSchema: singleAccountStatementImportCanonicalJsonSchema,
         artifactUpload: transactionListImportJobArtifactUpload,
+        maximumRecords: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
         signConvention: accountSignConvention(job.account),
         nextTool: "submit_transaction_list_import_job_artifact",
         rules: [
@@ -3220,7 +3226,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .describe("All useful transaction text copied from the document, or null when the row has none."),
   }).strict();
   const oneSidedStatementLinesSchema = z.array(oneSidedStatementLineSchema)
-    .min(1).max(TRANSACTION_IMPORT_MAX_TRANSACTIONS);
+    .min(1).max(SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS);
   const previewSingleAccountStatement = async ({ statement_id, account_id,
     statement_import_job_id = null, evidence_file_id = null,
     start_date, start_amount, end_date, end_amount, line_items, transaction_list = false,
@@ -3464,14 +3470,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         status: 409,
       });
     const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
-    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
-      importJobId: statement_import_job_id });
     const parsed = oneSidedStatementLinesSchema.safeParse(
       parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type),
     );
     if (!parsed.success) throw Object.assign(new Error("The statement artifact does not match the canonical line schema."), {
       code: "INVALID_SINGLE_ACCOUNT_STATEMENT_ARTIFACT", details: parsed.error.issues,
     });
+    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
+      importJobId: statement_import_job_id });
     const preview = await previewSingleAccountStatement({
       ...answers,
       statement_id: job.sourceDocumentId,
@@ -3549,8 +3555,6 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         status: 409,
       });
     const uploaded = await accounting.readCompleteArtifact({ artifactRoot, personId, artifactId: artifact_id });
-    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
-      importJobId: statement_import_job_id });
     const parsed = oneSidedStatementLinesSchema.safeParse(
       parseCanonicalStatementArtifact(uploaded.bytes, uploaded.artifact.media_type),
     );
@@ -3558,6 +3562,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       "The transaction-list artifact does not match the canonical one-account line schema."), {
       code: "INVALID_TRANSACTION_LIST_IMPORT_ARTIFACT", details: parsed.error.issues,
     });
+    await bindArtifactToImportJob({ artifactRoot, personId, artifactId: artifact_id,
+      importJobId: statement_import_job_id });
     const absent = { found: false, value: null };
     const preview = await previewSingleAccountStatement({
       statement_id: job.sourceDocumentId,

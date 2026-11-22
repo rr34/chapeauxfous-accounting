@@ -734,6 +734,11 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     tools.tools.find((tool) => tool.name === "import_transactions").inputSchema.properties.transactions.maxItems,
     1000,
   );
+  assert.equal(
+    tools.tools.find((tool) => tool.name === "import_single_account_statement")
+      .inputSchema.properties.line_items.maxItems,
+    10000,
+  );
   assert.equal(tools.tools.find((tool) => tool.name === "commit_transaction_import").annotations.idempotentHint, true);
   assert.equal(tools.tools.find((tool) => tool.name === "stage_transaction_import_chunk").annotations.idempotentHint, true);
   const transactionSearchTool = tools.tools.find((tool) => tool.name === "search_transactions");
@@ -1619,7 +1624,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.19.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.20.0");
 
   await handler.close();
 });

@@ -1,5 +1,9 @@
 import { listAccounts } from "./accounting.js";
 import { previewTransactionImport } from "./transaction-import.js";
+import {
+  SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS,
+  SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
+} from "./transaction-import-limits.js";
 
 function workflowError(message, code, details = undefined, status = 400) {
   return Object.assign(new Error(message), { status, code, details });
@@ -137,6 +141,8 @@ export async function previewSingleAccountStatementImport({
   });
   return previewTransactionImport({
     pool, personId, sourceSystem, transactions: compiled.transactions,
+    maximumTransactions: SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
+    maximumLineItems: SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS,
     knownBalanceAssertions,
     importReview,
     reconciliation: reconciliation == null ? null : {

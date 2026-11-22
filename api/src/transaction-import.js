@@ -109,13 +109,19 @@ function normalizeTransaction(transaction) {
   };
 }
 
-export function normalizeTransactionImport({ sourceSystem, transactions }) {
+export function normalizeTransactionImport({ sourceSystem, transactions,
+  maximumTransactions = TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+  maximumLineItems = TRANSACTION_IMPORT_MAX_LINE_ITEMS }) {
   const normalizedSourceSystem = limitedRequiredText(sourceSystem, "source system", 32);
+  if (!Number.isSafeInteger(maximumTransactions) || maximumTransactions < 1
+      || !Number.isSafeInteger(maximumLineItems) || maximumLineItems < 1) {
+    throw importError("Transaction import limits are invalid.", "INVALID_TRANSACTION_IMPORT_LIMITS", undefined, 500);
+  }
   if (!Array.isArray(transactions) || transactions.length === 0) {
     throw importError("At least one complete transaction is required.", "TRANSACTIONS_REQUIRED");
   }
-  if (transactions.length > TRANSACTION_IMPORT_MAX_TRANSACTIONS) {
-    throw importError(`At most ${TRANSACTION_IMPORT_MAX_TRANSACTIONS} transactions can be imported in one atomic batch.`, "TOO_MANY_TRANSACTIONS");
+  if (transactions.length > maximumTransactions) {
+    throw importError(`At most ${maximumTransactions} transactions can be imported in one atomic batch.`, "TOO_MANY_TRANSACTIONS");
   }
 
   const byExternalId = new Map();
@@ -134,8 +140,8 @@ export function normalizeTransactionImport({ sourceSystem, transactions }) {
       conflictingExternalIds.add(normalized.externalId);
     }
   }
-  if (submittedLineItemCount > TRANSACTION_IMPORT_MAX_LINE_ITEMS) {
-    throw importError(`At most ${TRANSACTION_IMPORT_MAX_LINE_ITEMS} line items can be imported in one atomic batch.`, "TOO_MANY_LINE_ITEMS");
+  if (submittedLineItemCount > maximumLineItems) {
+    throw importError(`At most ${maximumLineItems} line items can be imported in one atomic batch.`, "TOO_MANY_LINE_ITEMS");
   }
   return {
     sourceSystem: normalizedSourceSystem,
@@ -1024,8 +1030,11 @@ function transactionPlanIdentity(plan) {
 }
 
 export async function previewTransactionImport({ pool, personId, sourceSystem, transactions,
-  reconciliation = null, knownBalanceAssertions = [], importReview = null }) {
-  const normalized = normalizeTransactionImport({ sourceSystem, transactions });
+  reconciliation = null, knownBalanceAssertions = [], importReview = null,
+  maximumTransactions = TRANSACTION_IMPORT_MAX_TRANSACTIONS,
+  maximumLineItems = TRANSACTION_IMPORT_MAX_LINE_ITEMS }) {
+  const normalized = normalizeTransactionImport({ sourceSystem, transactions,
+    maximumTransactions, maximumLineItems });
   normalized.reconciliation = normalizeReconciliation(reconciliation);
   normalized.knownBalanceAssertions = normalizeKnownBalanceAssertions(knownBalanceAssertions);
   normalized.importReview = normalizeImportReview(importReview, normalized.transactions);
