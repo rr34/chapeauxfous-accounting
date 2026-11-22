@@ -3124,7 +3124,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             const canReconcile = assertion.matches && projectedMatches;
             return <Fragment key={`assertion-${assertion.id}`}><tr className={`register-assertion-row ${projectedMatches ? "matches" : "mismatch"}`}>
               <td>{formatRegisterDate(assertion.date)}</td>
-              <td><strong>Known balance</strong><small>{projectedMatches
+              <td><strong>Known balance</strong><small className={projectedMatches ? undefined : "known-balance-difference"}>{projectedMatches
                 ? comparisonIncludesPendingImports ? "Matches the projected register" : "Matches the ledger"
                 : `Difference ${unitsToDecimal(projectedDifferenceUnits, assertion.scale)} ${assertion.currencyCode}${comparisonIncludesPendingImports ? " from the projected register" : ""}`}</small>
                 {comparisonIncludesPendingImports && <small>Pending included imports are part of this comparison.</small>}
