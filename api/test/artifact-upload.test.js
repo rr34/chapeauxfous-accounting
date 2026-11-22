@@ -108,6 +108,14 @@ test("filesystem bindings keep one completed artifact and one import job paired 
   await completeArtifactUpload({ artifactRoot, personId: 7, artifactId: second.artifact_id });
   await assert.rejects(bindArtifactToImportJob({ artifactRoot, personId: 7,
     artifactId: second.artifact_id, importJobId: firstJob }), (error) => error.code === "ARTIFACT_BINDING_CONFLICT");
+  const replacement = await bindArtifactToImportJob({ artifactRoot, personId: 7,
+    artifactId: second.artifact_id, importJobId: firstJob, replaceExisting: true });
+  assert.equal(replacement.replaced_artifact_id, first.artifact_id);
+  assert.equal(replacement.idempotent_replay, false);
+  assert.equal((await bindArtifactToImportJob({ artifactRoot, personId: 7,
+    artifactId: second.artifact_id, importJobId: firstJob })).idempotent_replay, true);
+  assert.equal((await bindArtifactToImportJob({ artifactRoot, personId: 7,
+    artifactId: first.artifact_id, importJobId: secondJob })).idempotent_replay, false);
 });
 
 test("the advertised upload contract matches the Agent Slayer HTTP data-plane convention", () => {

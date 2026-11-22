@@ -56,6 +56,29 @@ test("statement analysis compiles transfer candidates and proves balance coverag
   assert.equal(result.readyForTransactionAssembly, true);
 });
 
+test("one-account analysis can explicitly accept an intact source larger than 500 rows", async () => {
+  const observations = Array.from({ length: 1473 }, (_, index) => ({
+    sourceDocumentId: "large-one-account-source",
+    sourceRecordId: `row-${index + 1}`,
+    accountId: 10,
+    transactionDate: "2026-08-18",
+    amountDecimal: "0.00000000",
+    description: `Retained row ${index + 1}`,
+    reference: null,
+  }));
+  await assert.rejects(analyzeStatementObservations({
+    pool: analysisPool(), personId: 7, observations,
+    openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+  }), /between 1 and 500 extracted statement observations/);
+  const result = await analyzeStatementObservations({
+    pool: analysisPool(), personId: 7, observations,
+    openingBalanceDate: "2026-08-01", closingBalanceDate: "2026-08-31",
+    maximumObservations: 10000,
+  });
+  assert.equal(result.observations.length, 1473);
+  assert.equal(result.importDecisions.length, 1473);
+});
+
 test("only a stable matching source reference is automatically excluded as an existing duplicate", async () => {
   const existingRows = [{ transaction_id: 81, TransactionDate: "2026-08-18",
     TransactionState: "posted", transaction_description: "Send bitcoin",

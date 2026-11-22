@@ -343,7 +343,8 @@ export async function readCompleteArtifact({ artifactRoot, personId, artifactId 
   return { artifact: await uploadValue(paths, metadata), bytes: await readFile(paths.complete) };
 }
 
-export async function bindArtifactToImportJob({ artifactRoot, personId, artifactId, importJobId }) {
+export async function bindArtifactToImportJob({ artifactRoot, personId, artifactId, importJobId,
+  replaceExisting = false }) {
   const normalizedArtifactId = uuid(artifactId, "artifact ID");
   const normalizedJobId = uuid(importJobId, "import job ID");
   const paths = artifactPaths(artifactRoot, personId, normalizedArtifactId);
@@ -363,7 +364,9 @@ export async function bindArtifactToImportJob({ artifactRoot, personId, artifact
         "Stored artifact binding metadata is invalid.", "ARTIFACT_STATE_CONFLICT", undefined, 500,
       );
     }
-    if (binding && binding.artifact_id !== normalizedArtifactId) throw artifactError(
+    const replacedArtifactId = binding?.artifact_id !== normalizedArtifactId
+      ? binding?.artifact_id ?? null : null;
+    if (replacedArtifactId && !replaceExisting) throw artifactError(
       "The import job is already bound to a different artifact.", "ARTIFACT_BINDING_CONFLICT", undefined, 409,
     );
     const replay = Boolean(binding && metadata.bound_import_job_id === normalizedJobId);
@@ -371,10 +374,24 @@ export async function bindArtifactToImportJob({ artifactRoot, personId, artifact
     metadata.bound_import_job_id = normalizedJobId;
     metadata.updated_at = now;
     await atomicJson(paths.metadata, metadata);
-    if (!binding) await atomicJson(bindingPath, {
+    if (!binding || replacedArtifactId) await atomicJson(bindingPath, {
       import_job_id: normalizedJobId, artifact_id: normalizedArtifactId, bound_at: now,
     });
-    return { artifact_id: normalizedArtifactId, import_job_id: normalizedJobId, idempotent_replay: replay };
+    if (replacedArtifactId) {
+      const replacedPaths = artifactPaths(artifactRoot, personId, replacedArtifactId);
+      try {
+        const replacedMetadata = await readMetadata(replacedPaths);
+        if (replacedMetadata.bound_import_job_id === normalizedJobId) {
+          replacedMetadata.bound_import_job_id = null;
+          replacedMetadata.updated_at = now;
+          await atomicJson(replacedPaths.metadata, replacedMetadata);
+        }
+      } catch (error) {
+        if (error.code !== "ARTIFACT_NOT_FOUND") throw error;
+      }
+    }
+    return { artifact_id: normalizedArtifactId, import_job_id: normalizedJobId,
+      idempotent_replay: replay, replaced_artifact_id: replacedArtifactId };
   });
 }
 

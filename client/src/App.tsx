@@ -446,7 +446,7 @@ function AuthScreen({ onAuthenticated }: AuthProps) {
 
   return <main className="auth-page">
     <section className="auth-card">
-      <p className="eyebrow">Chapeaux Fous</p>
+      <p className="eyebrow">Time v3 Tech</p>
       <h1>Accounting, connected.</h1>
       <p className="muted">A strict double-entry ledger with flexible tags and an AI-ready accounting service.</p>
       <form onSubmit={submit}>
@@ -3099,7 +3099,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <RegisterSortHeader label="Date" sortKey="date" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Description" sortKey="description" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="This account" sortKey="thisAccount" sort={registerSort} onSort={changeRegisterSort} />
-          <RegisterSortHeader label="Other account amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Other accounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Running balance" sortKey="runningBalance" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Known balance" sortKey="knownBalance" sort={registerSort}
@@ -4053,7 +4053,7 @@ export default function App() {
     .map((id) => accounts.find((account) => account.id === id)).filter((account): account is Account => account != null);
   const currentAccount = selectedAccount ?? recentAccounts[0] ?? null;
   const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
-  return <div className="app-shell"><header><div><p className="eyebrow">Chapeaux Fous</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
+  return <div className="app-shell"><header><div><p className="eyebrow">Time v3 Tech</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <AppMenu open={showAppMenu} onToggle={() => setShowAppMenu((current) => !current)}
       onCurrencies={() => { setShowAppMenu(false); setShowCurrencyManager(true); }}
       onAccountData={() => { setShowAppMenu(false); setShowAccountData(true); }}

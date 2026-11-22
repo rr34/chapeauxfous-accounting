@@ -3,8 +3,7 @@ import { decimalToUnits } from "./money.js";
 import { normalBalanceSign } from "./account-balances.js";
 import { listMatchingBalanceCheckpoints } from "./balance-assertions.js";
 import { getStatementReconciliationContext } from "./statement-reconciliation.js";
-
-const maximumObservations = 500;
+const defaultMaximumObservations = 500;
 
 function applicationError(message, status = 400, code = "INVALID_STATEMENT_OBSERVATIONS", details = undefined) {
   return Object.assign(new Error(message), { status, code, details });
@@ -251,6 +250,10 @@ function decideStatementRows(observations, ledgerCandidates, exactExcludedIds, r
 }
 
 function inputDuplicateCandidates(observations) {
+  // A single source document cannot contain a cross-document duplicate. This
+  // is the common one-account import path and avoids an unnecessary quadratic
+  // scan for large statements.
+  if (new Set(observations.map((item) => item.sourceDocumentId)).size < 2) return [];
   const candidates = [];
   for (let leftIndex = 0; leftIndex < observations.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < observations.length; rightIndex += 1) {
@@ -277,6 +280,10 @@ function inputDuplicateCandidates(observations) {
 }
 
 function transferCandidates(observations) {
+  // Transfers require both distinct documents and distinct accounts. A
+  // one-account statement cannot produce one within its own extracted rows.
+  if (new Set(observations.map((item) => item.sourceDocumentId)).size < 2
+      || new Set(observations.map((item) => item.accountId)).size < 2) return [];
   const candidates = [];
   for (let leftIndex = 0; leftIndex < observations.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < observations.length; rightIndex += 1) {
@@ -332,7 +339,12 @@ function transferCandidates(observations) {
 }
 
 export async function analyzeStatementObservations({ pool, personId, observations: inputObservations,
-  openingBalanceDate, closingBalanceDate, knownBalanceAssertions = [] }) {
+  openingBalanceDate, closingBalanceDate, knownBalanceAssertions = [],
+  maximumObservations = defaultMaximumObservations }) {
+  if (!Number.isSafeInteger(maximumObservations) || maximumObservations < 1) {
+    throw applicationError("Statement observation limit is invalid.", 500,
+      "INVALID_STATEMENT_OBSERVATION_LIMIT");
+  }
   if (!Array.isArray(inputObservations) || inputObservations.length === 0
       || inputObservations.length > maximumObservations) {
     throw applicationError(`Supply between 1 and ${maximumObservations} extracted statement observations.`);

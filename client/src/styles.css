@@ -67,6 +67,7 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .account-register .register-account-edit-button:hover, .account-register .register-account-edit-button:focus-visible { background: #e4ebe2; color: #315d3b; }
 .register-account-name .register-heading-view-controls { margin: 0 0 0 .45rem; border-bottom: 0; padding: 0; }
 .register-known-balance-header-action { display: grid; min-width: 2.15rem; place-items: center; border: 0; border-left: 1px solid #d7ded5; border-radius: 0; background: transparent; color: #315d3b; padding: .45rem .6rem; font-size: 1.1rem; font-weight: 800; line-height: 1; }.register-known-balance-header-action:hover, .register-known-balance-header-action:focus-visible { background: #dfeadd; color: #244a2d; }.register-known-balance-header-action:focus-visible { position: relative; z-index: 1; outline: 2px solid #69876c; outline-offset: -2px; }
+.register-table th:nth-child(7) .register-column-heading { display: grid; grid-template-columns: minmax(0, 1fr); }.register-table th:nth-child(7) .register-sort-button { min-height: auto; padding: .42rem .7rem .12rem; }.register-table th:nth-child(7) .register-known-balance-header-action { min-height: 1.35rem; border-left: 0; padding: 0 .7rem .3rem; place-items: center end; }
 .known-balance-form-actions { display: flex; align-items: center; gap: .5rem; }
 .known-balance-form-actions .link-button { padding: .5rem; }
 .account-register .register-table .known-balance-add { min-width: 1.8rem; min-height: 1.8rem; margin: 0; }
