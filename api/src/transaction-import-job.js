@@ -11,6 +11,7 @@ import {
   normalizeTransactionImport,
   transactionValuationSignature,
 } from "./transaction-import.js";
+import { SIGNED_DECIMAL_INPUT_PATTERN, SIGNED_DECIMAL_INPUT_PATTERN_SOURCE } from "./money.js";
 
 export const TRANSACTION_IMPORT_CANONICAL_SCHEMA_URI =
   "accounting://schemas/transaction-import-record/v1";
@@ -41,11 +42,11 @@ export const transactionImportCanonicalJsonSchema = Object.freeze({
       type: ["string", "null"], minLength: 1, maxLength: 4096 },
     account_full_name: { type: "string", minLength: 1, maxLength: 4096 },
     amount_decimal: { description: "Exact signed account-currency quantity; must fit the account currency's scale.",
-      type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128 },
+      type: "string", pattern: SIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128 },
     value_decimal: {
       description: "Optional source valuation. Accounting replaces it with the nearest reference-rate valuation when one exists, using the exact account-currency amount and reciprocal ratio in either direction. Without a reference rate, a foreign line needs this value; Accounting rounds it half-up to the valuation currency scale. A native-currency account always uses its exact amount.",
       type: ["string", "null"],
-      pattern: "^[+-]?\\d+(?:\\.\\d+)?$",
+      pattern: SIGNED_DECIMAL_INPUT_PATTERN_SOURCE,
       maxLength: 128,
     },
     memo: { type: ["string", "null"], maxLength: 16000 },
@@ -159,8 +160,8 @@ function canonicalRecordSchemaErrors(record, sourceOrdinal) {
   stringField("valuation_currency_code", { required: true, minimum: 1, maximum: 50 });
   stringField("fee_account_full_name", { nullable: true, minimum: 1, maximum: 4096 });
   stringField("account_full_name", { required: true, minimum: 1, maximum: 4096 });
-  stringField("amount_decimal", { required: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
-  stringField("value_decimal", { nullable: true, maximum: 128, pattern: /^[+-]?\d+(?:\.\d+)?$/ });
+  stringField("amount_decimal", { required: true, maximum: 128, pattern: SIGNED_DECIMAL_INPUT_PATTERN });
+  stringField("value_decimal", { nullable: true, maximum: 128, pattern: SIGNED_DECIMAL_INPUT_PATTERN });
   stringField("memo", { nullable: true, maximum: 16000 });
   stringField("question_audience", { nullable: true, minimum: 1, maximum: 50 });
   stringField("question_prompt", { nullable: true, minimum: 1, maximum: 16000 });

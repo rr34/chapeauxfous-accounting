@@ -5,6 +5,7 @@ import {
 import {
   artifactUploadContract,
 } from "./artifact-upload.js";
+import { SIGNED_DECIMAL_INPUT_PATTERN_SOURCE } from "./money.js";
 
 // Removing schema projections changes MCP output shapes; clients must rediscover these version-2 contracts.
 export const MCP_CONTRACT_VERSION = 2;
@@ -428,7 +429,7 @@ export const singleAccountStatementImportCanonicalJsonSchema = Object.freeze({
   properties: {
     source_record_id: { type: "string", minLength: 1, maxLength: 96 },
     transaction_date: { type: "string", format: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-    amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128,
+    amount_decimal: { type: "string", pattern: SIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128,
       description: "Signed movement of the selected account's displayed normal balance: positive increases that balance, negative decreases it, and zero retains the source line without changing the balance. This is not a generic cash-flow sign or raw debit/credit." },
     available_text: { type: ["string", "null"], maxLength: 16000 },
   },

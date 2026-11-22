@@ -2,6 +2,34 @@ function absolute(value) {
   return value < 0n ? -value : value;
 }
 
+const currencySymbol = "[$¢£¤¥֏؋৲৳৻૱௹฿៛₠-₿꠸﷼﹩＄￠￡￥￦]";
+const decimalWhole = String.raw`(?:\d+|\d{1,3}(?:,\d{3})+)`;
+const currencyPrefix = String.raw`(?:${currencySymbol}\s*)?`;
+const signedPrefix = String.raw`(?:[+-]?${currencySymbol}\s*|${currencySymbol}\s*[+-]?|[+-]?)`;
+
+export const SIGNED_DECIMAL_INPUT_PATTERN_SOURCE =
+  String.raw`^${signedPrefix}${decimalWhole}(?:\.\d+)?$`;
+export const UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE =
+  String.raw`^${currencyPrefix}${decimalWhole}(?:\.\d+)?$`;
+export const UNSIGNED_DECIMAL_18_INPUT_PATTERN_SOURCE =
+  String.raw`^${currencyPrefix}${decimalWhole}(?:\.\d{1,18})?$`;
+export const SIGNED_DECIMAL_INPUT_PATTERN = new RegExp(SIGNED_DECIMAL_INPUT_PATTERN_SOURCE, "u");
+export const UNSIGNED_DECIMAL_INPUT_PATTERN = new RegExp(UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE, "u");
+export const UNSIGNED_DECIMAL_18_INPUT_PATTERN = new RegExp(UNSIGNED_DECIMAL_18_INPUT_PATTERN_SOURCE, "u");
+
+const decimalPartsPattern = new RegExp(
+  String.raw`^(?:([+-]?)${currencySymbol}\s*|${currencySymbol}\s*([+-]?)|([+-]?))(${decimalWhole})(?:\.(\d+))?$`,
+  "u",
+);
+
+export function normalizeDecimalInput(value) {
+  const normalized = String(value ?? "").trim();
+  const match = normalized.match(decimalPartsPattern);
+  if (!match) throw new Error(`Invalid amount: ${normalized || "empty"}`);
+  const sign = match[1] || match[2] || match[3] || "";
+  return `${sign}${match[4].replaceAll(",", "")}${match[5] == null ? "" : `.${match[5]}`}`;
+}
+
 export function greatestCommonDivisor(left, right) {
   let a = absolute(BigInt(left));
   let b = absolute(BigInt(right));
@@ -29,13 +57,12 @@ export function addFractions(left, right) {
 }
 
 export function decimalToUnits(value, scale, { round = false } = {}) {
-  const normalized = String(value ?? "").trim();
   const resolvedScale = Number(scale);
   if (!Number.isInteger(resolvedScale) || resolvedScale < 0 || resolvedScale > 18) {
     throw new Error("Invalid commodity scale");
   }
+  const normalized = normalizeDecimalInput(value);
   const match = normalized.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
-  if (!match) throw new Error(`Invalid amount: ${normalized || "empty"}`);
   const fractional = match[3] ?? "";
   if (fractional.length > resolvedScale && !round) throw new Error(`Amount exceeds ${resolvedScale} decimal places`);
   let magnitude = BigInt(`${match[2]}${fractional.slice(0, resolvedScale).padEnd(resolvedScale, "0")}`);

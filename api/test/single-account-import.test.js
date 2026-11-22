@@ -54,6 +54,18 @@ test("zero-amount statement lines retain both the authoritative and suspense sid
   ]);
 });
 
+test("statement imports normalize grouped amounts and leading currency symbols", () => {
+  const compiled = compileSingleAccountStatementImport({
+    accounts, accountId: 2, valuationCurrencyCode: "USD",
+    lines: [{ externalId: "statement-row-grouped", transactionDate: "2026-09-29",
+      description: "Large deposit", amountDecimal: "$4,734.38", valueDecimal: "€ 4,734.38" }],
+  });
+  assert.equal(compiled.transactions[0].lineItems[0].amountDecimal, "4734.38");
+  assert.equal(compiled.transactions[0].lineItems[0].valueDecimal, "4734.38");
+  assert.equal(compiled.transactions[0].lineItems[1].amountDecimal, "-4734.38");
+  assert.equal(compiled.transactions[0].lineItems[1].valueDecimal, "-4734.38");
+});
+
 test("one-sided import asks for designation when the currency has no suspense account", () => {
   assert.throws(() => compileSingleAccountStatementImport({
     accounts: accounts.map((account) => ({ ...account, suspense: false })),

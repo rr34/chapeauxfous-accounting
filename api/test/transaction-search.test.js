@@ -152,11 +152,20 @@ test("transaction search compares decimal amount magnitudes exactly with toleran
   });
   assert.deepEqual(negative.transactions.map((transaction) => transaction.id), [10]);
 
+  const groupedWithSymbol = await searchTransactionsPage(fakePool(), 7, {
+    accountId: 2,
+    amount: "$5,000.00",
+  });
+  assert.deepEqual(groupedWithSymbol.transactions.map((transaction) => transaction.id), [12]);
+
   await assert.rejects(() => searchTransactionsPage(fakePool(), 7, {
     amount: "125", minimumAmount: "100",
   }), (error) => error.code === "INVALID_AMOUNT_FILTER");
   await assert.rejects(() => searchTransactionsPage(fakePool(), 7, {
     minimumAmount: "200", maximumAmount: "100",
+  }), (error) => error.code === "INVALID_AMOUNT_FILTER");
+  await assert.rejects(() => searchTransactionsPage(fakePool(), 7, {
+    amount: "$50,00.00",
   }), (error) => error.code === "INVALID_AMOUNT_FILTER");
 });
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeDecimalInput, UNSIGNED_DECIMAL_18_INPUT_PATTERN } from "./money.js";
 
 function applicationError(message, code = "INVALID_TRANSACTION_SEARCH") {
   return Object.assign(new Error(message), { status: 400, code });
@@ -23,11 +24,12 @@ function calendarDate(value, field) {
 
 function decimal(value, field) {
   if (value == null) return null;
-  const normalized = String(value).trim();
-  if (!/^\d+(?:\.\d{1,18})?$/.test(normalized)) {
+  const input = String(value).trim();
+  if (!UNSIGNED_DECIMAL_18_INPUT_PATTERN.test(input)) {
     throw applicationError(`${field} must be a nonnegative decimal with no more than 18 fractional digits.`,
       "INVALID_AMOUNT_FILTER");
   }
+  const normalized = normalizeDecimalInput(input);
   const [whole, fractional = ""] = normalized.split(".");
   return { source: normalized, units: BigInt(`${whole}${fractional}`), scale: fractional.length };
 }

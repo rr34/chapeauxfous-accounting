@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { currencyKey } from "./currencies.js";
-import { decimalToUnits, unitsToDecimal } from "./money.js";
+import { decimalToUnits, normalizeDecimalInput, unitsToDecimal } from "./money.js";
 import { nearestReferenceRate, referenceRatePairKey, valueAtReferenceRate } from "./reference-valuation.js";
 import { normalizeTransactionAt, transactionAtForDatabase } from "./transaction-time.js";
 import { attachTags, validateTransaction } from "./accounting.js";
@@ -833,7 +833,7 @@ function summarize(normalized, entries, { importPlanId = null, expiresAt = null,
 }
 
 function reversedDecimal(value) {
-  const normalized = String(value);
+  const normalized = normalizeDecimalInput(value);
   if (/^[+-]?0(?:\.0+)?$/.test(normalized)) return normalized.replace(/^[+-]/, "");
   if (normalized.startsWith("-")) return normalized.slice(1);
   if (normalized.startsWith("+")) return `-${normalized.slice(1)}`;

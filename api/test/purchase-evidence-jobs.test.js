@@ -27,6 +27,13 @@ test("canonical purchase evidence mirrors receipt item lines and preserves recei
   ]);
   assert.equal(purchaseEvidenceCanonicalJsonSchema.properties.items.items.properties
     .pre_tax_amount_decimal.type, "string");
+  const amountPattern = new RegExp(
+    purchaseEvidenceCanonicalJsonSchema.properties.charge_amount_decimal.pattern,
+    "u",
+  );
+  assert.equal(amountPattern.test("$4,734.38"), true);
+  assert.equal(amountPattern.test("£ 4,734.38"), true);
+  assert.equal(amountPattern.test("4,73.38"), false);
 });
 
 test("canonical purchase evidence preserves source pre-tax units and derives exact tax-inclusive lines", () => {

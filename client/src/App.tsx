@@ -1,13 +1,13 @@
-import { FormEvent, Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { FormEvent, Fragment, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, downloadEvidenceFile, mcpEndpointUrl } from "./api";
-import { decimalToUnits, unitsToDecimal, unitsToGroupedDecimal } from "./money";
+import { decimalToUnits, normalizeDecimalInput, unitsToDecimal, unitsToGroupedDecimal } from "./money";
 import { descriptionFamily } from "./description-family";
 import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs";
 import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
-  CanonicalImportRecord, CurrencyType, TransactionDetail, TransactionImportException,
+  CanonicalImportRecord, CurrencyType, EvidenceFile, TransactionDetail, TransactionImportException,
   TransactionImportJob, TransactionImportReview, TransactionSummary, User,
 } from "./types";
 
@@ -709,7 +709,13 @@ function movementEffectClass(amountUnits: string, accountType: Account["type"]) 
 type DecimalParts = { units: bigint; scale: number };
 
 function decimalParts(value: string | null | undefined): DecimalParts | null {
-  const match = (value == null ? "" : String(value)).trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  let normalized: string;
+  try {
+    normalized = normalizeDecimalInput(value == null ? "" : String(value));
+  } catch {
+    return null;
+  }
+  const match = normalized.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
   if (!match) return null;
   const fraction = match[3] ?? "";
   const magnitude = BigInt(`${match[2]}${fraction}`);
@@ -867,12 +873,13 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
 
 function TransactionCard({ accounts, currencies, initialAccountId, initialTransaction = null,
   initialLineItemId = null, initialDateEditorOpen = false,
-  knownBalanceAction = null,
+  knownBalanceAction = null, evidenceFiles = [],
   layout = "standard", token, onSaved, onCancel, onDelete }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
   initialDateEditorOpen?: boolean;
   knownBalanceAction?: React.ReactNode;
+  evidenceFiles?: EvidenceFile[];
   layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: (saved: TransactionCardSave) => Promise<void>; onCancel?: () => void;
   onDelete?: () => void;
@@ -1179,7 +1186,12 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
           onChange={(event) => setDescription(event.target.value)} rows={2} />
           <button type="button" className="register-values-toggle" aria-expanded={showValuationDetails}
             onClick={() => setShowValuationDetails((current) => !current)}>
-            {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button></td>
+            {showValuationDetails ? "Hide values & rates" : "Values & rates"}</button>
+          {evidenceFiles.map((evidence) => <button type="button" className="register-evidence-link"
+            key={evidence.id} onClick={() => void downloadEvidenceFile(evidence.downloadPath
+              ?? `/api/evidence-files/${evidence.id}/content`, evidence.fileName, token)
+              .catch((nextError) => setError(errorMessage(nextError)))}>
+            PDF evidence · {evidence.fileName}</button>)}</td>
         <td /><td />
         <td><span className="register-transaction-label">Transaction header</span></td>
         <td />
@@ -1223,9 +1235,7 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
       })}
       <tr className="register-inline-actions-row"><td /><td colSpan={6}>
         <div className="register-inline-actions">
-          <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add posting</button>
-          {onDelete && <button type="button" className="danger-button" disabled={busy} onClick={onDelete}>
-            Delete transaction</button>}
+          <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add line</button>
           <label className="register-inline-currency">Transaction value currency<select required value={valuationCurrencyId}
             onChange={(event) => {
               const nextId = event.target.value ? Number(event.target.value) : "";
@@ -1236,7 +1246,9 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
             <CurrencyOptions currencies={currencies} accounts={accounts} /></select></label>
           <span className={`register-inline-status ${canSubmit ? "balanced" : "needs-attention"}`}>{liveStatus}</span>
           {error && <span className="register-inline-error">{error}</span>}
-          <button type="button" className="link-button" onClick={onCancel}>Cancel</button>
+          {onDelete && <button type="button" className="danger-button" disabled={busy} onClick={onDelete}>
+            Delete transaction</button>}
+          <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
           <button type="button" className="primary" disabled={busy || !canSubmit} onClick={() => void submit()}>
             {busy ? "Saving…" : "Save changes"}</button>
         </div>
@@ -2203,18 +2215,19 @@ function compareRegisterRows(left: AccountRegisterRow, right: AccountRegisterRow
   return left.order - right.order;
 }
 
-function RegisterSortHeader({ label, sortKey, sort, onSort }: {
+function RegisterSortHeader({ label, sortKey, sort, onSort, action }: {
   label: string; sortKey: RegisterSortKey; sort: RegisterSort; onSort: (key: RegisterSortKey) => void;
+  action?: ReactNode;
 }) {
   const active = sort.key === sortKey;
   const nextDirection = active && sort.direction === "asc" ? "descending" : "ascending";
   return <th aria-sort={active ? sort.direction === "asc" ? "ascending" : "descending" : "none"}>
-    <button type="button" className="register-sort-button"
-      title={`Sort by ${label.toLocaleLowerCase()} ${nextDirection}`}
-      onClick={() => onSort(sortKey)}>
-      <span>{label}</span><span className={`register-sort-indicator ${active ? "active" : ""}`} aria-hidden="true">
-        {active ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</span>
-    </button>
+    <div className="register-column-heading"><button type="button" className="register-sort-button"
+        title={`Sort by ${label.toLocaleLowerCase()} ${nextDirection}`}
+        onClick={() => onSort(sortKey)}>
+        <span>{label}</span><span className={`register-sort-indicator ${active ? "active" : ""}`} aria-hidden="true">
+          {active ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</span>
+      </button>{action}</div>
   </th>;
 }
 
@@ -2245,11 +2258,10 @@ function statementSummaryDateAmount(date: string | null, amountUnits: string | n
   return `${formattedDate} — ${formattedAmount}`;
 }
 
-function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token, onShowAll,
-  onImportStatement, openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged }: {
+function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token,
+  openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
   assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
-  onShowAll: () => void; onImportStatement: () => void;
   openTransaction: { transactionId: number; lineItemId: number } | null;
   onOpenTransactionHandled: () => void;
   onTransactionCreated: () => Promise<void>; onChanged: () => Promise<void>;
@@ -2933,18 +2945,24 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   return <><section className="account-register card">
     <div className="section-heading"><div>
       <div className="register-account-name"><h2>{account.name}</h2>
+        <span className="register-account-currency" aria-label={`Account currency ${account.currencyCode}`}>
+          · {account.currencyCode}</span>
         <button type="button" className="register-account-edit-button" aria-label={`Edit account ${account.name}`}
           title="Edit account" onClick={() => setShowAccountEditor(true)}>✎</button>
-        <span className="register-account-currency" aria-label={`Account currency ${account.currencyCode}`}>
-          · {account.currencyCode}</span></div></div>
+        <div className="register-view-controls register-heading-view-controls" role="group" aria-label="Register view">
+          <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
+            onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
+          <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
+            onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
+          <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
+            onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
+        </div></div></div>
       <div className="register-heading-actions">
         <div className="register-current-balance">
-          <span>Current balance</span>
-          <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong>
+          <div><span>Current balance</span>
+            <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong></div>
           {importReviews.length > 0 && <small>Projected {unitsToDecimal(projectedImportBalanceUnits, account.scale)} {account.currencyCode}</small>}
         </div>
-        <button className="secondary" onClick={onImportStatement}>Import transactions</button>
-        <button className="secondary" onClick={onShowAll}>All activity</button>
       </div></div>
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
       <div><strong>{review.sourceSystem === "single_account_transaction_list"
@@ -3064,19 +3082,6 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       {suspenseReviewNotice && <p className="suspense-review-notice" role="status">{suspenseReviewNotice}</p>}
       {suspenseReviewError && <p className="error" role="alert">{suspenseReviewError}</p>}
     </section>}
-    <div className="register-control-row">
-      <div className="register-view-controls" role="group" aria-label="Register view">
-        <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
-          onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
-        <button className={view === "auto-split" ? "active" : ""} aria-pressed={view === "auto-split"}
-          onClick={() => changeRegisterView("auto-split")}>Auto-Split Ledger</button>
-        <button className={view === "journal" ? "active" : ""} aria-pressed={view === "journal"}
-          onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
-      </div>
-      {!account.placeholder && !account.archivedAt && <button type="button"
-        className="link-button register-known-balance-action" onClick={addKnownBalanceForAnotherDate}>
-        Add known balance for another date</button>}
-    </div>
     {knownBalanceFormMode === "manual" && knownBalanceForm}
     {error && <p className="error">{error}</p>}
     {importReviewError && <p className="error" aria-live="assertive">{importReviewError}</p>}
@@ -3085,6 +3090,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     {reconciliationError && <p className="error" aria-live="assertive">{reconciliationError}</p>}
     {loading ? <p className="register-message" aria-live="polite">Loading account transactions…</p>
       : !error && displayedRegisterRows.length === 0 && !showNewTransaction
+        && (account.placeholder || account.archivedAt)
       ? <p className="register-message">{suspenseReviewOpen
         ? "No open suspense questions remain in this account."
         : "No posted transactions or known balances in this account."}</p>
@@ -3096,9 +3102,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           <RegisterSortHeader label="Other account amounts" sortKey="otherAmounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Split account(s)" sortKey="splitAccounts" sort={registerSort} onSort={changeRegisterSort} />
           <RegisterSortHeader label="Running balance" sortKey="runningBalance" sort={registerSort} onSort={changeRegisterSort} />
-          <RegisterSortHeader label="Known balance" sortKey="knownBalance" sort={registerSort} onSort={changeRegisterSort} />
+          <RegisterSortHeader label="Known balance" sortKey="knownBalance" sort={registerSort}
+            onSort={changeRegisterSort} action={!account.placeholder && !account.archivedAt
+              ? <button type="button" className="register-known-balance-header-action"
+                  aria-label="Add known balance for another date" title="Add known balance for another date"
+                  onClick={addKnownBalanceForAnotherDate}>+</button>
+              : null} />
         </tr></thead>
-        <tbody>{!suspenseReviewOpen && newRowsAtTop && newTransactionRows}{displayedRegisterRows.map((row) => {
+        <tbody>{!suspenseReviewOpen && newRowsAtTop && newTransactionRows}
+          {displayedRegisterRows.length === 0 && !showNewTransaction && <tr><td colSpan={7}
+            className="register-empty-row">{suspenseReviewOpen
+              ? "No open suspense questions remain in this account."
+              : "No posted transactions or known balances in this account."}</td></tr>}
+          {displayedRegisterRows.map((row) => {
           if (row.kind === "assertion") {
             const { assertion } = row;
             const projectedDifferenceUnits = (BigInt(assertion.knownBalanceUnits)
@@ -3269,6 +3285,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
                 initialTransaction={selectedTransaction}
                 initialDateEditorOpen={dateEditorOpen}
+                evidenceFiles={entry.evidenceFiles}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
                 onDelete={() => setDeletingTransactionId(entry.transactionId)}
                 onCancel={closeSelectedTransaction} onSaved={(saved) =>
@@ -3310,15 +3327,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   {entry.purchaseEvidence.sourceNames.length
                     ? ` · ${entry.purchaseEvidence.sourceNames.join(" + ")}` : ""}
                 </small>}
-                {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}
-                {entry.evidenceFiles.map((evidence) => <button type="button" className="register-evidence-link"
-                  key={evidence.id} onClick={(event) => {
-                    event.stopPropagation();
-                    void downloadEvidenceFile(evidence.downloadPath
-                      ?? `/api/evidence-files/${evidence.id}/content`, evidence.fileName, token)
-                      .catch((nextError) => setSelectionError(errorMessage(nextError)));
-                  }} onKeyDown={(event) => event.stopPropagation()}>
-                  PDF evidence · {evidence.fileName}</button>)}</td>
+                {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
                 {signedAccountMovement(row.totalAmountUnits, account)}</td>
               <td />
@@ -4052,10 +4061,10 @@ export default function App() {
       onSignOut={logout} /></div></header>
     <main className="workspace">
       <nav className="workspace-nav" aria-label="Accounting views">
-        {currentAccount && <RecentAccountNav currentAccount={currentAccount} recentAccounts={recentAccounts}
-          accounts={accounts} active={workspaceView === "account"} onSelect={selectAccount} />}
         <button className={workspaceView === "chart" ? "active" : ""} aria-pressed={workspaceView === "chart"}
           onClick={() => selectWorkspaceView("chart")}>Chart of accounts</button>
+        {currentAccount && <RecentAccountNav currentAccount={currentAccount} recentAccounts={recentAccounts}
+          accounts={accounts} active={workspaceView === "account"} onSelect={selectAccount} />}
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
         <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
@@ -4080,8 +4089,6 @@ export default function App() {
           ? <AccountRegister account={selectedAccount} accounts={accounts} currencies={currencies}
               entries={accountLedgerEntries} assertions={assertions}
               loading={accountLedgerLoading} error={accountLedgerError} token={token}
-              onShowAll={() => selectWorkspaceView("activity")}
-              onImportStatement={() => selectWorkspaceView("statements")}
               openTransaction={openRegisterTransaction}
               onOpenTransactionHandled={() => setOpenRegisterTransaction(null)}
               onTransactionCreated={refreshAfterTransaction}

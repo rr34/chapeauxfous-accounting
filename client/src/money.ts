@@ -1,6 +1,20 @@
-export function decimalToUnits(value: string, scale: number): string {
-  const match = value.trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+const currencySymbol = "[$¢£¤¥֏؋৲৳৻૱௹฿៛₠-₿꠸﷼﹩＄￠￡￥￦]";
+const decimalWhole = String.raw`(?:\d+|\d{1,3}(?:,\d{3})+)`;
+const amountPattern = new RegExp(
+  String.raw`^(?:([+-]?)${currencySymbol}\s*|${currencySymbol}\s*([+-]?)|([+-]?))(${decimalWhole})(?:\.(\d+))?$`,
+  "u",
+);
+
+export function normalizeDecimalInput(value: string): string {
+  const match = value.trim().match(amountPattern);
   if (!match) throw new Error(`Invalid amount: ${value || "empty"}`);
+  const sign = match[1] || match[2] || match[3] || "";
+  return `${sign}${match[4].replaceAll(",", "")}${match[5] == null ? "" : `.${match[5]}`}`;
+}
+
+export function decimalToUnits(value: string, scale: number): string {
+  const normalized = normalizeDecimalInput(value);
+  const match = normalized.match(/^([+-]?)(\d+)(?:\.(\d+))?$/)!;
   const fractional = match[3] || "";
   if (fractional.length > scale) throw new Error(`Amount exceeds ${scale} decimal places`);
   const magnitude = BigInt(`${match[2]}${fractional.padEnd(scale, "0")}`);

@@ -65,6 +65,10 @@ test("the canonical import schema is exact, source-neutral, and line-oriented", 
   assert.match(transactionImportCanonicalJsonSchema.properties.amount_decimal.description, /Exact signed account-currency quantity/);
   assert.match(transactionImportCanonicalJsonSchema.properties.value_decimal.description,
     /replaces it with the nearest reference-rate valuation/);
+  const amountPattern = new RegExp(transactionImportCanonicalJsonSchema.properties.amount_decimal.pattern, "u");
+  assert.equal(amountPattern.test("$4,734.38"), true);
+  assert.equal(amountPattern.test("€ 4,734.38"), true);
+  assert.equal(amountPattern.test("47,34.38"), false);
   assert.doesNotMatch(JSON.stringify(transactionImportCanonicalJsonSchema), /csv|gnucash/i);
   const [withoutSourceValue] = groupCanonicalTransactionRecords([{
     transaction_external_id: "source-value-omitted", transaction_date: "2026-09-01",

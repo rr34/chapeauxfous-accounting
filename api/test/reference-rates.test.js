@@ -1,10 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createReferenceRates, listReferenceRatesPage } from "../src/reference-rates.js";
+import {
+  createReferenceRates,
+  listReferenceRatesPage,
+  referenceRateCanonicalJsonSchema,
+} from "../src/reference-rates.js";
 
 const rateRow = { xrate_id: 41, ValidAt: "2026-08-18 14:32:00.000", from_units: "100000000",
   from_currency_id: 2, from_currency_code: "BTC", from_scale: 8, to_units: "6123456",
   to_currency_id: 1, to_currency_code: "USD", to_scale: 2 };
+
+test("reference-rate decimal contracts accept grouped values with currency symbols", () => {
+  const pattern = new RegExp(referenceRateCanonicalJsonSchema.properties.to_decimal.pattern, "u");
+  assert.equal(pattern.test("$61,234.56"), true);
+  assert.equal(pattern.test("€ 61,234.56"), true);
+  assert.equal(pattern.test("61,23.56"), false);
+});
 
 test("reference rate listing is owner-scoped and pageable", async () => {
   const pool = { async query(sql, values) {

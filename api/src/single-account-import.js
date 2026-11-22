@@ -4,6 +4,7 @@ import {
   SINGLE_ACCOUNT_IMPORT_MAX_LINE_ITEMS,
   SINGLE_ACCOUNT_IMPORT_MAX_TRANSACTIONS,
 } from "./transaction-import-limits.js";
+import { normalizeDecimalInput, SIGNED_DECIMAL_INPUT_PATTERN } from "./money.js";
 
 function workflowError(message, code, details = undefined, status = 400) {
   return Object.assign(new Error(message), { status, code, details });
@@ -31,10 +32,10 @@ function accountPaths(accounts) {
 
 function decimalText(value, field) {
   const text = String(value ?? "").trim();
-  if (!/^[+-]?\d+(?:\.\d+)?$/.test(text)) {
+  if (!SIGNED_DECIMAL_INPUT_PATTERN.test(text)) {
     throw workflowError(`${field} must be a signed decimal amount.`, "INVALID_STATEMENT_LINE_AMOUNT");
   }
-  return text;
+  return normalizeDecimalInput(text);
 }
 
 function negateDecimal(value, field) {

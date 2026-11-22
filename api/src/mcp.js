@@ -121,7 +121,13 @@ import {
 import { previewSingleAccountStatementImport } from "./single-account-import.js";
 import { reconcileAccountThroughDate } from "./account-reconciliation.js";
 import { normalBalanceSign } from "./account-balances.js";
-import { decimalToUnits, unitsToDecimal } from "./money.js";
+import {
+  decimalToUnits,
+  SIGNED_DECIMAL_INPUT_PATTERN,
+  UNSIGNED_DECIMAL_18_INPUT_PATTERN,
+  UNSIGNED_DECIMAL_INPUT_PATTERN,
+  unitsToDecimal,
+} from "./money.js";
 import { databaseName } from "./db.js";
 import { describeAccountingSchema } from "./schema-description.js";
 import { commitTransactionImportPlan, getTransactionImportPlan, previewTransactionImport } from "./transaction-import.js";
@@ -2266,8 +2272,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, { defaultStatus: "committed", retryTool: "preview_delete_transactions",
     failureMapper: transactionDeletePlanFailure }));
 
-  const decimalAmount = z.string().trim().regex(/^\d+(?:\.\d{1,18})?$/)
-    .describe("Nonnegative decimal magnitude with no more than 18 fractional digits.");
+  const decimalAmount = z.string().trim().regex(UNSIGNED_DECIMAL_18_INPUT_PATTERN)
+    .describe("Nonnegative decimal magnitude with no more than 18 fractional digits; a leading currency symbol and correctly grouped thousands separators are accepted.");
   registerTool("search_transactions", {
     title: "Search transactions",
     description: "Search complete owner-scoped ledger transactions deterministically. text is one case-insensitive substring search across transaction descriptions and source identifiers, line memos and source identifiers, full account paths and descriptions, tags, currencies, and linked import source/error text. Account and counter-account filters include descendants by default; when both are supplied they must match different postings. Amounts are decimal magnitudes of matching account postings: either sign matches by default, tolerance is inclusive around one amount, and minimum/maximum are inclusive. Use amount+tolerance or minimum/maximum, not both. date is exact and cannot be combined with date_from/date_to. has_issues refers only to retained import exception/error evidence actually linked to a ledger transaction. Results contain complete transactions, identify matching fields and postings, and use a filter-bound stable cursor.",
@@ -2715,18 +2721,18 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     }).strict()).min(1).max(20),
     merchant: z.string().trim().max(1024).nullable(),
     purchase_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
-    charge_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
-    tax_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+    charge_amount_decimal: z.string().trim().max(128).regex(UNSIGNED_DECIMAL_INPUT_PATTERN),
+    tax_amount_decimal: z.string().trim().max(128).regex(UNSIGNED_DECIMAL_INPUT_PATTERN),
     adjustments: z.array(z.object({
       kind: z.enum(["discount", "shipping", "handling", "fee", "tip", "other"]),
       description: z.string().trim().min(1).max(1024),
-      amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
+      amount_decimal: z.string().trim().max(128).regex(SIGNED_DECIMAL_INPUT_PATTERN),
     }).strict()).max(100),
     items: z.array(z.object({
       source_item_id: z.string().trim().max(255).nullable(),
       description: z.string().trim().min(1).max(16000),
-      quantity_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/).nullable(),
-      pre_tax_amount_decimal: z.string().trim().max(128).regex(/^\d+(?:\.\d+)?$/),
+      quantity_decimal: z.string().trim().max(128).regex(UNSIGNED_DECIMAL_INPUT_PATTERN).nullable(),
+      pre_tax_amount_decimal: z.string().trim().max(128).regex(UNSIGNED_DECIMAL_INPUT_PATTERN),
     }).strict()).min(1).max(500),
   }).strict();
 
@@ -3213,14 +3219,14 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }).strict().superRefine(validateDetermination);
   const statementStartDateAnswerSchema = statementDateAnswerSchema;
   const statementAmountAnswerSchema = z.object({
-    found: z.boolean(), value: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).nullable(),
+    found: z.boolean(), value: z.string().trim().regex(SIGNED_DECIMAL_INPUT_PATTERN).nullable(),
     available_text: z.string().trim().max(16000).nullable().optional(),
   }).strict().superRefine(validateDetermination);
   const oneSidedStatementLineSchema = z.object({
     source_record_id: z.string().trim().min(1).max(96)
       .describe("Stable row identifier within this statement; reuse it when the same attachment is processed again."),
     transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
+    amount_decimal: z.string().trim().regex(SIGNED_DECIMAL_INPUT_PATTERN)
       .describe("Signed change to the displayed statement balance: positive increases it, negative decreases it, and zero retains an informational statement line without changing the balance."),
     available_text: z.string().trim().max(16000).nullable()
       .describe("All useful transaction text copied from the document, or null when the row has none."),
@@ -3638,8 +3644,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     valuation_currency_code: z.string().trim().min(1).max(50),
     fee_account_full_name: z.string().trim().min(1).max(4096).nullable().optional(),
     account_full_name: z.string().trim().min(1).max(4096),
-    amount_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/),
-    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional(),
+    amount_decimal: z.string().trim().max(128).regex(SIGNED_DECIMAL_INPUT_PATTERN),
+    value_decimal: z.string().trim().max(128).regex(SIGNED_DECIMAL_INPUT_PATTERN).nullable().optional(),
     memo: z.string().max(16000).nullable().optional(),
     question_audience: z.string().trim().min(1).max(50).nullable().optional(),
     question_prompt: z.string().trim().min(1).max(16000).nullable().optional(),
@@ -3979,9 +3985,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .describe("Optional stable line identifier within the source transaction; this is source-neutral."),
     account_full_name: z.string().trim().min(1).max(4096)
       .describe("Exact colon-delimited path of an existing account."),
-    amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/)
+    amount_decimal: z.string().trim().regex(SIGNED_DECIMAL_INPUT_PATTERN)
       .describe("Signed decimal amount in the matched account's native currency. The server converts it using that currency's established scale."),
-    value_decimal: z.string().trim().max(128).regex(/^[+-]?\d+(?:\.\d+)?$/).nullable().optional()
+    value_decimal: z.string().trim().max(128).regex(SIGNED_DECIMAL_INPUT_PATTERN).nullable().optional()
       .describe("Optional source value in the transaction valuation currency. Accounting replaces it with the nearest reference-rate valuation for a foreign line when a rate exists; supply it as fallback when no rate exists. Native-currency lines use their exact amount."),
     memo: z.string().trim().max(16000).nullable().optional(),
     question: accountingQuestionInputSchema.optional()
@@ -4224,7 +4230,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         occurred_at: z.string().datetime({ offset: false }).nullable().optional()
           .describe("Exact UTC timestamp when visible; null when the source shows only a date."),
-        amount_decimal: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/).max(128)
+        amount_decimal: z.string().trim().regex(SIGNED_DECIMAL_INPUT_PATTERN).max(128)
           .describe("Actual signed native-currency amount visible in the source: into an asset is positive and out is negative."),
         description: z.string().max(16000).nullable().optional(),
         reference: z.string().trim().min(1).max(128).nullable().optional()
@@ -4309,9 +4315,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     valid_at: z.string().describe("UTC ISO timestamp ending in Z, or YYYY-MM-DD for midnight UTC."),
     from_currency_id: positiveInteger("Source currency or asset."),
     to_currency_id: positiveInteger("Target valuation currency."),
-    from_decimal: z.string().max(256).regex(/^\d+(?:\.\d+)?$/)
+    from_decimal: z.string().max(256).regex(UNSIGNED_DECIMAL_INPUT_PATTERN)
       .describe("Positive source quantity in displayed currency units; usually 1 for a daily price."),
-    to_decimal: z.string().max(256).regex(/^\d+(?:\.\d+)?$/)
+    to_decimal: z.string().max(256).regex(UNSIGNED_DECIMAL_INPUT_PATTERN)
       .describe("Positive target quantity in displayed currency units; for BTC/USD, the USD price of the source quantity."),
     source_record_number: z.number().int().positive().optional()
       .describe("Original one-based source data row number, when this rate came from a file."),

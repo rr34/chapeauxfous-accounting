@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { withPoolTransaction } from "./db.js";
 import { attachTags, validateTransaction } from "./accounting.js";
 import { accountingQuestionTagKeys, accountingQuestionTags } from "./accounting-questions.js";
-import { decimalToUnits, unitsToDecimal } from "./money.js";
+import {
+  decimalToUnits,
+  SIGNED_DECIMAL_INPUT_PATTERN_SOURCE,
+  UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE,
+  unitsToDecimal,
+} from "./money.js";
 
 export const PURCHASE_EVIDENCE_SCHEMA_URI = "accounting://schemas/purchase-evidence-record/v2";
 export const PURCHASE_EVIDENCE_MAX_TARGETS = 500;
@@ -30,16 +35,16 @@ export const purchaseEvidenceCanonicalJsonSchema = Object.freeze({
       } } },
     merchant: { type: ["string", "null"], maxLength: 1024 },
     purchase_date: { type: ["string", "null"], pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-    charge_amount_decimal: { type: "string", pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 128,
+    charge_amount_decimal: { type: "string", pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128,
       description: "Positive final charge magnitude; it must exactly equal the selected suspense posting magnitude." },
-    tax_amount_decimal: { type: "string", pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 128,
+    tax_amount_decimal: { type: "string", pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128,
       description: "Receipt-level sales tax. Accounting allocates it proportionally and preserves it separately." },
     adjustments: { type: "array", maxItems: 100, items: { type: "object",
       additionalProperties: false, required: ["kind", "description", "amount_decimal"],
       properties: {
         kind: { enum: ["discount", "shipping", "handling", "fee", "tip", "other"] },
         description: { type: "string", minLength: 1, maxLength: 1024 },
-        amount_decimal: { type: "string", pattern: "^[+-]?\\d+(?:\\.\\d+)?$", maxLength: 128,
+        amount_decimal: { type: "string", pattern: SIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128,
           description: "Signed receipt adjustment. Discounts are negative; added costs are positive." },
       } } },
     items: { type: "array", minItems: 1, maxItems: 500, items: { type: "object",
@@ -47,8 +52,8 @@ export const purchaseEvidenceCanonicalJsonSchema = Object.freeze({
       properties: {
         source_item_id: { type: ["string", "null"], maxLength: 255 },
         description: { type: "string", minLength: 1, maxLength: 16000 },
-        quantity_decimal: { type: ["string", "null"], pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 128 },
-        pre_tax_amount_decimal: { type: "string", pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 128 },
+        quantity_decimal: { type: ["string", "null"], pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128 },
+        pre_tax_amount_decimal: { type: "string", pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE, maxLength: 128 },
       } } },
   },
 });

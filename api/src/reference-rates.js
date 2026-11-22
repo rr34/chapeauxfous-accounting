@@ -1,5 +1,10 @@
 import { readCompleteArtifact } from "./artifact-upload.js";
-import { decimalToUnits } from "./money.js";
+import {
+  decimalToUnits,
+  normalizeDecimalInput,
+  UNSIGNED_DECIMAL_INPUT_PATTERN,
+  UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE,
+} from "./money.js";
 
 const signedBigIntMaximum = (2n ** 63n) - 1n;
 export const REFERENCE_RATE_BATCH_MAX = 10000;
@@ -12,8 +17,8 @@ export const referenceRateCanonicalJsonSchema = Object.freeze({
     valid_at: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z)?$" },
     from_currency_id: { type: "integer", minimum: 1 },
     to_currency_id: { type: "integer", minimum: 1 },
-    from_decimal: { type: "string", maxLength: 256, pattern: "^\\d+(?:\\.\\d+)?$" },
-    to_decimal: { type: "string", maxLength: 256, pattern: "^\\d+(?:\\.\\d+)?$" },
+    from_decimal: { type: "string", maxLength: 256, pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE },
+    to_decimal: { type: "string", maxLength: 256, pattern: UNSIGNED_DECIMAL_INPUT_PATTERN_SOURCE },
     source_record_number: { type: "integer", minimum: 1 },
   },
 });
@@ -46,11 +51,16 @@ function utcTimestamp(value, field = "valid_at") {
 }
 
 function positiveDecimal(value, field, index) {
-  if (typeof value !== "string" || value.length > 256 || !/^\d+(?:\.\d+)?$/.test(value)
-    || BigInt(value.replace(".", "")) === 0n) throw applicationError(
+  if (typeof value !== "string" || value.length > 256 || !UNSIGNED_DECIMAL_INPUT_PATTERN.test(value)) {
+    throw applicationError(
+      `${field} must be a bounded positive decimal string.`, 400,
+      "INVALID_REFERENCE_RATE_AMOUNT", { index, field });
+  }
+  const normalized = normalizeDecimalInput(value);
+  if (BigInt(normalized.replace(".", "")) === 0n) throw applicationError(
     `${field} must be a bounded positive decimal string.`, 400,
     "INVALID_REFERENCE_RATE_AMOUNT", { index, field });
-  return value;
+  return normalized;
 }
 
 function nativeUnitRatio(fromDecimal, toDecimal, fromScale, toScale, index) {
