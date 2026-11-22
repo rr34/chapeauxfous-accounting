@@ -1249,7 +1249,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   };
   const singleAccountStatementGuideOutput = successOutputSchema(singleAccountStatementGuideShape);
   const evidenceMediaTypeSchema = z.enum([
-    "application/pdf", "text/plain", "image/png", "image/jpeg", "image/webp",
+    "application/pdf", "text/plain", "text/csv", "image/png", "image/jpeg", "image/webp",
   ]);
   const evidenceFileObjectSchema = z.object({
     objectType: z.literal("accounting.evidence_file"), id: z.number().int().positive(),
@@ -2965,7 +2965,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       .map((item) => [item.accountId, item.fullName]));
     const designated = accounts.find((candidate) => candidate.suspense && candidate.currencyId === account.currencyId
       && !candidate.placeholder && candidate.archivedAt == null);
-    const isText = mediaType === "text/plain";
+    const isText = mediaType === "text/plain" || mediaType === "text/csv";
     const isPdf = mediaType === "application/pdf";
     const sourceLabel = isText ? "complete saved text evidence"
       : isPdf ? "complete original PDF" : "complete original image";
@@ -3016,7 +3016,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         isPdf
           ? "Give the document-capable model the original PDF as an input_file with high detail so it receives extracted text and page images for the entire document."
           : isText
-            ? "Read every saved-text chunk through the textAccess tool until complete; do not require a PDF or search native Files merely because this is a statement workflow."
+            ? "Use the authenticated whole-file download as the original provider evidence. Materialize it as a source-qualified native file when deterministic file tools are available; use textAccess paging only as a bounded compatibility fallback."
             : "Give the vision-capable model the original image as a high-detail image input. Do not rely on filename or metadata as a substitute for inspecting the pixels.",
         "Use only evidence visible in this one statement.",
         "Interpret source signs in the context of the bound account type and the returned signConvention. Do not treat every purchase as negative generic spending.",
@@ -3098,7 +3098,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("read_one_account_import_evidence_text", {
     title: "Read one-account text evidence",
-    description: "Read one integrity-verified, owner-scoped chunk of saved UTF-8 one-account evidence after a statement or transaction-list start result supplies textAccess. Begin at offset 0 and continue with each returned nextOffset until complete is true. This is the authoritative text source; do not search the native Files capability for Accounting-owned evidence. The tool is read-only and creates no preview.",
+    description: "Compatibility fallback for reading one integrity-verified, owner-scoped chunk of saved UTF-8 one-account evidence after a start result supplies textAccess. Prefer the same result's complete authenticated download and a source-qualified native file when deterministic file tools are available, especially for CSV or large text. If fallback paging is necessary, begin at offset 0 and continue through every nextOffset until complete. The tool is read-only and creates no preview.",
     inputSchema: {
       statement_import_job_id: z.string().trim().uuid(),
       offset: z.number().int().nonnegative().default(0),
@@ -3118,7 +3118,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("start_statement_import_job", {
     title: "Start statement import job",
-    description: "Atomically start one ready statement job in the owner's serial workflow and return the exact original-evidence access contract plus the current extraction requirements. Evidence may be a PDF, image, or saved text. Retrieve and process the complete source directly; do not substitute filename or server metadata for document inspection. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
+    description: "Atomically start one ready statement job in the owner's serial workflow and return the complete immutable original-evidence download contract plus the current extraction requirements. Evidence may be PDF, image, TXT, or CSV. PDF/images become high-detail model inputs; TXT/CSV should become one source-qualified native file for deterministic processing, with bounded textAccess retained only as fallback. Retrieve and process the complete source directly; do not substitute filename or server metadata for inspection. An exact replay of the same processing job is safe. This does not create a preview or post ledger data.",
     inputSchema: { statement_import_job_id: z.string().trim().uuid() },
     outputSchema: statementImportJobStartOutput,
     annotations: idempotentWrite,
@@ -3129,8 +3129,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, async ({ statement_import_job_id }) => safeToolResult(async () => {
     const { job, transitioned } = await accounting.startStatementImportJob({ pool, personId,
       statementImportJobId: statement_import_job_id });
-    const isText = job.evidenceFile.mediaType === "text/plain";
-    return { job: statementJobMetadata(job), download: isText ? null : job.download,
+    const isText = job.evidenceFile.mediaType === "text/plain" || job.evidenceFile.mediaType === "text/csv";
+    return { job: statementJobMetadata(job), download: job.download,
       textAccess: isText ? {
         nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
         evidenceFileId: job.evidenceFile.id, fileName: job.evidenceFile.fileName,
@@ -3146,7 +3146,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
 
   registerTool("start_transaction_list_import_job", {
     title: "Start transaction-list import job",
-    description: "Start or idempotently continue one saved transaction-list job from PDF, image, or text evidence. Return the complete immutable evidence and canonical one-account movement schema. Extract only supported dated movements for the already-bound account. Evidence may be noisy: discard irrelevant headings, categories, formatting, navigation, summaries, and unrelated text; retain useful merchant or transaction text when available. This does not create a preview or post ledger data.",
+    description: "Start or idempotently continue one saved transaction-list job from PDF, image, TXT, or CSV evidence. Return the authenticated complete-original download and canonical one-account movement schema. For TXT/CSV, preserve the Accounting evidence identity while materializing one native file for deterministic inspection and transformation; never reuse its evidence ID as a files.file ID. Extract only supported dated movements for the already-bound account. Evidence may be noisy: discard irrelevant headings, categories, formatting, navigation, summaries, and unrelated text; retain useful merchant or transaction text when available. This does not create a preview or post ledger data.",
     inputSchema: { statement_import_job_id: z.string().trim().uuid() },
     outputSchema: transactionListImportJobStartOutput,
     annotations: idempotentWrite,
@@ -3160,9 +3160,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       statementImportJobId: statement_import_job_id });
     return {
       job: statementJobMetadata(job),
-      download: job.evidenceFile.mediaType !== "text/plain"
-        ? { ...job.download, transportId: "transaction_list_evidence_download" } : null,
-      textAccess: job.evidenceFile.mediaType === "text/plain" ? {
+      download: { ...job.download, transportId: "transaction_list_evidence_download" },
+      textAccess: ["text/plain", "text/csv"].includes(job.evidenceFile.mediaType) ? {
         nextTool: "read_one_account_import_evidence_text", statementImportJobId: job.id,
         evidenceFileId: job.evidenceFile.id, fileName: job.evidenceFile.fileName,
         sha256: job.evidenceFile.sha256,
@@ -3174,8 +3173,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         signConvention: accountSignConvention(job.account),
         nextTool: "submit_transaction_list_import_job_artifact",
         rules: [
-          job.evidenceFile.mediaType === "text/plain"
-            ? "Call read_one_account_import_evidence_text from offset 0 through every returned nextOffset until complete is true. Do not search native Files for this Accounting-owned evidence."
+          ["text/plain", "text/csv"].includes(job.evidenceFile.mediaType)
+            ? "Use the complete authenticated original file in download. Preserve its accounting.evidence_file source identity when materializing a native file for deterministic inspection and transformation. Use textAccess only when the host cannot bridge provider evidence to native file tooling; do not manually page a large table through model context."
             : job.evidenceFile.mediaType === "application/pdf"
               ? "Process the complete authenticated PDF supplied in download; do not omit pages."
               : "Process the complete authenticated image supplied in download as a high-detail vision input; inspect every visible region.",

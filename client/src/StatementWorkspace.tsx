@@ -112,17 +112,11 @@ export default function StatementWorkspace({ accounts, assertions, token, initia
       const isText = ["text/plain", "text/csv", "application/csv"].includes(sourceFile.type)
         || lowerName.endsWith(".txt") || lowerName.endsWith(".csv");
       if (!isBinaryEvidence && !isText) throw new Error("Choose a PDF, PNG, JPEG, WebP, TXT, or CSV file.");
-      const result = isBinaryEvidence
-        ? await uploadEvidenceFile<{ job: StatementImportJob }>(account.id, sourceFile, token)
-        : await api<{ job: StatementImportJob }>(
-          `/accounts/${account.id}/transaction-list-import-jobs`, {
-            method: "POST", body: JSON.stringify({ fileName: sourceFile.name, text: await sourceFile.text() }),
-          }, token,
-        );
+      const result = await uploadEvidenceFile<{ job: StatementImportJob }>(account.id, sourceFile, token);
       setStatementJobs((current) => [result.job, ...current]);
       setSourceFile(null);
       if (sourceFileInput.current) sourceFileInput.current.value = "";
-      setNotice(`${isBinaryEvidence ? "The original file" : "The uploaded text"} evidence is saved in Accounting. Nothing has been posted.`);
+      setNotice("The original file evidence is saved in Accounting. Nothing has been posted.");
     } catch (nextError) { setError(message(nextError)); }
     finally { setBusy(""); }
   }

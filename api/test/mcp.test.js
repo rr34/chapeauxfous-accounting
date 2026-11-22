@@ -651,7 +651,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.equal(tools.tools.some((tool) => tool.name === "start_statement_import_job"), true);
   const transactionListStartContract = tools.tools.find((tool) =>
     tool.name === "start_transaction_list_import_job");
-  for (const mediaType of ["image/png", "image/jpeg", "image/webp"]) {
+  for (const mediaType of ["image/png", "image/jpeg", "image/webp", "text/plain", "text/csv"]) {
     assert.match(JSON.stringify(transactionListStartContract.outputSchema), new RegExp(mediaType));
   }
   assert.equal(tools.tools.some((tool) => tool.name === "submit_statement_import_job_artifact"), true);
@@ -828,7 +828,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   }
   const transactionCapability = manifest.capabilities.find((capability) => capability.id === "accounting.transactions");
   assert.match(manifest.server.instructions,
-    /workflow independently of file format.*start_statement_import_job.*start_transaction_list_import_job.*PDF, image, or saved text evidence/s);
+    /workflow independently of file format.*start_statement_import_job.*start_transaction_list_import_job.*PDF, image, TXT, or CSV evidence/s);
+  assert.match(manifest.server.instructions,
+    /Materialize TXT\/CSV as a provider-derived native file.*accounting\.evidence_file.*Never confuse the provider evidence ID with a native files\.file ID/s);
   assert.match(transactionCapability.guidance,
     /Route every file listing movements for one named account through accounting\.reconciliation/);
   assert.match(referenceRateCapability.guidance,
@@ -851,7 +853,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.match(tools.tools.find((tool) => tool.name === "get_statement_import_job").description,
     /Do not select this tool in the normal initial processing path.*returns no evidence download descriptor/s);
   assert.match(tools.tools.find((tool) => tool.name === "start_statement_import_job").description,
-    /return the exact original-evidence access contract.*PDF, image, or saved text.*exact replay.*safe/s);
+    /complete immutable original-evidence download contract.*PDF, image, TXT, or CSV.*source-qualified native file.*exact replay.*safe/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement").description,
     /Present nextAction\.instruction.*do not replace it with internal line-item or include\/exclude counts.*do not enumerate every row/s);
   assert.match(tools.tools.find((tool) => tool.name === "import_single_account_statement_artifact").description,
@@ -1244,7 +1246,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
       statement_import_job_id: "728c67d8-37b6-4ef0-9c5a-16150fb1f1b3",
     },
   });
-  assert.equal(startedTransactionListJob.structuredContent.download, null);
+  assert.equal(startedTransactionListJob.structuredContent.download.mediaType, "text/plain");
+  assert.equal(startedTransactionListJob.structuredContent.download.transportId,
+    "transaction_list_evidence_download");
   assert.equal(startedTransactionListJob.structuredContent.textAccess.nextTool,
     "read_one_account_import_evidence_text");
   assert.equal(startedTransactionListJob.structuredContent.job.account.type, "asset");
@@ -1615,7 +1619,7 @@ test("the HTTP MCP handler advertises modern tool-list refresh support", async (
   const discovery = await response.json();
   assert.deepEqual(discovery.result.supportedVersions, [protocolVersion]);
   assert.equal(discovery.result.capabilities.tools.listChanged, true);
-  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.18.0");
+  assert.equal(discovery.result._meta["io.modelcontextprotocol/serverInfo"].version, "0.19.0");
 
   await handler.close();
 });

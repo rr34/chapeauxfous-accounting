@@ -8,7 +8,7 @@ import { withPoolTransaction } from "./db.js";
 export const STATEMENT_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024;
 export const STATEMENT_EVIDENCE_MEDIA_TYPE = "application/pdf";
 export const STATEMENT_EVIDENCE_MEDIA_TYPES = Object.freeze([
-  STATEMENT_EVIDENCE_MEDIA_TYPE, "image/png", "image/jpeg", "image/webp",
+  STATEMENT_EVIDENCE_MEDIA_TYPE, "image/png", "image/jpeg", "image/webp", "text/plain", "text/csv",
 ]);
 export const TRANSACTION_LIST_EVIDENCE_MAX_BYTES = 2 * 1024 * 1024;
 export const TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE = "text/plain";
@@ -53,7 +53,7 @@ function safeFileName(value, label = "evidence filename") {
   return normalized;
 }
 
-function binaryEvidenceBytes(value, mediaType) {
+function evidenceBytes(value, mediaType) {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
   if (bytes.length < 1 || bytes.length > STATEMENT_EVIDENCE_MAX_BYTES) {
     throw statementError(`The evidence file must contain 1 through ${STATEMENT_EVIDENCE_MAX_BYTES} bytes.`,
@@ -68,16 +68,21 @@ function binaryEvidenceBytes(value, mediaType) {
         : mediaType === "image/webp"
           ? bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF"
             && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+          : mediaType === "text/plain" || mediaType === "text/csv"
+            ? (() => {
+              try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); return true; } catch { return false; }
+            })()
           : false;
   if (!recognized) {
-    throw statementError("The uploaded bytes do not match the declared PDF or image format.",
+    throw statementError("The uploaded bytes do not match the declared PDF, image, or UTF-8 text format.",
       "INVALID_STATEMENT_EVIDENCE_CONTENT", { mediaType }, 415);
   }
   return bytes;
 }
 
 function evidenceExtension(mediaType) {
-  return { "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" }[mediaType];
+  return { "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+    "text/plain": "txt", "text/csv": "csv" }[mediaType];
 }
 
 export function resolveEvidenceRoot(value = process.env.ACCOUNTING_EVIDENCE_ROOT) {
@@ -152,8 +157,8 @@ function accountDisplayName(row) {
 }
 
 function copiedPrompt(id, mediaType) {
-  const source = mediaType === TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE
-    ? "complete saved text evidence"
+  const source = mediaType === "text/plain" || mediaType === "text/csv"
+    ? "complete original text file"
     : mediaType === STATEMENT_EVIDENCE_MEDIA_TYPE ? "complete original PDF" : "complete original image";
   return [
     "Process my pending Accounting statement import:",
@@ -258,10 +263,10 @@ export async function createStatementImportFromFile({
   const name = safeFileName(fileName);
   const normalizedMediaType = String(mediaType ?? "").split(";", 1)[0].trim().toLowerCase();
   if (!STATEMENT_EVIDENCE_MEDIA_TYPES.includes(normalizedMediaType)) {
-    throw statementError("Evidence upload accepts PDF, PNG, JPEG, or WebP.",
+    throw statementError("Evidence upload accepts PDF, PNG, JPEG, WebP, UTF-8 TXT, or UTF-8 CSV.",
       "UNSUPPORTED_STATEMENT_MEDIA_TYPE", { acceptedMediaTypes: STATEMENT_EVIDENCE_MEDIA_TYPES }, 415);
   }
-  const content = binaryEvidenceBytes(bytes, normalizedMediaType);
+  const content = evidenceBytes(bytes, normalizedMediaType);
   const digest = createHash("sha256").update(content).digest("hex");
   const storageKey = await persistEvidenceBytes({ evidenceRoot, personId: owner, digest, bytes: content,
     extension: evidenceExtension(normalizedMediaType) });
@@ -631,7 +636,7 @@ export async function readOneAccountImportEvidenceText({
   pool, evidenceRoot, personId, statementImportJobId, offset = 0, maxCharacters = 20000,
 }) {
   const job = await getStatementImportJob({ pool, personId, statementImportJobId });
-  if (job.evidenceFile.mediaType !== TRANSACTION_LIST_EVIDENCE_MEDIA_TYPE) {
+  if (!["text/plain", "text/csv"].includes(job.evidenceFile.mediaType)) {
     throw statementError("This evidence is not saved text. Use its authenticated PDF download descriptor instead.",
       "TEXT_EVIDENCE_REQUIRED", { mediaType: job.evidenceFile.mediaType }, 409);
   }

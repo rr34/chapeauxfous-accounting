@@ -3250,13 +3250,13 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           </span>;
           const knownBalanceAction = (showAddKnownBalance || reconciliationIndicator) && <div
             className="register-known-balance-cell">
-            {reconciliationIndicator}
             {showAddKnownBalance && <button type="button"
               className="known-balance-add" aria-label={`Add known balance for ${entry.date}`}
               aria-expanded={knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date}
               aria-controls="known-balance-form" title={`Add known balance for ${formatRegisterDate(entry.date)}`}
               onClick={(event) => { event.stopPropagation(); addKnownBalance(entry.date); }}
               onKeyDown={(event) => event.stopPropagation()}>+</button>}
+            {reconciliationIndicator}
           </div>;
           const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;

@@ -228,6 +228,39 @@ test("plain copied transaction evidence creates a transaction-list handoff witho
   assert.equal(response.body.toString("utf8"), text);
 });
 
+test("an uploaded CSV remains one complete original file with CSV media type", async (t) => {
+  const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }));
+  const pool = statementPool();
+  const bytes = Buffer.from("Date,Description,Amount\n2026-11-10,Home Depot,75.00\n", "utf8");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+
+  const created = await createStatementImportFromFile({
+    pool, evidenceRoot, personId: 7, accountId: 34,
+    fileName: "transactions.csv", mediaType: "text/csv", bytes,
+  });
+  assert.equal(created.evidenceFile.mediaType, "text/csv");
+  assert.equal(created.download.mediaType, "text/csv");
+  assert.equal(created.download.byteSize, bytes.length);
+  assert.equal(created.download.sha256, `sha256:${digest}`);
+  assert.deepEqual(await readFile(path.join(evidenceRoot, `owner-7/sha256/${digest}.csv`)), bytes);
+
+  const started = await startTransactionListImportJob({ pool, personId: 7,
+    statementImportJobId: created.id });
+  assert.equal(started.job.evidenceFile.mediaType, "text/csv");
+  const text = await readOneAccountImportEvidenceText({ pool, evidenceRoot, personId: 7,
+    statementImportJobId: created.id, offset: 0, maxCharacters: 1000 });
+  assert.equal(text.text, bytes.toString("utf8"));
+
+  const response = new TestResponse();
+  const finished = new Promise((resolve, reject) => response.once("finish", resolve).once("error", reject));
+  await sendEvidenceFileContent({ pool, evidenceRoot, personId: 7,
+    evidenceFileId: created.evidenceFile.id, response });
+  await finished;
+  assert.equal(response.headers.get("content-type"), "text/csv");
+  assert.deepEqual(response.body, bytes);
+});
+
 test("a single image is retained and served as original one-account evidence", async (t) => {
   const evidenceRoot = await mkdtemp(path.join(os.tmpdir(), "accounting-evidence-"));
   t.after(() => rm(evidenceRoot, { recursive: true, force: true }));

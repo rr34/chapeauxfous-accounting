@@ -42,7 +42,9 @@ export async function uploadEvidenceFile<T>(accountId: number, file: File, token
   const mediaType = file.type || (lowerName.endsWith(".pdf") ? "application/pdf"
     : lowerName.endsWith(".png") ? "image/png"
       : lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") ? "image/jpeg"
-        : lowerName.endsWith(".webp") ? "image/webp" : "application/octet-stream");
+        : lowerName.endsWith(".webp") ? "image/webp"
+          : lowerName.endsWith(".csv") ? "text/csv"
+            : lowerName.endsWith(".txt") ? "text/plain" : "application/octet-stream");
   const response = await fetch(`${apiBase}/accounts/${accountId}/statement-import-jobs`, {
     method: "POST",
     headers: {
