@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
+import InvoiceEditor, { InvoiceDialog, blankInvoiceLine, invoiceCurrencyScale as scale,
+  type InvoiceDraftFields, type PaymentMethods } from "./InvoiceEditor";
 
-type StripeConnection = { configured: boolean; stripeAccountId: string | null };
-type PaymentMethods = "ach_only" | "card_only" | "card_and_ach";
+type StripeConnection = { configured: boolean; stripeAccountId: string | null;
+  webhookConfigured?: boolean; missingConnectSettings?: string[] };
 type InvoiceLine = { id: string; description: string; amountMinor: number; todoRef: string | null; receiptRef: string | null };
 type Invoice = {
   id: string; revision: string; displayName: string; status: string; payerName: string | null;
@@ -13,10 +15,7 @@ type Invoice = {
   hostedInvoiceUrl: string | null; stripePdfUrl: string | null; adoptedAt: string | null;
   sentAt: string | null; lines?: InvoiceLine[];
 };
-type Draft = {
-  invoice: Invoice | null; payer: string; email: string; description: string; currency: string; due: string;
-  methods: PaymentMethods; lines: Array<{ key: string; description: string; amount: string; todoRef?: string | null; receiptRef?: string | null }>;
-};
+type Draft = InvoiceDraftFields & { invoice: Invoice | null };
 type Page = { objects: Invoice[]; nextCursor: string | null };
 type Confirmation = { instruction: string; onApproval: { arguments: { send_token: string } } };
 
@@ -24,9 +23,10 @@ const browserKeyName = "accounting-stripe-browser-key";
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "The request failed.";
 const json = (body: unknown, method = "POST") => ({ method, body: JSON.stringify(body) });
 const formatter = (currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency });
-const scale = (currency: string) => formatter(currency).resolvedOptions().maximumFractionDigits ?? 2;
 const money = (amount: number, currency: string) => formatter(currency).format(amount / 10 ** scale(currency));
-const blankLine = () => ({ key: crypto.randomUUID(), description: "", amount: "" });
+const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[character] ?? character));
 const statusLabel = (status: string) => ({
   draft: "Draft", sending: "Sending", open: "Awaiting payment", paid: "Paid", void: "Void", uncollectible: "Uncollectible",
 }[status] ?? status);
@@ -34,12 +34,32 @@ const statusLabel = (status: string) => ({
 function invoiceDraft(invoice: Invoice | null = null): Draft {
   return {
     invoice, payer: invoice?.payerName ?? "", email: invoice?.payerEmail ?? "", description: invoice?.description ?? "",
-    currency: invoice?.currency ?? "", due: invoice?.dueOn ?? "", methods: invoice?.paymentMethods ?? "card_only",
+    currency: invoice?.currency ?? "USD", due: invoice?.dueOn ?? "", methods: invoice?.paymentMethods ?? "ach_only",
     lines: invoice?.lines?.map((line) => ({
       key: line.id, description: line.description, amount: unitsToDecimal(String(line.amountMinor), scale(invoice.currency)),
       todoRef: line.todoRef, receiptRef: line.receiptRef,
-    })) ?? [blankLine()],
+    })) ?? [blankInvoiceLine()],
   };
+}
+
+function previewInvoice(invoice: Invoice) {
+  const lines = (invoice.lines ?? []).map((line) => `<tr><td>${escapeHtml(line.description)}</td>
+    <td>${escapeHtml(money(line.amountMinor, invoice.currency))}</td></tr>`).join("");
+  const preview = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Invoice preview</title>
+    <style>body{font:16px system-ui;max-width:48rem;margin:3rem auto;padding:0 1rem}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.6rem;border-bottom:1px solid #ccc}
+    th:last-child,td:last-child{text-align:right}td:first-child{white-space:pre-wrap}
+    @media print{button{display:none}body{margin:0}}</style>
+    <h1>Invoice${invoice.status === "draft" ? " draft" : ""}</h1>
+    <p>${escapeHtml(invoice.payerName ?? "")}<br>${escapeHtml(invoice.payerEmail ?? "")}</p>
+    <p>Due ${escapeHtml(invoice.dueOn ?? "date not set")}</p>
+    <p>${escapeHtml(invoice.description ?? "")}</p>
+    <table><thead><tr><th>Description</th><th>Amount</th></tr></thead><tbody>${lines}</tbody>
+    <tfoot><tr><th>Total</th><th>${escapeHtml(money(invoice.amountMinor, invoice.currency))}</th></tr></tfoot></table>
+    <p><button type="button" onclick="print()">Print / Save as PDF</button></p></html>`;
+  const url = URL.createObjectURL(new Blob([preview], { type: "text/html" }));
+  window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 async function finishStripeReturn(token: string) {
@@ -140,10 +160,12 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
         payer_name: value.payer.trim() || null, payer_email: value.email.trim() || null,
         description: value.description.trim() || null, currency: value.currency, due_on: value.due || null,
         payment_methods: value.methods, revision: value.invoice?.revision,
-        lines: value.lines.map((line) => ({
-          description: line.description, amount_minor: Number(decimalToUnits(line.amount || "0", digits)),
-          todo_ref: line.todoRef, receipt_ref: line.receiptRef,
-        })),
+        lines: value.lines.filter((line, index) => index < (value.invoice?.lines?.length ?? 0)
+          || line.description.trim() || line.amount.trim() || line.todoRef?.trim() || line.receiptRef?.trim())
+          .map((line) => ({
+            description: line.description, amount_minor: Number(decimalToUnits(line.amount.trim() || "0", digits)),
+            todo_ref: line.todoRef?.trim() || null, receipt_ref: line.receiptRef?.trim() || null,
+          })),
       };
       const path = value.invoice ? `/invoices/${value.invoice.id}` : "/invoices";
       const { invoice } = await api<{ invoice: Invoice }>(path, json(payload, value.invoice ? "PATCH" : "POST"), token);
@@ -157,9 +179,10 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
       disabled={disabled} onClick={() => { setDraft(invoiceDraft()); setSelected(null); }}>New invoice</button></div>
     <div className="invoice-actions">
       {connection?.stripeAccountId ? <span>Stripe connected · {connection.stripeAccountId}</span>
-        : connection?.configured ? <button className="primary" type="button" disabled={disabled}
+        : connection && (connection.configured || connection.missingConnectSettings?.length === 0)
+          ? <button className="primary" type="button" disabled={disabled}
             onClick={() => void run(connectStripe)}>Connect Stripe</button>
-          : connection ? <span>Stripe needs server configuration.</span> : null}
+          : null}
       {connection?.stripeAccountId && <form className="invoice-inline-form" onSubmit={(event) => {
         event.preventDefault();
         void run(async () => {
@@ -174,55 +197,35 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
         <button className="secondary" disabled={disabled}>Import invoice</button>
       </form>}
     </div>
+    {connection && (!connection.configured || !connection.stripeAccountId) && <details className="invoice-setup"
+      open={Boolean(connection.missingConnectSettings?.length)}>
+      <summary>Stripe setup</summary>
+      <p>Use the existing live Stripe Connect platform and choose the connected account that owns your invoices.</p>
+      {!!connection.missingConnectSettings?.length &&
+        <p>Set these in Accounting’s server environment: <code>{connection.missingConnectSettings.join(", ")}</code>.</p>}
+      <p>Register the OAuth redirect <code>{window.location.origin}/api/payments/stripe/oauth/callback</code> on the platform.</p>
+      {connection.webhookConfigured !== true && <p>Add a connected-account webhook at <code>{window.location.origin}/api/payments/stripe/webhook</code>.
+        Save its signing secret as <code>STRIPE_CONNECT_WEBHOOK_SECRET</code> to enable sending.</p>}
+    </details>}
     {error && <p className="error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {busy && <p role="status">Working…</p>}
-    {draft && <form className="invoice-editor" onSubmit={(event) => saveDraft(event, draft)}>
-      <h3>{draft.invoice ? "Edit draft" : "New invoice"}</h3>
-      <div className="invoice-fields">
-        <label>Payer name<input value={draft.payer} maxLength={500} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, payer: event.target.value })} /></label>
-        <label>Payer email<input type="email" value={draft.email} maxLength={320} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></label>
-        <label>Currency code<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, currency: event.target.value.toUpperCase() })} /></label>
-        <label>Due date<input type="date" value={draft.due} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, due: event.target.value })} /></label>
-        <label>Payment methods<select value={draft.methods} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, methods: event.target.value as PaymentMethods })}>
-          <option value="card_only">Card</option><option value="ach_only">US bank account</option>
-          <option value="card_and_ach">Card or US bank account</option>
-        </select></label>
-        <label>Invoice description<input value={draft.description} maxLength={1000} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
-      </div>
-      {draft.lines.map((line, index) => <div key={line.key} className="invoice-line">
-        <label>Line {index + 1} description<input value={line.description} required maxLength={1000} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, lines: draft.lines.map((entry) =>
-            entry.key === line.key ? { ...entry, description: event.target.value } : entry) })} /></label>
-        <label>Amount<input inputMode="decimal" value={line.amount} disabled={disabled}
-          onChange={(event) => setDraft({ ...draft, lines: draft.lines.map((entry) =>
-            entry.key === line.key ? { ...entry, amount: event.target.value } : entry) })} /></label>
-        {index >= Math.max(1, draft.invoice?.lines?.length ?? 0) && <button className="secondary" type="button" disabled={disabled}
-          onClick={() => setDraft({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>Remove line</button>}
-      </div>)}
-      <div className="invoice-actions">
-        <button type="button" className="secondary" disabled={disabled || draft.lines.length === 100}
-          onClick={() => setDraft({ ...draft, lines: [...draft.lines, blankLine()] })}>Add line</button>
-        <button type="submit" className="primary" disabled={disabled}>Save draft</button>
-        <button type="button" className="secondary" disabled={disabled} onClick={() => setDraft(null)}>Cancel</button>
-      </div>
-    </form>}
-    {selected && !draft && <section className="invoice-editor" aria-label="Invoice details">
-      <h3>{selected.displayName}</h3>
+    {draft && <InvoiceEditor draft={draft} existingLineCount={draft.invoice ? draft.invoice.lines?.length ?? 0 : null}
+      busy={busy} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
+      onClose={() => { setDraft(null); setError(""); }} onSave={(event) => saveDraft(event, draft)} />}
+    {selected && !draft && <InvoiceDialog title={selected.displayName} eyebrow="Invoice" busy={busy}
+      onClose={() => { setSelected(null); setConfirm(null); setError(""); }}>
+      <section className="invoice-editor" aria-label="Invoice details">
       <p>{statusLabel(selected.status)} · {money(selected.amountRemainingMinor, selected.currency)} outstanding
         {selected.dueOn ? ` · Due ${selected.dueOn}` : ""}</p>
       {selected.payerEmail && <p>{selected.payerEmail}</p>}
       {selected.description && <p>{selected.description}</p>}
       {selected.stripeInvoiceId && <p>Stripe invoice {selected.stripeInvoiceId}</p>}
       {selected.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <ul>{selected.lines?.map((line) => <li key={line.id}>{line.description} · {money(line.amountMinor, selected.currency)}</li>)}</ul>
       <div className="invoice-actions">
+        <button type="button" className="secondary" disabled={disabled} onClick={() => previewInvoice(selected)}>Preview invoice</button>
         {selected.status === "draft" && <button type="button" className="secondary" disabled={disabled}
           onClick={() => setDraft(invoiceDraft(selected))}>Edit draft</button>}
         {connection?.configured && connection.stripeAccountId && !selected.sentAt && !selected.adoptedAt
@@ -248,7 +251,7 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
           <button className="secondary" type="button" disabled={busy} onClick={() => setConfirm(null)}>Cancel</button>
         </div>
       </div>}
-    </section>}
+    </section></InvoiceDialog>}
     <form className="invoice-inline-form" onSubmit={(event) => {
       event.preventDefault();
       void run(async () => {

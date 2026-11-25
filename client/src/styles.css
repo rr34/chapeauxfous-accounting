@@ -151,9 +151,27 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .invoice-workspace form label { margin: 0; }
 .invoice-editor { display: grid; gap: .7rem; border: 1px solid #dce2da; border-radius: 8px; padding: 1rem; }
 .invoice-editor h3, .invoice-editor p { margin: 0; }
-.invoice-fields { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); }
-.invoice-line { display: flex; flex-wrap: wrap; gap: .7rem; align-items: end; }
-.invoice-line label:first-child { flex: 1; min-width: min(100%, 13rem); }
+.invoice-dialog { width: min(900px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); padding: 0; color: #17231c; border: 1px solid #ccd4cb; border-radius: 16px; background: #fff; }
+.invoice-dialog::backdrop { background: #18231d99; }
+.invoice-dialog-content { display: grid; gap: 1rem; padding: 1rem 1.25rem; }
+.invoice-dialog-heading, .invoice-line-heading { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
+.invoice-dialog-heading h2, .invoice-line-heading h3 { margin: 0; }
+.invoice-editor-form, .invoice-editor-form fieldset, .invoice-line-list { display: grid; gap: .75rem; min-width: 0; }
+.invoice-editor-form fieldset { padding: 0; margin: 0; border: 0; }
+.invoice-editor-form label { margin: 0; }
+.invoice-dialog textarea { width: 100%; min-height: 74px; resize: vertical; font: inherit; border: 1px solid #ccd4cb; border-radius: 7px; padding: .65rem; }
+.invoice-create-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.invoice-editor-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.invoice-editor-summary > div { display: grid; overflow-wrap: anywhere; border: 1px solid #dce2da; border-radius: 8px; padding: .55rem; }
+.invoice-line-card { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: end; gap: .6rem; border: 1px solid #dce2da; border-radius: 10px; background: #f5f8f3; padding: .75rem; }
+.invoice-line-card .invoice-line-heading, .invoice-line-references { grid-column: 1 / -1; }
+.invoice-line-card .invoice-line-heading { border-bottom: 1px solid #dce2da; padding-bottom: .4rem; font-size: .82rem; }
+.invoice-dialog-footer { justify-content: flex-end; }
+.invoice-setup code { overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .invoice-create-grid, .invoice-line-card { grid-template-columns: 1fr; }
+  .invoice-editor-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .invoice-list { margin: 0; padding: 0; list-style: none; }
 .invoice-list li { display: flex; gap: .7rem; align-items: center; border-bottom: 1px solid #dce2da; padding: .45rem 0; }
 .invoice-confirmation { display: grid; gap: .7rem; border-top: 1px solid #dce2da; padding-top: .7rem; }

@@ -217,9 +217,15 @@ export function createInvoiceService(pool, {
     const [[row]] = await pool.execute(
       "SELECT stripe_account_id FROM accounting_stripe_accounts WHERE owner_person_id = ?", [owner],
     );
-    return { stripeAccountId: row?.stripe_account_id ?? null,
-      configured: Boolean(env.STRIPE_SECRET_KEY && secret?.length >= 32 && env.STRIPE_CONNECT_CLIENT_ID
-        && env.ACCOUNTING_STRIPE_CALLBACK_URL && env.STRIPE_CONNECT_WEBHOOK_SECRET) };
+    const missingConnectSettings = [
+      !env.STRIPE_SECRET_KEY && "STRIPE_SECRET_KEY",
+      !(secret?.length >= 32) && "ACCOUNTING_STRIPE_STATE_SECRET",
+      !env.STRIPE_CONNECT_CLIENT_ID && "STRIPE_CONNECT_CLIENT_ID",
+      !env.ACCOUNTING_STRIPE_CALLBACK_URL && "ACCOUNTING_STRIPE_CALLBACK_URL",
+    ].filter(Boolean);
+    const webhookConfigured = Boolean(env.STRIPE_CONNECT_WEBHOOK_SECRET);
+    return { stripeAccountId: row?.stripe_account_id ?? null, missingConnectSettings, webhookConfigured,
+      configured: missingConnectSettings.length === 0 && webhookConfigured };
   }
 
   async function beginConnect(owner, browserKey) {

@@ -796,7 +796,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     title: "Get Stripe setup instructions",
     description: "Read the Stripe connection status and give the user Accounting's Invoices page for setup. Stripe authorization is completed in the Accounting web app.",
     inputSchema: {}, outputSchema: { ...resultOutput, url: z.url(), instruction: z.string(),
-      configured: z.boolean(), stripeAccountId: z.string().nullable() }, annotations: readOnly,
+      configured: z.boolean(), stripeAccountId: z.string().nullable(), webhookConfigured: z.boolean(),
+      missingConnectSettings: z.array(z.string()) }, annotations: readOnly,
   }, async () => ({
     ...await invoices.connectionStatus(personId),
     url: new URL("/#invoices", process.env.CLIENT_ORIGIN || "http://localhost:5173").href,
