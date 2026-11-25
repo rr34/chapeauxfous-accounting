@@ -141,6 +141,11 @@ app.patch("/api/invoices/:id", ...invoiceRoute(async (owner, req) => ({
     id: invoiceId.parse(req.params.id), revision: invoiceId.parse(req.body?.revision),
   }),
 })));
+app.patch("/api/invoices/:id/payer", ...invoiceRoute(async (owner, req) => {
+  const { revision, ...payer } = req.body ?? {};
+  return { invoice: await invoices.correctPaidPayer(owner, invoiceId.parse(req.params.id),
+    invoiceId.parse(revision), payer) };
+}));
 app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
   invoices.prepareSend(owner, invoiceId.parse(req.params.id))));
 app.post("/api/invoices/send", ...invoiceRoute((owner, req) =>

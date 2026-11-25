@@ -39,12 +39,18 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
   </dialog>;
 }
 
-export default function InvoiceEditor({ draft, existingLineCount, busy, error, onChange, onClose, onSave }: {
-  draft: InvoiceDraftFields; existingLineCount: number | null; busy: boolean; error: string;
+export default function InvoiceEditor({ draft, existingLineCount, mode, paymentStatus, savedTotal, busy, error,
+  dirty, actions, details, confirmation, onChange, onClose, onSave }: {
+  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "read";
+  paymentStatus?: string; savedTotal?: string; busy: boolean; error: string; dirty: boolean;
+  actions?: ReactNode; details?: ReactNode; confirmation?: ReactNode;
   onChange: (fields: InvoiceDraftFields) => void; onClose: () => void; onSave: (event: FormEvent) => void;
 }) {
   const [references, setReferences] = useState<string | null>(null);
   const creating = existingLineCount === null;
+  const editable = mode === "draft";
+  const payerEditable = mode !== "read";
+  const editingLocked = busy || Boolean(confirmation);
   const started = draft.lines.some((line) => line.description.trim() || line.amount.trim() || line.todoRef || line.receiptRef);
   const total = (() => {
     try {
@@ -60,58 +66,65 @@ export default function InvoiceEditor({ draft, existingLineCount, busy, error, o
   return <InvoiceDialog title={creating ? "Create invoice" : draft.payer || "Invoice draft"}
     eyebrow={creating ? "Payments" : "Invoice"} busy={busy} onClose={onClose}>
     <form className="invoice-editor-form" onSubmit={onSave}>
-      <fieldset disabled={busy}>
+      <fieldset disabled={editingLocked}>
         <div className="invoice-create-grid">
-          <label>Payer name <small>Optional until sending</small><input value={draft.payer} maxLength={500}
+          <label>Payer name {editable && <small>Optional until sending</small>}<input value={draft.payer} maxLength={500} readOnly={!payerEditable}
             onChange={(event) => onChange({ ...draft, payer: event.target.value })} /></label>
-          <label>Payer email <small>Optional until sending</small><input type="email" value={draft.email} maxLength={320}
+          <label>Payer email {editable && <small>Optional until sending</small>}<input type="email" value={draft.email} maxLength={320} readOnly={!payerEditable}
             onChange={(event) => onChange({ ...draft, email: event.target.value })} /></label>
-          <label>Payment due date <small>Optional · when the customer should pay</small><input type="date" value={draft.due}
+          <label>Payment due date {editable && <small>Optional · when the customer should pay</small>}<input type="date" value={draft.due} readOnly={!editable}
             onChange={(event) => onChange({ ...draft, due: event.target.value })} /></label>
-          <label>Currency<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required
+          <label>Currency<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required readOnly={!creating}
             onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase() })} /></label>
         </div>
         {!creating && <div className="invoice-editor-summary">
           <div><small>Email</small><strong>{draft.email || "Not set"}</strong></div>
           <div><small>Due</small><strong>{draft.due || "Not set"}</strong></div>
-          <div><small>Payment status</small><strong>Unpaid</strong></div>
-          <div><small>Total</small><strong>{total}</strong></div>
+          <div><small>Payment status</small><strong>{paymentStatus}</strong></div>
+          <div><small>Total</small><strong>{editable ? total : savedTotal}</strong></div>
         </div>}
-        <label>Invoice description <small>Optional</small><textarea value={draft.description} maxLength={1000}
+        <label>Invoice description {editable && <small>Optional</small>}<textarea value={draft.description} maxLength={1000} readOnly={!editable}
           onChange={(event) => onChange({ ...draft, description: event.target.value })} placeholder="What this invoice covers" /></label>
-        <label>Payment methods<select value={draft.methods}
+        <label>Payment methods<select value={draft.methods} disabled={!editable}
           onChange={(event) => onChange({ ...draft, methods: event.target.value as PaymentMethods })}>
           <option value="ach_only">Bank account only (no credit cards)</option>
           <option value="card_and_ach">Credit card and bank account</option>
           <option value="card_only">Credit card only</option>
         </select></label>
         <div className="invoice-line-heading"><h3>Invoice lines</h3>
-          <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button></div>
+          {editable && <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button>}</div>
         <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
           <div className="invoice-line-heading"><span>Line {index + 1}</span><div className="invoice-actions">
             <strong>{line.todoRef ? "To-do" : "Manual line"}</strong>
-            <button className="secondary" type="button" aria-expanded={references === line.key}
-              onClick={() => setReferences(references === line.key ? null : line.key)}>References</button>
-            {index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
+            {editable && <button className="secondary" type="button" aria-expanded={references === line.key || Boolean(line.todoRef || line.receiptRef)}
+              onClick={() => setReferences(references === line.key ? null : line.key)}>References</button>}
+            {editable && index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
               onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>Remove</button>}
           </div></div>
-          <label>Description<textarea value={line.description} maxLength={1000} placeholder={`Manual line ${index + 1}`}
+          <label>Description<textarea value={line.description} maxLength={1000} placeholder={`Manual line ${index + 1}`} readOnly={!editable}
             onChange={(event) => setLine(line.key, { description: event.target.value })} /></label>
-          <label>Amount ({draft.currency || "currency"}) <small>Use 0.00 for no charge</small><input inputMode="decimal"
-            value={line.amount} placeholder="0.00" onChange={(event) => setLine(line.key, { amount: event.target.value })} /></label>
+          <label>Amount ({draft.currency || "currency"}) {editable && <small>Use 0.00 for no charge</small>}<input inputMode="decimal"
+            value={line.amount} placeholder="0.00" readOnly={!editable} onChange={(event) => setLine(line.key, { amount: event.target.value })} /></label>
           {(references === line.key || line.todoRef || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
-            <label>Agent to-do reference<input value={line.todoRef ?? ""} placeholder="agent-slayer://todos/…"
+            <label>Agent to-do reference<input value={line.todoRef ?? ""} placeholder="agent-slayer://todos/…" readOnly={!editable}
               onChange={(event) => setLine(line.key, { todoRef: event.target.value })} /></label>
-            <label>Agent receipt reference<input value={line.receiptRef ?? ""} placeholder="agent-slayer://files/…"
+            <label>Agent receipt reference<input value={line.receiptRef ?? ""} placeholder="agent-slayer://files/…" readOnly={!editable}
               onChange={(event) => setLine(line.key, { receiptRef: event.target.value })} /></label>
           </div>}
         </article>)}</div>
       </fieldset>
-      <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>
+      {creating && <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>}
+      {mode === "payer" && <p className="muted">You can correct the recipient on this locally paid invoice.</p>}
+      {mode === "read" && <p className="muted">This invoice is read-only. Use a draft to change the recipient or lines.</p>}
+      {details}
+      {confirmation}
       {error && <p className="error" role="alert">{error}</p>}
       <footer className="invoice-actions invoice-dialog-footer">
-        <button className="secondary" type="button" disabled={busy} onClick={onClose}>Cancel</button>
-        <button className="primary" type="submit" disabled={busy || !started}>{creating ? "Create draft" : "Save changes"}</button>
+        {actions}
+        <button className="secondary" type="button" disabled={busy} onClick={onClose}>{payerEditable ? "Cancel" : "Close"}</button>
+        {payerEditable && <button className="primary" type="submit" disabled={editingLocked || !dirty || (editable && !started)}>
+          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : "Save changes"}
+        </button>}
       </footer>
     </form>
   </InvoiceDialog>;

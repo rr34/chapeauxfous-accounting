@@ -11,11 +11,14 @@ const policies = {
 const reference = (kind) => z.string().max(512)
   .regex(new RegExp(`^agent-slayer://${kind}/[1-9][0-9]*$`)).nullable().optional();
 export const invoiceId = z.uuid();
+export const invoicePayer = z.object({
+  payer_name: z.string().trim().min(1).max(500).nullable().optional(),
+  payer_email: z.email().max(320).nullable().optional(),
+});
 export const stripeBrowserKey = z.uuid();
 export const stripeInvoiceId = z.string().regex(/^in_[a-zA-Z0-9]+$/).max(255);
 export const invoiceDraft = z.object({
-  payer_name: z.string().trim().min(1).max(500).nullable().optional(),
-  payer_email: z.email().max(320).nullable().optional(),
+  ...invoicePayer.shape,
   description: z.string().trim().max(1000).nullable().optional(),
   currency: z.string().regex(/^[A-Z]{3}$/),
   due_on: z.iso.date().nullable().optional(),
@@ -194,13 +197,29 @@ export function createInvoiceService(pool, {
           throw fail("Keep the existing lines in their original positions.", "INVOICE_LINE_REMOVAL_UNSUPPORTED", 400);
         }
         await db.execute(`UPDATE accounting_invoices SET payer_name = ?, payer_email = ?, description = ?,
-          currency = ?, due_on = ?, payment_methods = ?, amount_minor = ?, revision = ?
+          currency = ?, due_on = ?, payment_methods = ?, amount_minor = ?, revision = ?, amount_remaining_minor = NULL
           WHERE owner_person_id = ? AND invoice_id = ?`, [...values, owner, id]);
         await db.execute("DELETE FROM accounting_invoice_lines WHERE invoice_id = ?", [id]);
         // Preserve positional identities for the existing lines, including edited amounts and text.
         data.lines.forEach((line, index) => { line.id = existing[index]?.invoice_line_id; });
       }
       await saveLines(db, id, data.lines);
+      return invoiceObject(db, await getRow(db, owner, id));
+    });
+  }
+
+  async function correctPaidPayer(owner, id, revision, input) {
+    const payer = invoicePayer.required().strict().parse(input);
+    return withPoolTransaction(pool, async (db) => {
+      const row = await getRow(db, owner, id, true);
+      if (row.revision !== revision) {
+        throw fail("The invoice changed. Reopen it before editing the recipient.", "INVOICE_REVISION_CONFLICT");
+      }
+      if (importedLocalStatus(row) !== "paid") {
+        throw fail("Recipient correction is available for locally paid invoices.", "INVOICE_PAYER_LOCKED");
+      }
+      await db.execute(`UPDATE accounting_invoices SET payer_name = ?, payer_email = ?, revision = ?
+        WHERE owner_person_id = ? AND invoice_id = ?`, [payer.payer_name, payer.payer_email, randomUUID(), owner, id]);
       return invoiceObject(db, await getRow(db, owner, id));
     });
   }
@@ -436,5 +455,5 @@ export function createInvoiceService(pool, {
     if (row) await refresh(row.owner_person_id, row.invoice_id);
   }
 
-  return { saveDraft, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  return { saveDraft, correctPaidPayer, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

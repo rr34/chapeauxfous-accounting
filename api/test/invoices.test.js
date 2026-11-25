@@ -19,6 +19,64 @@ const env = {
   ACCOUNTING_STRIPE_STATE_SECRET: "fixture-state-secret-at-least-32-characters",
 };
 
+test("drafts can change recipient and append a line, while local paid invoices only accept recipient correction", async () => {
+  const row = {
+    invoice_id: id, owner_person_id: 7, revision, payer_name: "Old name", payer_email: "old@example.com",
+    currency: "USD", amount_minor: 2500, amount_paid_minor: 0, amount_remaining_minor: 2500,
+    payment_methods: "ach_only", agent_invoice_status: "prepared", stripe_invoice_id: null,
+  };
+  let lines = [{ invoice_line_id: id, position: 1, description: "Work", amount_minor: 2500 }];
+  const db = {
+    getConnection: async () => db,
+    beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
+    async execute(sql, values) {
+      if (sql.startsWith("SELECT * FROM accounting_invoices")) {
+        assert.deepEqual(values, [7, id]);
+        return [[{ ...row }]];
+      }
+      if (sql.includes("SELECT") && sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.startsWith("DELETE FROM accounting_invoice_lines")) { lines = []; return; }
+      if (sql.includes("amount_remaining_minor = NULL")) {
+        row.amount_remaining_minor = null;
+        row.amount_minor = values[6];
+        row.revision = values[7];
+      } else {
+        assert.match(sql, /SET payer_name = \?, payer_email = \?, revision = \?/);
+        row.revision = values[2];
+      }
+      [row.payer_name, row.payer_email] = values;
+    },
+    async query(sql, [values]) {
+      assert.match(sql, /INSERT INTO accounting_invoice_lines/);
+      lines = values.map(([invoice_line_id, , position, description, amount_minor]) =>
+        ({ invoice_line_id, position, description, amount_minor }));
+    },
+  };
+  const invoices = createInvoiceService(db, { env });
+  const input = { payer_name: "New name", payer_email: "new@example.com", currency: "USD",
+    lines: [{ description: "Work edited", amount_minor: 2500 }, { description: "More work", amount_minor: 500 }] };
+  const saved = await invoices.saveDraft(7, input, { id, revision });
+  assert.equal(saved.payerName, "New name");
+  assert.equal(saved.amountRemainingMinor, 3000);
+  assert.equal(saved.lines[0].id, id);
+  assert.equal(saved.lines[1].description, "More work");
+  row.agent_invoice_status = "paid";
+  row.amount_paid_minor = 3000;
+  row.amount_remaining_minor = 0;
+  await assert.rejects(invoices.saveDraft(7, input, { id, revision: saved.revision }), { code: "INVOICE_REVISION_CONFLICT" });
+  await assert.rejects(invoices.correctPaidPayer(7, id, revision,
+    { payer_name: "Corrected", payer_email: null }), { code: "INVOICE_REVISION_CONFLICT" });
+  const corrected = await invoices.correctPaidPayer(7, id, saved.revision,
+    { payer_name: "Corrected", payer_email: null });
+  assert.equal(corrected.payerName, "Corrected");
+  assert.equal(corrected.status, "paid");
+  assert.equal(corrected.amountPaidMinor, 3000);
+  assert.deepEqual(corrected.lines, saved.lines);
+  row.stripe_invoice_id = "in_existing";
+  await assert.rejects(invoices.correctPaidPayer(7, id, corrected.revision,
+    { payer_name: "Another name", payer_email: null }), { code: "INVOICE_PAYER_LOCKED" });
+});
+
 test("Stripe setup returns to the initiating Accounting owner and browser", async () => {
   const browserKey = "9a029d16-737b-451c-8707-53d161b0d38f";
   const accounts = new Map();
