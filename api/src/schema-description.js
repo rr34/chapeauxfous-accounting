@@ -1,4 +1,5 @@
 export const accountingStorageTables = Object.freeze([
+  "accounting_invoices", "accounting_invoice_lines", "accounting_stripe_accounts",
   "account_balance_assertions", "accounting_import_plans", "accounting_purchase_evidence_adjustments",
   "accounting_purchase_evidence_items", "accounting_purchase_evidence_job_lines", "accounting_purchase_evidence_jobs",
   "accounting_purchase_evidence_records", "accounting_purchase_evidence_sources", "accounting_schema_metadata",

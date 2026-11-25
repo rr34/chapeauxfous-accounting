@@ -7,6 +7,57 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0026: stripe-invoices
+-- Apply before enabling the invoice API. Roll back by restoring a verified backup.
+CREATE TABLE IF NOT EXISTS accounting_stripe_accounts (
+  owner_person_id INT NOT NULL PRIMARY KEY COMMENT 'Accounting owner authorized to use this Stripe account.',
+  stripe_account_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'Authorized Stripe connected account ID.',
+  UNIQUE KEY accounting_stripe_account_identity (stripe_account_id),
+  FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='Owner-scoped Stripe Connect authorizations used by Accounting invoices.';
+
+CREATE TABLE IF NOT EXISTS accounting_invoices (
+  invoice_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY COMMENT 'Stable Accounting invoice UUID.',
+  owner_person_id INT NOT NULL COMMENT 'Accounting person who owns the invoice.',
+  payer_name VARCHAR(500) NULL COMMENT 'Customer name captured for this invoice.',
+  payer_email VARCHAR(320) NULL COMMENT 'Customer email captured for this invoice.',
+  description VARCHAR(1000) NULL COMMENT 'Customer-facing description.',
+  currency CHAR(3) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'ISO currency code for the invoice amounts.',
+  due_on DATE NULL COMMENT 'Customer-facing due date.',
+  payment_methods ENUM('ach_only','card_only','card_and_ach') NOT NULL COMMENT 'Collection options for locally issued invoices.',
+  amount_minor BIGINT UNSIGNED NOT NULL COMMENT 'Billed total in the smallest currency unit.',
+  amount_paid_minor BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Most recently observed Stripe paid amount in minor units.',
+  amount_remaining_minor BIGINT UNSIGNED NULL COMMENT 'Most recently observed Stripe outstanding amount in minor units.',
+  stripe_status VARCHAR(40) NULL COMMENT 'Most recently observed Stripe invoice lifecycle status.',
+  revision CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'Draft revision used for concurrency and send confirmation.',
+  stripe_account_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT 'Stripe account that owns the provider invoice.',
+  stripe_customer_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT 'Stripe customer ID within the connected account.',
+  stripe_invoice_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT 'Exact Stripe invoice ID within the connected account.',
+  stripe_hosted_url VARCHAR(2048) NULL COMMENT 'Most recently observed Stripe-hosted payment URL.',
+  stripe_pdf_url VARCHAR(2048) NULL COMMENT 'Most recently observed Stripe invoice PDF URL.',
+  send_started_at DATETIME(6) NULL COMMENT 'First Stripe send attempt, stored before any external call for retry safety.',
+  sent_at DATETIME(6) NULL COMMENT 'Observed successful app send; Stripe-adopted invoices can have no app send timestamp.',
+  adopted_at DATETIME(6) NULL COMMENT 'UTC instant when Accounting adopted an existing Stripe invoice.',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Creation time of the local invoice row.',
+  KEY accounting_invoice_owner (owner_person_id, created_at, invoice_id),
+  UNIQUE KEY accounting_invoice_provider (stripe_account_id, stripe_invoice_id),
+  FOREIGN KEY (owner_person_id) REFERENCES people2_people (person_id) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='Customer invoice subledger, independent of general-ledger postings and chart of accounts.';
+
+CREATE TABLE IF NOT EXISTS accounting_invoice_lines (
+  invoice_line_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY COMMENT 'Stable Accounting invoice line UUID.',
+  invoice_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'Parent customer invoice.',
+  position SMALLINT UNSIGNED NOT NULL COMMENT 'One-based position in the invoice.',
+  description VARCHAR(1000) NOT NULL COMMENT 'Customer-facing line description snapshot.',
+  amount_minor BIGINT NOT NULL COMMENT 'Line amount in minor units; imported Stripe lines may include credits.',
+  todo_ref VARCHAR(512) NULL COMMENT 'Optional source to-do reference.',
+  receipt_ref VARCHAR(512) NULL COMMENT 'Optional supporting file reference.',
+  UNIQUE KEY accounting_invoice_line_position (invoice_id, position),
+  FOREIGN KEY (invoice_id) REFERENCES accounting_invoices (invoice_id) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='Customer-facing invoice lines with optional references to externally owned work and files.';
+
+-- end migration 0026
+
 -- migration 0025: remember-account-views
 -- writer downtime: schedule maintenance; ADD COLUMN takes a metadata lock on accounts.
 -- deployment order: apply before deploying API and client code that reads or records account views.

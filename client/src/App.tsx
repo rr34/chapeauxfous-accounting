@@ -5,6 +5,7 @@ import { descriptionFamily } from "./description-family";
 import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs";
 import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
+import InvoiceWorkspace from "./InvoiceWorkspace";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CanonicalImportRecord, CurrencyType, EvidenceFile, TransactionDetail, TransactionImportException,
@@ -3863,8 +3864,9 @@ export default function App() {
     scope: "all" | "selected"; transactionIds: number[]; deleteAccounts: boolean;
     deleteImportHistory: boolean;
   } | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<"chart" | "account" | "activity" | "misfits" | "statements">(
-    () => window.location.hash === "#import-misfits" ? "misfits" : "chart",
+  const [workspaceView, setWorkspaceView] = useState<"chart" | "account" | "activity" | "misfits" | "statements" | "invoices">(
+    () => window.location.hash.split("?")[0] === "#invoices" ? "invoices"
+      : window.location.hash === "#import-misfits" ? "misfits" : "chart",
   );
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
@@ -3929,17 +3931,19 @@ export default function App() {
   function selectAccount(account: Account) {
     rememberAccount(account);
     setWorkspaceView("account");
-    if (window.location.hash === "#import-misfits") {
+    if (window.location.hash === "#import-misfits" || window.location.hash.split("?")[0] === "#invoices") {
       window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
     }
     revealMainContent();
   }
 
-  function selectWorkspaceView(view: "chart" | "activity" | "misfits" | "statements") {
+  function selectWorkspaceView(view: "chart" | "activity" | "misfits" | "statements" | "invoices") {
     setWorkspaceView(view);
-    if (view === "misfits" && window.location.hash !== "#import-misfits") {
-      window.history.pushState(null, "", "#import-misfits");
-    } else if (view !== "misfits" && window.location.hash === "#import-misfits") {
+    const viewHash = view === "misfits" ? "#import-misfits" : view === "invoices" ? "#invoices" : "";
+    const currentHash = window.location.hash.split("?")[0];
+    if (viewHash && viewHash !== currentHash) {
+      window.history.pushState(null, "", viewHash);
+    } else if (!viewHash && ["#import-misfits", "#invoices"].includes(currentHash)) {
       window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
     }
     revealMainContent();
@@ -3958,8 +3962,10 @@ export default function App() {
       const misfits = window.location.hash === "#import-misfits";
       if (misfits) {
         setWorkspaceView("misfits");
+      } else if (window.location.hash.split("?")[0] === "#invoices") {
+        setWorkspaceView("invoices");
       } else {
-        setWorkspaceView((current) => current === "misfits" ? "chart" : current);
+        setWorkspaceView((current) => current === "misfits" || current === "invoices" ? "chart" : current);
       }
     };
     window.addEventListener("popstate", syncViewFromUrl);
@@ -4067,6 +4073,8 @@ export default function App() {
           accounts={accounts} active={workspaceView === "account"} onSelect={selectAccount} />}
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
+        <button className={workspaceView === "invoices" ? "active" : ""} aria-pressed={workspaceView === "invoices"}
+          onClick={() => selectWorkspaceView("invoices")}>Invoices</button>
         <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
           onClick={() => selectWorkspaceView("statements")}>Import</button>
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
@@ -4077,6 +4085,8 @@ export default function App() {
         {workspaceView === "chart"
           ? <ChartOfAccounts accounts={accounts} currencies={currencies} selectedAccountId={selectedAccountId}
               token={token} onSelectAccount={selectAccount} onChanged={refresh} />
+          : workspaceView === "invoices"
+          ? <InvoiceWorkspace token={token} />
           : workspaceView === "misfits"
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
           : workspaceView === "statements"

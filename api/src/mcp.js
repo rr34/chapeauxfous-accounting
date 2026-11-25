@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
+import { createInvoiceService, invoiceDraft, invoiceId, stripeInvoiceId } from "./invoices.js";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
@@ -705,6 +706,102 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       _meta: { ...definition._meta, "agent-slayer/selection": selection },
     }, handler);
   };
+
+  const invoices = services.invoices ?? createInvoiceService(pool);
+  const invoiceMeta = (bound = false, allowUnbound = false) => toolMetadata("accounting.invoices", {
+    dependencies: bound && !allowUnbound ? ["list_invoices"] : [],
+    objectInputs: bound ? [{ path: "/invoice_id", objectType: "accounting.invoice", value: "id",
+      ...(allowUnbound ? { allowUnbound: true } : {}) }] : [],
+  });
+  const invoiceOutput = z.object({
+    id: invoiceId, sourceRef: z.string(), displayName: z.string(), status: z.string(),
+    revision: z.uuid(), payerName: z.string().nullable(), payerEmail: z.string().nullable(),
+    description: z.string().nullable(), currency: z.string(), dueOn: z.string().nullable(),
+    paymentMethods: z.string(), amountMinor: z.number().int(), amountPaidMinor: z.number().int(),
+    amountRemainingMinor: z.number().int(), stripeInvoiceId: z.string().nullable(),
+    hostedInvoiceUrl: z.string().nullable(), stripePdfUrl: z.string().nullable(),
+    sentAt: z.string().nullable(), adoptedAt: z.string().nullable(), refreshFailed: z.boolean(),
+    lines: z.array(z.object({
+      id: invoiceId, sourceRef: z.string(), position: z.number().int(), description: z.string(),
+      amountMinor: z.number().int(), todoRef: z.string().nullable(), receiptRef: z.string().nullable(),
+    })).optional(),
+  });
+  const resultOutput = { contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.string() };
+  const invoiceResult = { ...resultOutput, invoice: invoiceOutput };
+  const sendToken = z.string().min(1).max(2000);
+  const invoiceTool = (name, definition, operation) => registerTool(name, {
+    _meta: invoiceMeta(), ...definition,
+  }, (input) => safeToolResult(() => operation(input)));
+  invoiceTool("list_invoices", {
+    title: "List invoices",
+    description: "List compact saved invoices by payer, email, description, or Stripe invoice ID using the text filter and cursor. Supply an exact Accounting invoice UUID to retrieve all lines and refresh its Stripe state. If refreshFailed is true, Stripe status and amounts are the last saved values. Collection status does not imply a ledger posting.",
+    inputSchema: { invoice_id: invoiceId.optional(), cursor: invoiceId.optional(),
+      text: z.string().trim().min(1).max(255).optional(),
+      limit: z.number().int().min(1).max(50).default(25) },
+    outputSchema: { ...resultOutput, objects: z.array(invoiceOutput), nextCursor: invoiceId.nullable() },
+    annotations: readOnly,
+    _meta: { ...invoiceMeta(true, true), "agent-slayer/objects": {
+      protocol: "agent-slayer.object-description", version: 1,
+      types: [{
+        id: "accounting.invoice", title: "Accounting invoice",
+        summary: "An owner-scoped customer invoice with its invoice lines and collection status.",
+        identity: { field: "id", summary: "Stable invoice UUID." },
+        reference: { field: "sourceRef", summary: "Stable Accounting invoice reference." },
+        display: { field: "displayName", summary: "Customer name and billed total." },
+        qualifiers: [{ field: "status", summary: "Current or last observed collection status." },
+          { field: "currency", summary: "ISO currency code for invoice amounts." }],
+      }],
+    } },
+  }, (input) => invoices.list(personId, input));
+  invoiceTool("create_invoice", {
+    title: "Create invoice draft",
+    description: "Save a local invoice draft from one or more lines. Payer, due date and individual prices may be incomplete. Use copied payer values and exact optional to-do and file references for provenance. This operation does not send or post the invoice.",
+    inputSchema: invoiceDraft.shape, outputSchema: invoiceResult, annotations: writesData,
+  }, async (input) => ({ invoice: await invoices.saveDraft(personId, input) }));
+  invoiceTool("update_invoice", {
+    title: "Update invoice draft",
+    description: "Read the exact invoice first. Supply its revision and the complete desired draft. Preserve unspecified fields and existing lines in their original positions, including source references. New lines may be appended.",
+    inputSchema: { invoice_id: invoiceId, revision: z.uuid(), ...invoiceDraft.shape },
+    outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true),
+  }, async ({ invoice_id, revision, ...input }) => ({
+    invoice: await invoices.saveDraft(personId, input, { id: invoice_id, revision }),
+  }));
+  invoiceTool("prepare_invoice_send", {
+    title: "Prepare invoice send confirmation",
+    description: "Use only when the user explicitly requests sending this invoice. Validate the exact draft and connected Stripe account. Present the returned instruction and wait for approval of its exact handoff.",
+    inputSchema: { invoice_id: invoiceId },
+    outputSchema: { contractVersion: z.literal(1), status: z.literal("ready"), nextAction: z.object({
+      type: z.literal("request_user_confirmation"), instruction: z.string(),
+      onApproval: z.object({ tool: z.literal("send_invoice"),
+        arguments: z.object({ send_token: sendToken }) }),
+    }) },
+    annotations: readOnly, _meta: invoiceMeta(true),
+  }, ({ invoice_id }) => invoices.prepareSend(personId, invoice_id));
+  invoiceTool("send_invoice", {
+    title: "Send confirmed invoice",
+    description: "Execute the exact prepared send handoff after explicit user confirmation. Sends the invoice to the payer through Stripe. A successful result proves Stripe responded to the send, and includes the hosted invoice URL when available.",
+    inputSchema: { send_token: sendToken },
+    outputSchema: { ...invoiceResult, idempotentReplay: z.boolean() },
+    annotations: { ...writesData, idempotentHint: true, openWorldHint: true },
+    _meta: toolMetadata("accounting.invoices", { dependencies: ["prepare_invoice_send"] }),
+  }, ({ send_token }) => invoices.send(personId, send_token));
+  invoiceTool("adopt_stripe_invoice", {
+    title: "Adopt an existing Stripe invoice",
+    description: "Read the exact finalized Stripe invoice and all its lines from this owner's connected account and save or return the matching Accounting record. Stripe is not modified and the customer is not contacted.",
+    inputSchema: { stripe_invoice_id: stripeInvoiceId },
+    outputSchema: { ...invoiceResult, idempotentReplay: z.boolean() },
+    annotations: { ...writesData, idempotentHint: true },
+  }, ({ stripe_invoice_id }) => invoices.adopt(personId, stripe_invoice_id));
+  invoiceTool("get_stripe_setup", {
+    title: "Get Stripe setup instructions",
+    description: "Read the Stripe connection status and give the user Accounting's Invoices page for setup. Stripe authorization is completed in the Accounting web app.",
+    inputSchema: {}, outputSchema: { ...resultOutput, url: z.url(), instruction: z.string(),
+      configured: z.boolean(), stripeAccountId: z.string().nullable() }, annotations: readOnly,
+  }, async () => ({
+    ...await invoices.connectionStatus(personId),
+    url: new URL("/#invoices", process.env.CLIENT_ORIGIN || "http://localhost:5173").href,
+    instruction: "Open Accounting, select Invoices, and click Connect Stripe. Authorize your Stripe account and return to Accounting in the same tab.",
+  }));
 
   server.registerResource("accounting-capability-manifest", CAPABILITY_MANIFEST_URI, {
     title: "Accounting capability manifest",

@@ -5,6 +5,8 @@ import { pool } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
+import { z } from "zod";
+import { createInvoiceService, invoiceDraft, invoiceId, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { deleteBalanceAssertion, listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
@@ -78,7 +80,71 @@ mountAccountingMcp(app, {
   artifactJsonBodyParser: express.json({ limit: "64kb" }),
   artifactRawBodyParser: express.raw({ type: "application/octet-stream", limit: ARTIFACT_UPLOAD_MAX_CHUNK_BYTES }),
 });
+const invoices = createInvoiceService(pool);
+app.get("/api/payments/stripe/oauth/callback", async (req, res) => {
+  const destination = new URL("/", clientOrigin);
+  const result = new URLSearchParams();
+  try {
+    result.set("stripe_completion", await invoices.finishConnect(req.query));
+  } catch {
+    result.set("stripe_error", req.query.error === "access_denied" ? "cancelled" : "failed");
+  }
+  destination.hash = `invoices?${result}`;
+  res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }).redirect(303, destination.href);
+});
+app.post("/api/payments/stripe/webhook", express.raw({ type: "application/json", limit: "2mb" }),
+  async (req, res, next) => {
+    try {
+      await invoices.webhook(req.body, req.get("stripe-signature"));
+      res.json({ received: true });
+    } catch (error) {
+      if (error.code === "INVOICE_BUSY") return res.status(503).json({ received: false });
+      next(error);
+    }
+  });
 app.use(express.json({ limit: "2mb" }));
+
+function invoiceRoute(operation) {
+  return [requireAuth, async (req, res, next) => {
+    try {
+      res.set("Cache-Control", "no-store").json(await operation(req.auth.personId, req));
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "INVALID_INVOICE_INPUT",
+          message: error.issues.map(({ path, message }) => `${path.join(".")}: ${message}`).join(". ") });
+      }
+      next(error);
+    }
+  }];
+}
+
+app.get("/api/payments/stripe", ...invoiceRoute((owner) => invoices.connectionStatus(owner)));
+app.post("/api/payments/stripe/connect", ...invoiceRoute((owner, req) =>
+  invoices.beginConnect(owner, stripeBrowserKey.parse(req.body?.browserKey))));
+app.post("/api/payments/stripe/complete", ...invoiceRoute((owner, req) =>
+  invoices.completeConnect(owner, z.string().max(2000).parse(req.body?.completionCode), req.body?.browserKey)));
+app.get("/api/invoices", ...invoiceRoute((owner, req) => invoices.list(owner, {
+  cursor: invoiceId.optional().parse(req.query.cursor),
+  text: z.string().trim().min(1).max(255).optional().parse(req.query.text),
+})));
+app.post("/api/invoices", ...invoiceRoute(async (owner, req) => ({
+  invoice: await invoices.saveDraft(owner, invoiceDraft.parse(req.body)),
+})));
+app.post("/api/invoices/adopt", ...invoiceRoute((owner, req) =>
+  invoices.adopt(owner, stripeInvoiceId.parse(req.body?.stripeInvoiceId))));
+app.get("/api/invoices/:id", ...invoiceRoute(async (owner, req) => {
+  const { objects: [invoice] } = await invoices.list(owner, { invoice_id: invoiceId.parse(req.params.id) });
+  return { invoice };
+}));
+app.patch("/api/invoices/:id", ...invoiceRoute(async (owner, req) => ({
+  invoice: await invoices.saveDraft(owner, invoiceDraft.parse(req.body), {
+    id: invoiceId.parse(req.params.id), revision: invoiceId.parse(req.body?.revision),
+  }),
+})));
+app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
+  invoices.prepareSend(owner, invoiceId.parse(req.params.id))));
+app.post("/api/invoices/send", ...invoiceRoute((owner, req) =>
+  invoices.send(owner, z.string().max(2000).parse(req.body?.sendToken))));
 
 app.get("/health", async (_req, res, next) => {
   try {

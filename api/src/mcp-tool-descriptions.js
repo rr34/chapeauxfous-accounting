@@ -4,6 +4,13 @@ const remove = (summary) => ({ summary, actionClasses: ["DELETE"], effectClassif
 
 // These are routing summaries. The full provider instructions stay on each MCP tool registration.
 const descriptions = {
+  list_invoices: read("List Accounting invoices or refresh one exact invoice from Stripe. Returns invoice lines and outstanding amounts."),
+  create_invoice: mutate("Create an editable customer invoice draft using supplied names, amounts, and optional source references.", ["CREATE"]),
+  update_invoice: mutate("Update an existing draft using its current revision and complete line list.", ["UPDATE"]),
+  prepare_invoice_send: read("Check an exact invoice and prepare the final send confirmation without contacting the payer."),
+  send_invoice: { ...mutate("Send the exact confirmed invoice through Stripe.", ["EXECUTE"]), effectClassifications: ["MUTATING", "EXTERNAL"] },
+  adopt_stripe_invoice: mutate("Import a finalized invoice from the connected Stripe account by exact Stripe invoice ID.", ["CREATE"]),
+  get_stripe_setup: read("Read Stripe connection status and get the Accounting web page and instructions for connecting Stripe."),
   describe_accounting_schema: read("Read live MariaDB table and column comments when accounting storage fields are unclear; focused tools define business rules."),
   list_currencies: read("Read the accessible currency catalog and native-unit scales for reporting; use list_currency_objects to identify a unit for another tool's currency ID input."),
   list_currency_objects: read("Canonical tool to identify a currency, crypto asset, security, commodity, or custom unit before supplying its ID to another Accounting tool."),

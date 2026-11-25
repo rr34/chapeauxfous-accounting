@@ -482,12 +482,13 @@ test("the MCP exposes scoped tool and object contracts", async () => {
   assert.deepEqual(validateDiscoveredMcpTools(tools.tools, {
     serverName: "Accounting",
     serverInfo: { name: "chapeaux-fous-accounting" },
-  }), { owned: true, objectTypeCount: 10 });
+  }), { owned: true, objectTypeCount: 11 });
   for (const tool of tools.tools) {
     assert.equal(catalogToolDescription({ ...tool, metadata: tool._meta }).status, "validated", tool.name);
   }
   const objectTools = tools.tools.filter((tool) => tool._meta?.["agent-slayer/objects"]);
   assert.deepEqual(objectTools.map(({ name }) => name), [
+    "list_invoices",
     "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
     "list_accounting_question_objects",
     "list_purchase_evidence_job_objects",
@@ -507,6 +508,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     }
   }
   assert.deepEqual([...describedTypes.keys()], [
+    "accounting.invoice",
     "accounting.currency", "accounting.account", "accounting.transaction", "accounting.line_item",
     "accounting.question",
     "accounting.purchase_evidence_job",
@@ -524,15 +526,15 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "import_single_account_statement", "import_single_account_statement_artifact",
     "import_transactions", "list_account_objects",
     "list_accounting_question_objects", "list_accounting_questions", "list_balance_assertion_objects",
-    "list_currency_objects", "list_evidence_file_objects", "list_line_item_objects", "list_purchase_evidence_job_objects",
+    "list_currency_objects", "list_evidence_file_objects", "list_invoices", "list_line_item_objects", "list_purchase_evidence_job_objects",
     "list_reference_rates", "list_statement_import_job_objects", "list_transaction_import_exceptions", "list_transaction_import_job_objects",
-    "list_transaction_objects", "merge_suspense_transfer_pair", "open_accounting_question", "preview_delete_account",
+    "list_transaction_objects", "merge_suspense_transfer_pair", "open_accounting_question", "prepare_invoice_send", "preview_delete_account",
     "preview_delete_transactions", "preview_transaction_import_job", "read_one_account_import_evidence_text",
     "reconcile_account_through_date", "resolve_accounting_question", "restart_purchase_evidence_job", "retry_transaction_import_exception", "save_balance_assertion",
     "search_transactions", "stage_transaction_import_artifact", "stage_transaction_import_chunk",
     "start_purchase_evidence_job", "start_single_account_statement_import", "start_statement_import_job",
     "start_transaction_list_import_job", "submit_purchase_evidence_job_artifact",
-    "submit_statement_import_job_artifact", "submit_transaction_list_import_job_artifact", "update_account",
+    "submit_statement_import_job_artifact", "submit_transaction_list_import_job_artifact", "update_account", "update_invoice",
   ]);
   assert.deepEqual(objectInputContracts.list_currency_objects, [
     { path: "/currency_id", objectType: "accounting.currency", value: "id", allowUnbound: true },
@@ -573,6 +575,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     { path: "/evidence_file_id", objectType: "accounting.evidence_file", value: "id", allowUnbound: true },
   ]);
   const identifyingReadTools = new Set([
+    "list_invoices",
     "list_currency_objects", "list_account_objects", "list_transaction_objects", "list_line_item_objects",
     "list_accounting_question_objects", "list_transaction_import_job_objects", "list_balance_assertion_objects",
     "list_purchase_evidence_job_objects", "list_statement_import_job_objects", "list_evidence_file_objects",
