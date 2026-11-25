@@ -8,12 +8,14 @@ type StripeConnection = { configured: boolean; stripeAccountId: string | null;
   webhookConfigured?: boolean; missingConnectSettings?: string[] };
 type InvoiceLine = { id: string; description: string; amountMinor: number; todoRef: string | null; receiptRef: string | null };
 type Invoice = {
-  id: string; invoiceNumber: number; revision: string; displayName: string; status: string; payerName: string | null;
+  id: string; invoiceNumber: number; revision: string; displayName: string;
+  status: "draft" | "open" | "paid" | "void" | "uncollectible"; payerName: string | null;
   payerEmail: string | null; description: string | null; currency: string; dueOn: string | null;
   amountMinor: number; amountPaidMinor: number; amountRemainingMinor: number;
   paymentMethods: PaymentMethods; stripeInvoiceId: string | null; refreshFailed: boolean;
   hostedInvoiceUrl: string | null; stripePdfUrl: string | null; adoptedAt: string | null;
   sentAt: string | null; lines?: InvoiceLine[];
+  sendPending: boolean; sendReviewRequired: boolean;
 };
 type Draft = InvoiceDraftFields & { invoice: Invoice | null };
 type Page = { objects: Invoice[]; nextCursor: string | null };
@@ -24,10 +26,9 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const json = (body: unknown, method = "POST") => ({ method, body: JSON.stringify(body) });
 const formatter = (currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency });
 const money = (amount: number, currency: string) => formatter(currency).format(amount / 10 ** scale(currency));
-const statusLabel = (status: string) => ({
-  draft: "Draft", stripe_draft: "Stripe draft", sending: "Sending", open: "Awaiting payment",
-  issued: "Issued", paid: "Paid", void: "Void", uncollectible: "Uncollectible", needs_review: "Needs review",
-}[status] ?? status);
+const statusLabel = (status: Invoice["status"]) => ({
+  draft: "Draft", open: "Open", paid: "Paid", void: "Void", uncollectible: "Uncollectible",
+}[status]);
 
 function invoiceDraft(invoice: Invoice | null = null): Draft {
   return {
@@ -41,7 +42,8 @@ function invoiceDraft(invoice: Invoice | null = null): Draft {
 }
 
 function editorMode(invoice: Invoice | null) {
-  if (!invoice || (invoice.status === "draft" && !invoice.stripeInvoiceId)) return "draft";
+  if (!invoice || (invoice.status === "draft" && !invoice.stripeInvoiceId
+    && !invoice.sendPending && !invoice.sendReviewRequired)) return "draft";
   if (invoice.status === "paid" && !invoice.stripeInvoiceId) return "payer";
   return "read";
 }
@@ -246,7 +248,8 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
           onClick={() => void run(() => openInvoicePdf(selected, token, false))}>Preview PDF</button>
         <button type="button" className="secondary" disabled={disabled || dirty}
           onClick={() => void run(() => openInvoicePdf(selected, token, true))}>Download PDF</button>
-        {editorMode(selected) !== "draft" && selected.lines?.length && selected.lines.length <= 100
+        {editorMode(selected) !== "draft" && !selected.sendPending && !selected.sendReviewRequired
+          && selected.lines?.length && selected.lines.length <= 100
           && selected.lines.every((line) => line.amountMinor >= 0) ? <button type="button" className="secondary"
           disabled={disabled || dirty} onClick={() => {
             setDraft({ ...invoiceDraft(selected), invoice: null, due: "" });
@@ -254,17 +257,18 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
             setError("");
           }}>Copy to new draft</button> : null}
         {connection?.configured && connection.stripeAccountId && !selected.sentAt && !selected.adoptedAt
-          && ["draft", "sending", "open"].includes(selected.status) && !confirm &&
+          && !selected.sendReviewRequired && (selected.status === "draft" || selected.sendPending) && !confirm &&
           <button className="primary" type="button" disabled={busy || dirty} onClick={() => void run(async () => {
             const result = await api<{ nextAction: Confirmation }>(`/invoices/${selected.id}/prepare-send`, json({}), token);
             setConfirm(result.nextAction);
-          })}>Send invoice</button>}
+          })}>{selected.sendPending ? "Resume sending" : "Send invoice"}</button>}
         {selected.stripeInvoiceId && <button type="button" className="secondary" disabled={disabled}
           onClick={() => void run(() => openInvoice(selected.id))}>Refresh Stripe status</button>}
         {selected.hostedInvoiceUrl && <a href={selected.hostedInvoiceUrl} target="_blank" rel="noreferrer">Hosted invoice</a>}
         {selected.stripePdfUrl && <a href={selected.stripePdfUrl} target="_blank" rel="noreferrer">Stripe PDF</a>}
       </>}
       details={<>
+        {selected?.sendReviewRequired && <p className="error">Review the previous delivery attempt before editing or sending this invoice.</p>}
         {selected?.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
         {selected?.stripeInvoiceId && <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding</p>}
       </>}

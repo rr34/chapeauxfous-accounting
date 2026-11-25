@@ -7,6 +7,30 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0029: simplify-accounting-invoice-status
+-- Stop Accounting writers before applying. Deploy the matching invoice API after verification.
+ALTER TABLE accounting_invoices
+  ADD COLUMN IF NOT EXISTS send_review_required TINYINT(1) NOT NULL DEFAULT 0
+    COMMENT 'An imported delivery attempt must be reviewed before this invoice can be edited or sent.',
+  MODIFY COLUMN invoice_status VARCHAR(40) NOT NULL DEFAULT 'draft'
+    COMMENT 'Accounting invoice lifecycle status.';
+
+UPDATE accounting_invoices
+   SET send_review_required = IF(invoice_status = 'needs_review', 1, send_review_required),
+       invoice_status = CASE
+         WHEN stripe_invoice_id IS NOT NULL AND stripe_status IN ('draft','open','paid','void','uncollectible')
+           THEN stripe_status
+         WHEN invoice_status = 'issued' THEN 'open'
+         WHEN invoice_status IN ('sending','needs_review') THEN 'draft'
+         ELSE invoice_status
+       END;
+
+ALTER TABLE accounting_invoices
+  MODIFY COLUMN invoice_status ENUM('draft','open','paid','void','uncollectible') NOT NULL DEFAULT 'draft'
+    COMMENT 'Accounting invoice lifecycle status, updated from Stripe for Stripe-hosted invoices.';
+
+-- end migration 0029
+
 -- migration 0028: accounting-invoice-number-and-status
 -- Stop Accounting writers before applying. Deploy the matching invoice API after verification.
 -- Imported invoice numbers are preserved. Existing unnumbered invoices are assigned

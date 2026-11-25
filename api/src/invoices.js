@@ -11,6 +11,7 @@ const policies = {
 const reference = (kind) => z.string().max(512)
   .regex(new RegExp(`^agent-slayer://${kind}/[1-9][0-9]*$`)).nullable().optional();
 export const invoiceId = z.uuid();
+export const invoiceStatus = z.enum(["draft", "open", "paid", "void", "uncollectible"]);
 export const invoicePayer = z.object({
   payer_name: z.string().trim().min(1).max(500).nullable().optional(),
   payer_email: z.email().max(320).nullable().optional(),
@@ -71,16 +72,15 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     "SELECT * FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [row.invoice_id],
   ) : [[]];
   const id = row.invoice_id;
-  const status = row.stripe_status && row.stripe_status !== "draft" ? row.stripe_status
-    : row.stripe_status === "draft" && row.invoice_status === "issued" ? "stripe_draft"
-      : row.invoice_status;
+  const status = row.invoice_status;
   const invoiceNumber = Number(row.invoice_number);
   const formatter = new Intl.NumberFormat("en", { style: "currency", currency: row.currency });
   const total = formatter.format(Number(row.amount_minor) / (10 ** formatter.resolvedOptions().maximumFractionDigits));
   return {
     id, invoiceNumber, sourceRef: `accounting://invoices/${id}`,
     displayName: `#${invoiceNumber} · ${row.payer_name ?? "Payer not set"} · ${total}`,
-    status, invoiceStatus: row.invoice_status, stripeStatus: row.stripe_status ?? null,
+    status, invoiceStatus: status, stripeStatus: row.stripe_status ?? null,
+    sendPending: sendPending(row), sendReviewRequired: Boolean(row.send_review_required),
     revision: row.revision, payerName: row.payer_name, payerEmail: row.payer_email,
     description: row.description, currency: row.currency, dueOn: row.due_on,
     paymentMethods: row.payment_methods, amountMinor: Number(row.amount_minor),
@@ -94,6 +94,25 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
       todoRef: line.todo_ref, receiptRef: line.receipt_ref,
     })) } : {}),
   };
+}
+
+function sendPending(row) {
+  return Boolean(row.send_started_at && !row.sent_at && !row.adopted_at
+    && ["draft", "open"].includes(row.invoice_status));
+}
+
+function assertCanSend(row) {
+  if (row.send_review_required) {
+    throw fail("Review the prior invoice delivery before sending.", "INVOICE_SEND_REVIEW_REQUIRED");
+  }
+  const freshDraft = row.invoice_status === "draft" && !row.stripe_invoice_id && !row.send_started_at;
+  if (row.adopted_at || row.sent_at || (!freshDraft && !sendPending(row))) {
+    throw fail("This invoice cannot be sent from its current state.", "INVOICE_ALREADY_ISSUED");
+  }
+  const started = row.send_started_at && Date.parse(row.send_started_at.replace(" ", "T") + "Z");
+  if (started && Date.now() - started >= 23 * 3600000) {
+    throw fail("Check this attempt in Stripe before sending again. Its automatic retry window expired.", "INVOICE_RETRY_EXPIRED");
+  }
 }
 
 async function nextInvoiceNumber(db, owner) {
@@ -159,13 +178,14 @@ export function createInvoiceService(pool, {
   }
 
   async function sync(db, owner, id, remote, sent = false) {
+    const appStatus = invoiceStatus.safeParse(remote.status);
     await db.execute(`UPDATE accounting_invoices SET stripe_status = ?, amount_paid_minor = ?,
       amount_remaining_minor = ?, stripe_hosted_url = ?, stripe_pdf_url = ?,
       sent_at = IF(?, COALESCE(sent_at, UTC_TIMESTAMP(6)), sent_at),
-      invoice_status = IF(?, 'issued', invoice_status)
+      invoice_status = COALESCE(?, invoice_status)
       WHERE owner_person_id = ? AND invoice_id = ?`,
-    [remote.status, remote.amount_paid, remote.amount_remaining, remote.hosted_invoice_url ?? null,
-      remote.invoice_pdf ?? null, sent, sent, owner, id]);
+    [remote.status ?? null, remote.amount_paid, remote.amount_remaining, remote.hosted_invoice_url ?? null,
+      remote.invoice_pdf ?? null, sent, appStatus.success ? appStatus.data : null, owner, id]);
     return getRow(db, owner, id);
   }
 
@@ -192,7 +212,8 @@ export function createInvoiceService(pool, {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [...values, owner, id, invoiceNumber]);
       } else {
         const row = await getRow(db, owner, id, true);
-        if (row.revision !== revision || row.invoice_status !== "draft" || row.stripe_invoice_id) {
+        if (row.revision !== revision || row.invoice_status !== "draft" || row.stripe_invoice_id
+          || row.send_started_at || row.send_review_required) {
           throw fail("The draft changed or sending has started. Read the current invoice.", "INVOICE_REVISION_CONFLICT");
         }
         const [existing] = await db.execute(
@@ -321,9 +342,7 @@ export function createInvoiceService(pool, {
 
   async function prepareSend(owner, id) {
     const row = await getRow(pool, owner, id);
-    if (row.adopted_at || row.sent_at || !["draft", "sending"].includes(row.invoice_status) || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
-      throw fail("This invoice has already been issued or adopted.", "INVOICE_ALREADY_ISSUED");
-    }
+    assertCanSend(row);
     if (!row.payer_name || !row.payer_email || !row.due_on || !Number(row.amount_minor)
       || stripeDate(row.due_on, true) <= Date.now() / 1000) {
       throw fail("Set a payer name, email, current or future due date, and positive total.", "INVOICE_INCOMPLETE");
@@ -360,14 +379,8 @@ export function createInvoiceService(pool, {
           throw fail("The invoice or Stripe account changed. Prepare a fresh confirmation.", "INVOICE_REVISION_CONFLICT");
         }
         if (!row.sent_at) {
-          if (row.adopted_at || !["draft", "sending"].includes(row.invoice_status) || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
-            throw fail("This invoice can no longer be sent.", "INVOICE_ALREADY_ISSUED");
-          }
-          const started = row.send_started_at && Date.parse(row.send_started_at.replace(" ", "T") + "Z");
-          if (started && Date.now() - started >= 23 * 3600000) {
-            throw fail("Check this attempt in Stripe before sending again. Its automatic retry window expired.", "INVOICE_RETRY_EXPIRED");
-          }
-          await db.execute(`UPDATE accounting_invoices SET stripe_account_id = ?, invoice_status = 'sending',
+          assertCanSend(row);
+          await db.execute(`UPDATE accounting_invoices SET stripe_account_id = ?,
             send_started_at = COALESCE(send_started_at, UTC_TIMESTAMP(6))
             WHERE owner_person_id = ? AND invoice_id = ?`, [plan.accountId, owner, plan.id]);
         }
@@ -434,14 +447,14 @@ export function createInvoiceService(pool, {
           (invoice_id, owner_person_id, payer_name, payer_email, description, currency, due_on,
            payment_methods, amount_minor, revision, stripe_account_id, stripe_customer_id, stripe_invoice_id,
            invoice_number, invoice_status, adopted_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', UTC_TIMESTAMP(6))`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))`,
         [id, owner, remote.customer_name ?? null, remote.customer_email ?? null,
           remote.description?.slice(0, 1000) ?? null, remote.currency.toUpperCase(),
           remote.due_date ? new Date(remote.due_date * 1000).toISOString().slice(0, 10) : null,
           remote.payment_settings?.payment_method_types?.includes("card")
             ? remote.payment_settings.payment_method_types.includes("us_bank_account") ? "card_and_ach" : "card_only"
             : "ach_only",
-          remote.total, randomUUID(), accountId, remote.customer, remoteId, invoiceNumber]);
+          remote.total, randomUUID(), accountId, remote.customer, remoteId, invoiceNumber, remote.status]);
         if (lines.length) await saveLines(db, id, lines);
         await sync(db, owner, id, remote);
         return id;

@@ -4071,12 +4071,12 @@ export default function App() {
           onClick={() => selectWorkspaceView("chart")}>Chart of accounts</button>
         {currentAccount && <RecentAccountNav currentAccount={currentAccount} recentAccounts={recentAccounts}
           accounts={accounts} active={workspaceView === "account"} onSelect={selectAccount} />}
+        <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
+          onClick={() => selectWorkspaceView("statements")}>Import</button>
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
         <button className={workspaceView === "invoices" ? "active" : ""} aria-pressed={workspaceView === "invoices"}
           onClick={() => selectWorkspaceView("invoices")}>Invoices</button>
-        <button className={workspaceView === "statements" ? "active" : ""} aria-pressed={workspaceView === "statements"}
-          onClick={() => selectWorkspaceView("statements")}>Import</button>
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
           onClick={() => selectWorkspaceView("misfits")}>Import issues
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>

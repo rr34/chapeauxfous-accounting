@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
-import { createInvoiceService, invoiceDraft, invoiceId, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceDraft, invoiceId, invoiceStatus, stripeInvoiceId } from "./invoices.js";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
@@ -715,7 +715,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const invoiceOutput = z.object({
     id: invoiceId, invoiceNumber: z.number().int().positive(), sourceRef: z.string(), displayName: z.string(),
-    status: z.string(), invoiceStatus: z.string(), stripeStatus: z.string().nullable(),
+    status: invoiceStatus, invoiceStatus, stripeStatus: z.string().nullable(),
+    sendPending: z.boolean(), sendReviewRequired: z.boolean(),
     revision: z.uuid(), payerName: z.string().nullable(), payerEmail: z.string().nullable(),
     description: z.string().nullable(), currency: z.string(), dueOn: z.string().nullable(),
     paymentMethods: z.string(), amountMinor: z.number().int(), amountPaidMinor: z.number().int(),
