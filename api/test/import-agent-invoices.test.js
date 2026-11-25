@@ -25,10 +25,15 @@ test("preserves local payment status and exact source references", () => {
 test("dry run is read-only, apply is atomic, and retry skips already imported invoices", async () => {
   let previous;
   let committed = 0;
+  let sourcePerson;
   const source = {
-    async query(sql) {
-      if (sql.includes("FROM payment_invoices")) return [[row]];
-      if (sql.includes("FROM payment_invoice_lines")) return [[line]];
+    async query(sql, values) {
+      if (sql === "SET @timev3_person_id = ?") {
+        [sourcePerson] = values;
+        return;
+      }
+      if (sql.includes("FROM payment_invoices")) return [sourcePerson === 1 ? [row] : []];
+      if (sql.includes("FROM payment_invoice_lines")) return [sourcePerson === 1 ? [line] : []];
       assert.match(sql, /REPEATABLE READ|READ ONLY/);
     },
     async rollback() {},
@@ -50,7 +55,9 @@ test("dry run is read-only, apply is atomic, and retry skips already imported in
     },
     async beginTransaction() {}, async commit() { committed++; }, async rollback() {},
   };
-  const input = { source, destination, owner: 1 };
+  const input = { source, destination, sourcePerson: 1, owner: 1 };
+  assert.equal((await importAgentInvoices({ ...input, sourcePerson: 2 })).sourceInvoices, 0);
+  await assert.rejects(importAgentInvoices({ ...input, sourcePerson: 2, apply: true }), /No invoices found/);
   assert.equal((await importAgentInvoices(input)).create, 1);
   assert.equal(previous, undefined);
   assert.equal((await importAgentInvoices({ ...input, apply: true })).create, 1);

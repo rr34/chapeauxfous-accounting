@@ -49,7 +49,9 @@ export function normalizeAgentInvoice(row, sourceLines) {
   return { row, lines, amount, paid, remaining, stripeStatus };
 }
 
-async function snapshot(source) {
+async function snapshot(source, sourcePerson) {
+  // Agent's logical views select rows using a connection-local person context.
+  await source.query("SET @timev3_person_id = ?", [personId(sourcePerson, "Source person")]);
   await source.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
   await source.query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
   try {
@@ -137,8 +139,9 @@ async function enrichInvoice(db, id, invoice) {
   }
 }
 
-export async function importAgentInvoices({ source, destination, owner, apply = false }) {
-  const invoices = await snapshot(source);
+export async function importAgentInvoices({ source, destination, sourcePerson, owner, apply = false }) {
+  const invoices = await snapshot(source, sourcePerson);
+  if (apply && !invoices.length) throw new Error(`No invoices found for Agent person ${sourcePerson}. Check the source before applying.`);
   if (apply) await destination.beginTransaction();
   else await destination.query("START TRANSACTION READ ONLY");
   const counts = { sourceInvoices: invoices.length, create: 0, enrichStripeImport: 0, alreadyImported: 0,
@@ -197,7 +200,7 @@ async function main() {
       supportBigNumbers: true, bigNumberStrings: true, charset: "utf8mb4",
     });
     destination = await pool.getConnection();
-    const counts = await importAgentInvoices({ source, destination, owner, apply: args.apply });
+    const counts = await importAgentInvoices({ source, destination, sourcePerson, owner, apply: args.apply });
     console.log(JSON.stringify({ mode: args.apply ? "applied" : "dry-run", sourcePerson, accountingPerson: owner, ...counts }, null, 2));
   } finally {
     destination?.release();
