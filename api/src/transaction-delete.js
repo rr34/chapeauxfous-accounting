@@ -230,6 +230,10 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
       "Accounts and import history can be deleted only when clearing the whole ledger.");
   }
   return withPoolTransaction(pool, async (connection) => {
+    if (removeAccounts) {
+      const [invoices] = await connection.query("SELECT invoice_id FROM accounting_invoices WHERE owner_person_id = ? LIMIT 1", [personId]);
+      if (invoices.length) throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The chart of accounts supports saved invoices and cannot be cleared.");
+    }
     await pruneOwnerAccountingImportPlans(connection, personId);
     const snapshot = await ledgerSnapshot(connection, personId);
     const availableIds = snapshot.transactions.map((row) => Number(row.transaction_id));
@@ -388,6 +392,11 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     const payload = parseJson(row.payload_json, "payload");
     const transactionIds = normalizeIds(payload.transactionIds);
     const deleteAccounts = payload.deleteAccounts === true;
+    if (deleteAccounts) {
+      await connection.query("SELECT person_id FROM people2_people WHERE person_id = ? FOR UPDATE", [personId]);
+      const [invoices] = await connection.query("SELECT invoice_id FROM accounting_invoices WHERE owner_person_id = ? LIMIT 1", [personId]);
+      if (invoices.length) throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The chart of accounts supports saved invoices and cannot be cleared.");
+    }
     const deleteImportHistory = payload.deleteImportHistory === true;
     if ((deleteAccounts || deleteImportHistory) && payload.scope !== "all") {
       await invalidate(connection, planId, personId, "INVALID_EXTENDED_DELETE_SCOPE");

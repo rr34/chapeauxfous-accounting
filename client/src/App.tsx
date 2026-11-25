@@ -62,6 +62,7 @@ type TransactionDeletionPreview = {
 };
 type DataSummary = {
   accountCount: number;
+  invoiceCount: number;
   transactionCount: number;
   lineItemCount: number;
   assertionCount: number;
@@ -107,6 +108,7 @@ type UserDeletionPreview = {
     name: string;
     email: string;
     accountCount: number;
+    invoiceCount: number;
     transactionCount: number;
     lineItemCount: number;
     assertionCount: number;
@@ -3518,8 +3520,10 @@ function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
       <p>{summary ? `${summary.transactionCount} transactions · ${summary.accountCount} accounts · ${summary.importJobCount} import jobs`
         : "Counting all stored accounting data…"}</p>
       <label className="checkbox-field data-delete-choice"><input type="checkbox" checked={deleteAccounts}
+        disabled={Boolean(summary?.invoiceCount)}
         onChange={(event) => setDeleteAccounts(event.target.checked)} />
         Also delete the complete chart of accounts and known balances</label>
+      {Boolean(summary?.invoiceCount) && <p className="muted">Saved invoices require the chart of accounts.</p>}
       <label className="checkbox-field data-delete-choice"><input type="checkbox" checked={deleteImportHistory}
         onChange={(event) => setDeleteImportHistory(event.target.checked)} />
         Also delete all {summary?.importJobCount ?? ""} import jobs and their staged or misfit records</label>
@@ -3540,6 +3544,7 @@ function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
         <div className="deletion-summary">
           <div><span>Transactions</span><strong>{preview.summary.transactionCount}</strong></div>
           <div><span>Accounts</span><strong>{preview.summary.accountCount}</strong></div>
+          <div><span>Invoices</span><strong>{preview.summary.invoiceCount}</strong></div>
           <div><span>Import jobs</span><strong>{preview.summary.importJobCount}</strong></div>
           <div><span>API tokens</span><strong>{preview.summary.apiTokenCount}</strong></div>
         </div>
@@ -4086,7 +4091,7 @@ export default function App() {
           ? <ChartOfAccounts accounts={accounts} currencies={currencies} selectedAccountId={selectedAccountId}
               token={token} onSelectAccount={selectAccount} onChanged={refresh} />
           : workspaceView === "invoices"
-          ? <InvoiceWorkspace token={token} />
+          ? <InvoiceWorkspace token={token} accounts={accounts} />
           : workspaceView === "misfits"
           ? <ImportMisfits jobs={importJobs} accounts={accounts} currencies={currencies} token={token} onChanged={refresh} />
           : workspaceView === "statements"

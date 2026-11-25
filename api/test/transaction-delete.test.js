@@ -206,6 +206,8 @@ function deletionPool() {
             const before = state.assertions.length; state.assertions = []; return [{ affectedRows: before }];
           }
           if (sql.startsWith("UPDATE accounts SET parent_account_id")) return [{ affectedRows: 0 }];
+          if (sql.startsWith("SELECT invoice_id FROM accounting_invoices")) return [[]];
+          if (sql.startsWith("SELECT person_id FROM people2_people")) return [[{ person_id: params[0] }]];
           if (sql.startsWith("DELETE FROM accounts")) {
             const before = state.accounts.length; state.accounts = []; return [{ affectedRows: before }];
           }

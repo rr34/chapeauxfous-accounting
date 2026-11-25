@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
-import { createInvoiceService, invoiceDraft, invoiceId, invoiceStatus, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceStatus, stripeInvoiceId } from "./invoices.js";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
@@ -708,15 +708,17 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   };
 
   const invoices = services.invoices ?? createInvoiceService(pool);
-  const invoiceMeta = (bound = false, allowUnbound = false) => toolMetadata("accounting.invoices", {
-    dependencies: bound && !allowUnbound ? ["list_invoices"] : [],
-    objectInputs: bound ? [{ path: "/invoice_id", objectType: "accounting.invoice", value: "id",
-      ...(allowUnbound ? { allowUnbound: true } : {}) }] : [],
+  const invoiceMeta = (bound = false, allowUnbound = false, accountPaths = []) => toolMetadata("accounting.invoices", {
+    dependencies: [...(bound && !allowUnbound ? ["list_invoices"] : []), ...(accountPaths.length ? ["list_account_objects"] : [])],
+    objectInputs: [...(bound ? [{ path: "/invoice_id", objectType: "accounting.invoice", value: "id",
+      ...(allowUnbound ? { allowUnbound: true } : {}) }] : []),
+    ...accountPaths.map((path) => ({ path, objectType: "accounting.account", value: "id" }))],
   });
+  const invoiceAccountPaths = ["/receivable_account_id", "/lines/*/account_id"];
   const invoiceOutput = z.object({
     id: invoiceId, invoiceNumber: z.number().int().positive(), sourceRef: z.string(), displayName: z.string(),
     status: invoiceStatus, invoiceStatus, stripeStatus: z.string().nullable(),
-    sendPending: z.boolean(), sendReviewRequired: z.boolean(),
+    sendPending: z.boolean(), sendReviewRequired: z.boolean(), receivableAccountId: invoiceAccountId,
     revision: z.uuid(), payerName: z.string().nullable(), payerEmail: z.string().nullable(),
     description: z.string().nullable(), currency: z.string(), dueOn: z.string().nullable(),
     paymentMethods: z.string(), amountMinor: z.number().int(), amountPaidMinor: z.number().int(),
@@ -725,7 +727,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     sentAt: z.string().nullable(), adoptedAt: z.string().nullable(), refreshFailed: z.boolean(),
     lines: z.array(z.object({
       id: invoiceId, sourceRef: z.string(), position: z.number().int(), description: z.string(),
-      amountMinor: z.number().int(), todoRef: z.string().nullable(), receiptRef: z.string().nullable(),
+      amountMinor: z.number().int(), accountId: invoiceAccountId, todoRef: z.string().nullable(), receiptRef: z.string().nullable(),
     })).optional(),
   });
   const resultOutput = { contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.string() };
@@ -754,22 +756,31 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         qualifiers: [{ field: "invoiceNumber", summary: "Customer-facing invoice number, unique within this owner." },
           { field: "status", summary: "Current collection status, using Stripe when available." },
           { field: "currency", summary: "ISO currency code for invoice amounts." }],
+        relationships: [{ name: "receivableAccount", targetType: "accounting.account",
+          summary: "receivableAccountId identifies the asset account assigned to the invoice total." }],
       }],
     } },
   }, (input) => invoices.list(personId, input));
   invoiceTool("create_invoice", {
     title: "Create invoice draft",
-    description: "Save a local invoice draft from one or more lines. Payer, due date and individual prices may be incomplete. Use copied payer values and exact optional to-do and file references for provenance. This operation does not send or post the invoice.",
+    description: "Save a local draft with one or more lines. Supply an active same-currency receivable asset account and a different active account per line, or omit IDs to use the unique Accounts Receivable asset and designated suspense defaults. Payer, due date and prices may be incomplete. Creating a draft never sends it or posts transactions.",
     inputSchema: invoiceDraft.shape, outputSchema: invoiceResult, annotations: writesData,
+    _meta: invoiceMeta(false, false, invoiceAccountPaths),
   }, async (input) => ({ invoice: await invoices.saveDraft(personId, input) }));
   invoiceTool("update_invoice", {
     title: "Update invoice draft",
     description: "Read the exact invoice first. Supply its revision and the complete desired draft. Preserve unspecified fields and existing lines in their original positions, including source references. New lines may be appended.",
     inputSchema: { invoice_id: invoiceId, revision: z.uuid(), ...invoiceDraft.shape },
-    outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true),
+    outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, revision, ...input }) => ({
     invoice: await invoices.saveDraft(personId, input, { id: invoice_id, revision }),
   }));
+  invoiceTool("assign_invoice_accounts", {
+    title: "Assign invoice accounts",
+    description: "Assign the invoice total to an exact active same-currency receivable asset account, or assign one or more exact invoice lines to ledger accounts. Read the invoice and target accounts first. Pass the invoice revision and only the assignments to change. Works for issued or paid invoices and changes neither billing terms nor ledger postings.",
+    inputSchema: { invoice_id: invoiceId, ...invoiceAccountAssignments.shape },
+    outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
+  }, async ({ invoice_id, ...input }) => ({ invoice: await invoices.assignAccounts(personId, invoice_id, input) }));
   invoiceTool("prepare_invoice_send", {
     title: "Prepare invoice send confirmation",
     description: "Use only when the user explicitly requests sending this invoice. Validate the exact draft and connected Stripe account. Present the returned instruction and wait for approval of its exact handoff.",
@@ -792,10 +803,12 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   invoiceTool("adopt_stripe_invoice", {
     title: "Adopt an existing Stripe invoice",
     description: "Read the exact finalized Stripe invoice and all its lines from this owner's connected account and save or return the matching Accounting record. Stripe is not modified and the customer is not contacted.",
-    inputSchema: { stripe_invoice_id: stripeInvoiceId },
+    inputSchema: { stripe_invoice_id: stripeInvoiceId, receivable_account_id: invoiceAccountId.optional(),
+      line_account_id: invoiceAccountId.optional() },
     outputSchema: { ...invoiceResult, idempotentReplay: z.boolean() },
     annotations: { ...writesData, idempotentHint: true },
-  }, ({ stripe_invoice_id }) => invoices.adopt(personId, stripe_invoice_id));
+    _meta: invoiceMeta(false, false, ["/receivable_account_id", "/line_account_id"]),
+  }, ({ stripe_invoice_id, ...assignments }) => invoices.adopt(personId, stripe_invoice_id, assignments));
   invoiceTool("get_stripe_setup", {
     title: "Get Stripe setup instructions",
     description: "Read the Stripe connection status and give the user Accounting's Invoices page for setup. Stripe authorization is completed in the Accounting web app.",

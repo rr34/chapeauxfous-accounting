@@ -18,15 +18,24 @@ export const invoicePayer = z.object({
 });
 export const stripeBrowserKey = z.uuid();
 export const stripeInvoiceId = z.string().regex(/^in_[a-zA-Z0-9]+$/).max(255);
+export const invoiceAccountId = z.number().int().positive();
+export const invoiceAccountAssignments = z.object({
+  revision: z.uuid(),
+  receivable_account_id: invoiceAccountId.optional(),
+  lines: z.array(z.object({ invoice_line_id: z.uuid(), account_id: invoiceAccountId })).max(500).optional(),
+}).refine((input) => input.receivable_account_id != null || Boolean(input.lines?.length),
+  "Choose at least one invoice account assignment.");
 export const invoiceDraft = z.object({
   ...invoicePayer.shape,
   description: z.string().trim().max(1000).nullable().optional(),
   currency: z.string().regex(/^[A-Z]{3}$/),
+  receivable_account_id: invoiceAccountId.optional(),
   due_on: z.iso.date().nullable().optional(),
   payment_methods: z.enum(["ach_only", "card_only", "card_and_ach"]).default("ach_only"),
   lines: z.array(z.object({
     description: z.string().trim().min(1).max(1000),
     amount_minor: z.number().int().min(0).max(99999999).default(0),
+    account_id: invoiceAccountId.optional(),
     todo_ref: reference("todos"),
     receipt_ref: reference("files"),
   })).min(1).max(100),
@@ -81,7 +90,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     displayName: `#${invoiceNumber} · ${row.payer_name ?? "Payer not set"} · ${total}`,
     status, invoiceStatus: status, stripeStatus: row.stripe_status ?? null,
     sendPending: sendPending(row), sendReviewRequired: Boolean(row.send_review_required),
-    revision: row.revision, payerName: row.payer_name, payerEmail: row.payer_email,
+    revision: row.revision, receivableAccountId: Number(row.receivable_account_id), payerName: row.payer_name, payerEmail: row.payer_email,
     description: row.description, currency: row.currency, dueOn: row.due_on,
     paymentMethods: row.payment_methods, amountMinor: Number(row.amount_minor),
     amountPaidMinor: Number(row.amount_paid_minor),
@@ -91,6 +100,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     ...(includeLines ? { lines: lines.map((line) => ({
       id: line.invoice_line_id, sourceRef: `accounting://invoice-lines/${line.invoice_line_id}`,
       position: line.position, description: line.description, amountMinor: Number(line.amount_minor),
+      accountId: Number(line.account_id),
       todoRef: line.todo_ref, receiptRef: line.receipt_ref,
     })) } : {}),
   };
@@ -128,12 +138,42 @@ async function nextInvoiceNumber(db, owner) {
 async function saveLines(db, id, lines) {
   await db.query(
     `INSERT INTO accounting_invoice_lines
-     (invoice_line_id, invoice_id, position, description, amount_minor, todo_ref, receipt_ref) VALUES ?`,
+     (invoice_line_id, invoice_id, position, description, amount_minor, todo_ref, receipt_ref, account_id) VALUES ?`,
     [lines.map((line, index) => [
       line.id ?? randomUUID(), id, index + 1, line.description, line.amount_minor,
-      line.todo_ref ?? null, line.receipt_ref ?? null,
+      line.todo_ref ?? null, line.receipt_ref ?? null, line.account_id,
     ])],
   );
+}
+
+async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAccountIds) {
+  const ids = [...new Set([receivableId, ...lineAccountIds].filter((id) => id != null))];
+  const [accounts] = await db.execute(`SELECT a.account_id, a.AccountType AS type, a.AccountName AS name,
+    a.is_suspense, a.account_currency_id
+    FROM accounts a JOIN currencies c ON c.currency_id = a.account_currency_id
+    WHERE a.owner_person_id = ? AND a.archived_at IS NULL AND a.is_placeholder = 0
+      AND c.CurrencyAbbreviation = ? AND c.currency_type = 'iso_4217'
+      AND (a.is_suspense = 1 OR a.AccountName = 'Accounts Receivable'${ids.length ? ` OR a.account_id IN (${ids.map(() => "?").join(",")})` : ""})
+    ORDER BY a.account_id FOR UPDATE`, [owner, currency, ...ids]);
+  const byId = new Map(accounts.map((account) => [Number(account.account_id), account]));
+  const isReceivable = (account) => account?.type === "asset" && !Number(account.is_suspense);
+  const named = accounts.filter((account) => isReceivable(account) && account.name.toLowerCase() === "accounts receivable");
+  const receivable = receivableId != null ? byId.get(Number(receivableId)) : named.length === 1 ? named[0] : null;
+  if (!isReceivable(receivable)) {
+    throw fail(`Choose an active ${currency} asset account for Accounts Receivable, or create one named Accounts Receivable.`,
+      "INVOICE_RECEIVABLE_ACCOUNT_REQUIRED", 400);
+  }
+  const suspense = accounts.filter((account) => Number(account.is_suspense)
+    && account.account_currency_id === receivable.account_currency_id);
+  const lineIds = lineAccountIds.map((id, index) => {
+    const account = id != null ? byId.get(Number(id)) : suspense.length === 1 ? suspense[0] : null;
+    if (!account || account.account_currency_id !== receivable.account_currency_id || account.account_id === receivable.account_id) {
+      throw fail(`Choose a different active ${currency} account for invoice line ${index + 1}, or designate a suspense account.`,
+        "INVOICE_LINE_ACCOUNT_REQUIRED", 400);
+    }
+    return Number(account.account_id);
+  });
+  return { receivableId: Number(receivable.account_id), lineIds };
 }
 
 async function withInvoiceLock(pool, id, work) {
@@ -207,9 +247,12 @@ export function createInvoiceService(pool, {
         data.currency, data.due_on ?? null, data.payment_methods, total, randomUUID()];
       if (revision == null) {
         const invoiceNumber = await nextInvoiceNumber(db, owner);
+        const accounts = await resolveInvoiceAccounts(db, owner, data.currency, data.receivable_account_id,
+          data.lines.map((line) => line.account_id));
+        data.lines.forEach((line, index) => { line.account_id = accounts.lineIds[index]; });
         await db.execute(`INSERT INTO accounting_invoices (payer_name, payer_email, description,
-          currency, due_on, payment_methods, amount_minor, revision, owner_person_id, invoice_id, invoice_number)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [...values, owner, id, invoiceNumber]);
+          currency, due_on, payment_methods, amount_minor, revision, owner_person_id, invoice_id, invoice_number, receivable_account_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [...values, owner, id, invoiceNumber, accounts.receivableId]);
       } else {
         const row = await getRow(db, owner, id, true);
         if (row.revision !== revision || row.invoice_status !== "draft" || row.stripe_invoice_id
@@ -217,20 +260,51 @@ export function createInvoiceService(pool, {
           throw fail("The draft changed or sending has started. Read the current invoice.", "INVOICE_REVISION_CONFLICT");
         }
         const [existing] = await db.execute(
-          "SELECT invoice_line_id, description, amount_minor, todo_ref, receipt_ref FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position",
+          "SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position",
           [id],
         );
         if (data.lines.length < existing.length) {
           throw fail("Keep the existing lines in their original positions.", "INVOICE_LINE_REMOVAL_UNSUPPORTED", 400);
         }
+        const sameCurrency = row.currency === data.currency;
+        const accounts = await resolveInvoiceAccounts(db, owner, data.currency,
+          data.receivable_account_id ?? (sameCurrency ? row.receivable_account_id : null),
+          data.lines.map((line, index) => line.account_id ?? (sameCurrency ? existing[index]?.account_id : null)));
         await db.execute(`UPDATE accounting_invoices SET payer_name = ?, payer_email = ?, description = ?,
-          currency = ?, due_on = ?, payment_methods = ?, amount_minor = ?, revision = ?, amount_remaining_minor = NULL
-          WHERE owner_person_id = ? AND invoice_id = ?`, [...values, owner, id]);
+          currency = ?, due_on = ?, payment_methods = ?, amount_minor = ?, revision = ?, amount_remaining_minor = NULL,
+          receivable_account_id = ? WHERE owner_person_id = ? AND invoice_id = ?`, [...values, accounts.receivableId, owner, id]);
         await db.execute("DELETE FROM accounting_invoice_lines WHERE invoice_id = ?", [id]);
         // Preserve positional identities for the existing lines, including edited amounts and text.
-        data.lines.forEach((line, index) => { line.id = existing[index]?.invoice_line_id; });
+        data.lines.forEach((line, index) => {
+          line.id = existing[index]?.invoice_line_id;
+          line.account_id = accounts.lineIds[index];
+        });
       }
       await saveLines(db, id, data.lines);
+      return invoiceObject(db, await getRow(db, owner, id));
+    });
+  }
+
+  async function assignAccounts(owner, id, input) {
+    const data = invoiceAccountAssignments.parse(input);
+    return withPoolTransaction(pool, async (db) => {
+      const row = await getRow(db, owner, id, true);
+      if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before assigning accounts.", "INVOICE_REVISION_CONFLICT");
+      const [lines] = await db.execute("SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [id]);
+      const changes = new Map((data.lines ?? []).map((line) => [line.invoice_line_id, line.account_id]));
+      if (changes.size !== (data.lines?.length ?? 0) || [...changes.keys()].some((key) => !lines.some((line) => line.invoice_line_id === key))) {
+        throw fail("Use distinct line IDs from this invoice.", "INVOICE_ACCOUNT_LINES_INVALID", 400);
+      }
+      const accounts = await resolveInvoiceAccounts(db, owner, row.currency,
+        data.receivable_account_id ?? row.receivable_account_id,
+        lines.map((line) => changes.get(line.invoice_line_id) ?? line.account_id));
+      await db.execute("UPDATE accounting_invoices SET receivable_account_id = ?, revision = ? WHERE owner_person_id = ? AND invoice_id = ?",
+        [accounts.receivableId, randomUUID(), owner, id]);
+      for (const [index, line] of lines.entries()) {
+        if (!changes.has(line.invoice_line_id)) continue;
+        await db.execute("UPDATE accounting_invoice_lines SET account_id = ? WHERE invoice_id = ? AND invoice_line_id = ?",
+          [accounts.lineIds[index], id, line.invoice_line_id]);
+      }
       return invoiceObject(db, await getRow(db, owner, id));
     });
   }
@@ -425,10 +499,20 @@ export function createInvoiceService(pool, {
     });
   }
 
-  async function adopt(owner, remoteId) {
+  async function adopt(owner, remoteId, { receivable_account_id, line_account_id } = {}) {
     const accountId = await account(owner);
     const client = stripe();
     const options = { stripeAccount: accountId };
+    const lookup = async () => {
+      const [[existing]] = await pool.execute(`SELECT invoice_id FROM accounting_invoices
+        WHERE owner_person_id = ? AND stripe_account_id = ? AND stripe_invoice_id = ?`, [owner, accountId, remoteId]);
+      return existing?.invoice_id;
+    };
+    const knownId = await lookup();
+    if (knownId) {
+      const { objects: [invoice] } = await list(owner, { invoice_id: knownId });
+      return { invoice, idempotentReplay: true };
+    }
     const remote = await client.invoices.retrieve(remoteId, {}, options);
     if (!["open", "paid", "void", "uncollectible"].includes(remote.status)) {
       throw fail("Only finalized Stripe invoices can be adopted.", "STRIPE_INVOICE_NOT_FINALIZED");
@@ -443,28 +527,29 @@ export function createInvoiceService(pool, {
     try {
       savedId = await withPoolTransaction(pool, async (db) => {
         const invoiceNumber = await nextInvoiceNumber(db, owner);
+        const accounts = await resolveInvoiceAccounts(db, owner, remote.currency.toUpperCase(), receivable_account_id,
+          lines.map(() => line_account_id));
+        lines.forEach((line, index) => { line.account_id = accounts.lineIds[index]; });
         await db.execute(`INSERT INTO accounting_invoices
           (invoice_id, owner_person_id, payer_name, payer_email, description, currency, due_on,
            payment_methods, amount_minor, revision, stripe_account_id, stripe_customer_id, stripe_invoice_id,
-           invoice_number, invoice_status, adopted_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))`,
+           invoice_number, invoice_status, receivable_account_id, adopted_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))`,
         [id, owner, remote.customer_name ?? null, remote.customer_email ?? null,
           remote.description?.slice(0, 1000) ?? null, remote.currency.toUpperCase(),
           remote.due_date ? new Date(remote.due_date * 1000).toISOString().slice(0, 10) : null,
           remote.payment_settings?.payment_method_types?.includes("card")
             ? remote.payment_settings.payment_method_types.includes("us_bank_account") ? "card_and_ach" : "card_only"
             : "ach_only",
-          remote.total, randomUUID(), accountId, remote.customer, remoteId, invoiceNumber, remote.status]);
+          remote.total, randomUUID(), accountId, remote.customer, remoteId, invoiceNumber, remote.status, accounts.receivableId]);
         if (lines.length) await saveLines(db, id, lines);
         await sync(db, owner, id, remote);
         return id;
       });
     } catch (error) {
       if (error.code !== "ER_DUP_ENTRY") throw error;
-      const [[existing]] = await pool.execute(`SELECT invoice_id FROM accounting_invoices
-        WHERE owner_person_id = ? AND stripe_account_id = ? AND stripe_invoice_id = ?`, [owner, accountId, remoteId]);
-      if (!existing) throw error;
-      savedId = existing.invoice_id;
+      savedId = await lookup();
+      if (!savedId) throw error;
     }
     // Once the local mapping is visible, reread Stripe to close the adoption/webhook race.
     const { objects: [invoice] } = await list(owner, { invoice_id: savedId });
@@ -485,5 +570,5 @@ export function createInvoiceService(pool, {
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
     invoiceObject(db, await getRow(db, owner, id)));
-  return { saveDraft, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  return { saveDraft, assignAccounts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

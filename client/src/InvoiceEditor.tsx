@@ -1,13 +1,14 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { decimalToUnits } from "./money";
+import type { Account } from "./types";
 
 export type PaymentMethods = "ach_only" | "card_only" | "card_and_ach";
 export type EditableInvoiceLine = {
-  key: string; description: string; amount: string; todoRef?: string | null; receiptRef?: string | null;
+  key: string; description: string; amount: string; accountId?: number; todoRef?: string | null; receiptRef?: string | null;
 };
 export type InvoiceDraftFields = {
   payer: string; email: string; description: string; currency: string; due: string;
-  methods: PaymentMethods; lines: EditableInvoiceLine[];
+  methods: PaymentMethods; receivableAccountId?: number; lines: EditableInvoiceLine[];
 };
 
 export function invoiceCurrencyScale(currency: string) {
@@ -40,8 +41,9 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
 }
 
 export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, paymentStatus, savedTotal, busy, error,
-  dirty, actions, details, confirmation, onChange, onClose, onSave }: {
-  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "read";
+  accounts, dirty, actions, details, confirmation, onChange, onClose, onSave }: {
+  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "read";
+  accounts: Account[];
   invoiceNumber?: number;
   paymentStatus?: string; savedTotal?: string; busy: boolean; error: string; dirty: boolean;
   actions?: ReactNode; details?: ReactNode; confirmation?: ReactNode;
@@ -50,7 +52,10 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   const [references, setReferences] = useState<string | null>(null);
   const creating = existingLineCount === null;
   const editable = mode === "draft";
-  const payerEditable = mode !== "read";
+  const payerEditable = editable || mode === "payer";
+  const accountsEditable = editable || mode === "accounts";
+  const selectable = accounts.filter((account) => !account.placeholder && account.archivedAt == null
+    && account.currencyCode === draft.currency);
   const editingLocked = busy || Boolean(confirmation);
   const started = draft.lines.some((line) => line.description.trim() || line.amount.trim() || line.todoRef || line.receiptRef);
   const total = (() => {
@@ -76,8 +81,15 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           <label>Payment due date {editable && <small>Optional · when the customer should pay</small>}<input type="date" value={draft.due} readOnly={!editable}
             onChange={(event) => onChange({ ...draft, due: event.target.value })} /></label>
           <label>Currency<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required readOnly={!creating}
-            onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase() })} /></label>
+            onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase(),
+              receivableAccountId: undefined, lines: draft.lines.map((line) => ({ ...line, accountId: undefined })) })} /></label>
         </div>
+        <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable}
+          onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
+          <option value="" disabled={!creating}>Default Accounts Receivable</option>
+          {selectable.filter((account) => account.type === "asset" && !account.suspense)
+            .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+        </select></label>
         {!creating && <div className="invoice-editor-summary">
           <div><small>Email</small><strong>{draft.email || "Not set"}</strong></div>
           <div><small>Due</small><strong>{draft.due || "Not set"}</strong></div>
@@ -106,6 +118,12 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             onChange={(event) => setLine(line.key, { description: event.target.value })} /></label>
           <label>Amount ({draft.currency || "currency"}) {editable && <small>Use 0.00 for no charge</small>}<input inputMode="decimal"
             value={line.amount} placeholder="0.00" readOnly={!editable} onChange={(event) => setLine(line.key, { amount: event.target.value })} /></label>
+          <label className="invoice-line-references">Line account<select value={line.accountId ?? ""} disabled={!accountsEditable}
+            onChange={(event) => setLine(line.key, { accountId: Number(event.target.value) || undefined })}>
+            <option value="" disabled={mode === "accounts"}>Default suspense account</option>
+            {selectable.filter((account) => account.id !== draft.receivableAccountId)
+              .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+          </select></label>
           {(references === line.key || line.todoRef || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
             <label>Agent to-do reference<input value={line.todoRef ?? ""} placeholder="agent-slayer://todos/…" readOnly={!editable}
               onChange={(event) => setLine(line.key, { todoRef: event.target.value })} /></label>
@@ -122,9 +140,9 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
       {error && <p className="error" role="alert">{error}</p>}
       <footer className="invoice-actions invoice-dialog-footer">
         {actions}
-        <button className="secondary" type="button" disabled={busy} onClick={onClose}>{payerEditable ? "Cancel" : "Close"}</button>
-        {payerEditable && <button className="primary" type="submit" disabled={editingLocked || !dirty || (editable && !started)}>
-          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : "Save changes"}
+        <button className="secondary" type="button" disabled={busy} onClick={onClose}>{mode === "read" ? "Close" : "Cancel"}</button>
+        {mode !== "read" && <button className="primary" type="submit" disabled={editingLocked || !dirty || (editable && !started)}>
+          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : mode === "accounts" ? "Save accounts" : "Save changes"}
         </button>}
       </footer>
     </form>

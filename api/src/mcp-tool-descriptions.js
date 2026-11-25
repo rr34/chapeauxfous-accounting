@@ -7,6 +7,7 @@ const descriptions = {
   list_invoices: read("List Accounting invoices or refresh one exact invoice from Stripe. Returns invoice lines and outstanding amounts."),
   create_invoice: mutate("Create an editable customer invoice draft using supplied names, amounts, and optional source references.", ["CREATE"]),
   update_invoice: mutate("Update an existing draft using its current revision and complete line list.", ["UPDATE"]),
+  assign_invoice_accounts: mutate("Change the receivable or line account assignments on one invoice while preserving billing terms and ledger balances.", ["UPDATE"]),
   prepare_invoice_send: read("Check an exact invoice and prepare the final send confirmation without contacting the payer."),
   send_invoice: { ...mutate("Send the exact confirmed invoice through Stripe.", ["EXECUTE"]), effectClassifications: ["MUTATING", "EXTERNAL"] },
   adopt_stripe_invoice: mutate("Import a finalized invoice from the connected Stripe account by exact Stripe invoice ID.", ["CREATE"]),

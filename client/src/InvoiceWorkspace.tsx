@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, fetchInvoicePdf } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
+import type { Account } from "./types";
 import InvoiceEditor, { blankInvoiceLine, invoiceCurrencyScale as scale,
   type InvoiceDraftFields, type PaymentMethods } from "./InvoiceEditor";
 
 type StripeConnection = { configured: boolean; stripeAccountId: string | null;
   webhookConfigured?: boolean; missingConnectSettings?: string[] };
-type InvoiceLine = { id: string; description: string; amountMinor: number; todoRef: string | null; receiptRef: string | null };
+type InvoiceLine = { id: string; description: string; amountMinor: number; accountId: number; todoRef: string | null; receiptRef: string | null };
 type Invoice = {
   id: string; invoiceNumber: number; revision: string; displayName: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible"; payerName: string | null;
@@ -16,6 +17,7 @@ type Invoice = {
   hostedInvoiceUrl: string | null; stripePdfUrl: string | null; adoptedAt: string | null;
   sentAt: string | null; lines?: InvoiceLine[];
   sendPending: boolean; sendReviewRequired: boolean;
+  receivableAccountId: number;
 };
 type Draft = InvoiceDraftFields & { invoice: Invoice | null };
 type Page = { objects: Invoice[]; nextCursor: string | null };
@@ -34,9 +36,10 @@ function invoiceDraft(invoice: Invoice | null = null): Draft {
   return {
     invoice, payer: invoice?.payerName ?? "", email: invoice?.payerEmail ?? "", description: invoice?.description ?? "",
     currency: invoice?.currency ?? "USD", due: invoice?.dueOn ?? "", methods: invoice?.paymentMethods ?? "ach_only",
+    receivableAccountId: invoice?.receivableAccountId,
     lines: invoice?.lines?.map((line) => ({
       key: line.id, description: line.description, amount: unitsToDecimal(String(line.amountMinor), scale(invoice.currency)),
-      todoRef: line.todoRef, receiptRef: line.receiptRef,
+      todoRef: line.todoRef, receiptRef: line.receiptRef, accountId: line.accountId,
     })) ?? [blankInvoiceLine()],
   };
 }
@@ -95,13 +98,14 @@ async function finishStripeReturn(token: string) {
   }
 }
 
-export default function InvoiceWorkspace({ token }: { token: string }) {
+export default function InvoiceWorkspace({ token, accounts }: { token: string; accounts: Account[] }) {
   const [connection, setConnection] = useState<StripeConnection | null>(null);
   const [page, setPage] = useState<Page>({ objects: [], nextCursor: null });
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Invoice | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [editingAccounts, setEditingAccounts] = useState(false);
   const [adoptId, setAdoptId] = useState("");
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(true);
@@ -156,12 +160,14 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
     setSelected(invoice);
     setPage((current) => ({ ...current, objects: current.objects.map((item) => item.id === id ? invoice : item) }));
     setDraft(invoiceDraft(invoice));
+    setEditingAccounts(false);
     setConfirm(null);
   }
 
   async function reloadAfterChange(invoice: Invoice, message: string) {
     setSelected(invoice);
     setDraft(invoiceDraft(invoice));
+    setEditingAccounts(false);
     setConfirm(null);
     setNotice(message);
     setPage(await fetchPage());
@@ -169,9 +175,20 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
 
   function saveDraft(event: FormEvent, value: Draft) {
     event.preventDefault();
-    const mode = editorMode(value.invoice);
+    const mode = editingAccounts ? "accounts" : editorMode(value.invoice);
     if (mode === "read") return;
     void run(async () => {
+      if (mode === "accounts" && value.invoice) {
+        const original = new Map(value.invoice.lines?.map((line) => [line.id, line.accountId]));
+        const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${value.invoice.id}/accounts`,
+          json({ revision: value.invoice.revision,
+            receivable_account_id: value.receivableAccountId !== value.invoice.receivableAccountId ? value.receivableAccountId : undefined,
+            lines: value.lines.filter((line) => original.get(line.key) !== line.accountId)
+              .map((line) => ({ invoice_line_id: line.key, account_id: line.accountId })),
+          }, "PATCH"), token);
+        await reloadAfterChange(invoice, "Invoice accounts saved.");
+        return;
+      }
       const payer = { payer_name: value.payer.trim() || null, payer_email: value.email.trim() || null };
       if (mode === "payer" && value.invoice) {
         const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${value.invoice.id}/payer`,
@@ -184,10 +201,12 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
         ...payer,
         description: value.description.trim() || null, currency: value.currency, due_on: value.due || null,
         payment_methods: value.methods, revision: value.invoice?.revision,
+        receivable_account_id: value.receivableAccountId,
         lines: value.lines.filter((line, index) => index < (value.invoice?.lines?.length ?? 0)
           || line.description.trim() || line.amount.trim() || line.todoRef?.trim() || line.receiptRef?.trim())
           .map((line) => ({
             description: line.description, amount_minor: Number(decimalToUnits(line.amount.trim() || "0", digits)),
+            account_id: line.accountId,
             todo_ref: line.todoRef?.trim() || null, receipt_ref: line.receiptRef?.trim() || null,
           })),
       };
@@ -199,7 +218,12 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
 
   const disabled = busy || confirm !== null;
   const dirty = Boolean(draft && (!draft.invoice || JSON.stringify(draft) !== JSON.stringify(invoiceDraft(draft.invoice))));
-  const closeEditor = () => { setDraft(null); setSelected(null); setConfirm(null); setError(""); };
+  const closeEditor = () => {
+    if (editingAccounts && selected) {
+      setEditingAccounts(false); setDraft(invoiceDraft(selected)); setError(""); return;
+    }
+    setDraft(null); setSelected(null); setConfirm(null); setError("");
+  };
   return <section className="account-register invoice-workspace" aria-label="Invoices">
     <div className="section-heading"><h2>Invoices</h2><button className="secondary" type="button"
       disabled={disabled} onClick={() => { setDraft(invoiceDraft()); setSelected(null); }}>New invoice</button></div>
@@ -239,11 +263,14 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
     {draft && <InvoiceEditor key={draft.invoice?.id ?? "new"} draft={draft}
       existingLineCount={draft.invoice ? draft.invoice.lines?.length ?? 0 : null}
       invoiceNumber={draft.invoice?.invoiceNumber}
-      mode={editorMode(draft.invoice)} paymentStatus={selected && statusLabel(selected.status) || undefined}
+      accounts={accounts} mode={editingAccounts ? "accounts" : editorMode(draft.invoice)}
+      paymentStatus={selected && statusLabel(selected.status) || undefined}
       savedTotal={selected ? money(selected.amountMinor, selected.currency) : undefined}
       busy={busy} dirty={dirty} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
       onClose={closeEditor} onSave={(event) => saveDraft(event, draft)}
-      actions={selected && <>
+      actions={selected && !editingAccounts && <>
+        {editorMode(selected) !== "draft" && <button type="button" className="secondary" disabled={disabled || dirty}
+          onClick={() => { setEditingAccounts(true); setError(""); }}>Edit accounts</button>}
         <button type="button" className="secondary" disabled={disabled || dirty}
           onClick={() => void run(() => openInvoicePdf(selected, token, false))}>Preview PDF</button>
         <button type="button" className="secondary" disabled={disabled || dirty}

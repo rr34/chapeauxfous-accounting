@@ -18,14 +18,19 @@ const env = {
   STRIPE_CONNECT_WEBHOOK_SECRET: "whsec_fixture",
   ACCOUNTING_STRIPE_STATE_SECRET: "fixture-state-secret-at-least-32-characters",
 };
+const accounts = [
+  { account_id: 11, type: "asset", name: "Accounts Receivable", is_suspense: 0, account_currency_id: 1 },
+  { account_id: 12, type: "expense", name: "Suspense", is_suspense: 1, account_currency_id: 1 },
+  { account_id: 13, type: "income", name: "Revenue", is_suspense: 0, account_currency_id: 1 },
+];
 
 test("drafts can change recipient and append a line, while local paid invoices only accept recipient correction", async () => {
   const row = {
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Old name", payer_email: "old@example.com",
     currency: "USD", amount_minor: 2500, amount_paid_minor: 0, amount_remaining_minor: 2500,
-    payment_methods: "ach_only", invoice_number: 16, invoice_status: "draft", stripe_invoice_id: null,
+    payment_methods: "ach_only", invoice_number: 16, invoice_status: "draft", stripe_invoice_id: null, receivable_account_id: 11,
   };
-  let lines = [{ invoice_line_id: id, position: 1, description: "Work", amount_minor: 2500 }];
+  let lines = [{ invoice_line_id: id, position: 1, description: "Work", amount_minor: 2500, account_id: 12 }];
   const db = {
     getConnection: async () => db,
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
@@ -35,7 +40,14 @@ test("drafts can change recipient and append a line, while local paid invoices o
         return [[{ ...row }]];
       }
       if (sql.includes("SELECT") && sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.startsWith("DELETE FROM accounting_invoice_lines")) { lines = []; return; }
+      if (sql.startsWith("UPDATE accounting_invoices SET receivable_account_id")) {
+        [row.receivable_account_id, row.revision] = values; return;
+      }
+      if (sql.startsWith("UPDATE accounting_invoice_lines SET account_id")) {
+        lines.find((line) => line.invoice_line_id === values[2]).account_id = values[0]; return;
+      }
       if (sql.includes("amount_remaining_minor = NULL")) {
         row.amount_remaining_minor = null;
         row.amount_minor = values[6];
@@ -48,8 +60,8 @@ test("drafts can change recipient and append a line, while local paid invoices o
     },
     async query(sql, [values]) {
       assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor]) =>
-        ({ invoice_line_id, position, description, amount_minor }));
+      lines = values.map(([invoice_line_id, , position, description, amount_minor, , , account_id]) =>
+        ({ invoice_line_id, position, description, amount_minor, account_id }));
     },
   };
   const invoices = createInvoiceService(db, { env });
@@ -62,6 +74,8 @@ test("drafts can change recipient and append a line, while local paid invoices o
   assert.equal(saved.amountRemainingMinor, 3000);
   assert.equal(saved.lines[0].id, id);
   assert.equal(saved.lines[1].description, "More work");
+  assert.equal(saved.receivableAccountId, 11);
+  assert.deepEqual(saved.lines.map((line) => line.accountId), [12, 12]);
   row.send_review_required = 1;
   await assert.rejects(invoices.prepareSend(7, id), { code: "INVOICE_SEND_REVIEW_REQUIRED" });
   await assert.rejects(invoices.saveDraft(7, input, { id, revision: saved.revision }), { code: "INVOICE_REVISION_CONFLICT" });
@@ -78,8 +92,15 @@ test("drafts can change recipient and append a line, while local paid invoices o
   assert.equal(corrected.status, "paid");
   assert.equal(corrected.amountPaidMinor, 3000);
   assert.deepEqual(corrected.lines, saved.lines);
+  await assert.rejects(invoices.assignAccounts(7, id, { revision: corrected.revision,
+    lines: [{ invoice_line_id: id, account_id: 999 }] }), { code: "INVOICE_LINE_ACCOUNT_REQUIRED" });
+  const reassigned = await invoices.assignAccounts(7, id, { revision: corrected.revision,
+    lines: [{ invoice_line_id: id, account_id: 13 }] });
+  assert.equal(reassigned.status, "paid");
+  assert.equal(reassigned.amountMinor, 3000);
+  assert.deepEqual(reassigned.lines.map((line) => line.accountId), [13, 12]);
   row.stripe_invoice_id = "in_existing";
-  await assert.rejects(invoices.correctPaidPayer(7, id, corrected.revision,
+  await assert.rejects(invoices.correctPaidPayer(7, id, reassigned.revision,
     { payer_name: "Another name", payer_email: null }), { code: "INVOICE_PAYER_LOCKED" });
 });
 
@@ -122,7 +143,7 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Alice", payer_email: "alice@example.com",
     currency: "USD", amount_minor: "2500", amount_paid_minor: "0", due_on: "2099-01-15",
     payment_methods: "card_only", description: null, stripe_invoice_id: null, stripe_status: null,
-    invoice_number: 16, invoice_status: "draft",
+    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11,
     stripe_hosted_url: null, stripe_pdf_url: null, sent_at: null, adopted_at: null, send_started_at: null,
   };
   const calls = [];
@@ -135,7 +156,7 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[{ ...row }]];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
       if (sql.includes("FROM accounting_invoice_lines")) return [[{
-        invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", todo_ref: null, receipt_ref: null,
+        invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", todo_ref: null, receipt_ref: null, account_id: 12,
       }]];
       if (sql.includes("SET stripe_account_id")) {
         row.send_started_at ??= "2099-01-01 00:00:00";
@@ -217,8 +238,8 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
     async query(sql, [values]) {
       assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor, todo_ref, receipt_ref]) =>
-        ({ invoice_line_id, position, description, amount_minor, todo_ref, receipt_ref }));
+      lines = values.map(([invoice_line_id, , position, description, amount_minor, todo_ref, receipt_ref, account_id]) =>
+        ({ invoice_line_id, position, description, amount_minor, todo_ref, receipt_ref, account_id }));
     },
     async execute(sql, args) {
       if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];
@@ -228,15 +249,16 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
         return [[{ person_id: 7 }]];
       }
       if (sql.startsWith("SELECT invoice_number")) return [[{ invoice_number: 16 }]];
+      if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[row]];
       if (sql.includes("FROM accounting_invoice_lines")) return [lines];
-      if (sql.startsWith("SELECT invoice_id")) return [[row]];
+      if (sql.startsWith("SELECT invoice_id")) return [row ? [row] : []];
       if (sql.startsWith("INSERT INTO accounting_invoices")) {
         if (row) throw Object.assign(new Error("duplicate"), { code: "ER_DUP_ENTRY" });
         const fields = ["invoice_id", "owner_person_id", "payer_name", "payer_email", "description", "currency",
           "due_on", "payment_methods", "amount_minor", "revision", "stripe_account_id", "stripe_customer_id",
-          "stripe_invoice_id", "invoice_number", "invoice_status"];
+          "stripe_invoice_id", "invoice_number", "invoice_status", "receivable_account_id"];
         row = { ...Object.fromEntries(fields.map((field, index) => [field, args[index]])),
           adopted_at: "2099-01-01 00:00:00", sent_at: null };
       } else if (sql.includes("SET stripe_status")) {

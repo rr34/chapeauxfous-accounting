@@ -32,6 +32,27 @@ async function assertCoreBaseline(connection) {
   if (missing.length) throw new Error(`Import db/schema.sql before migrating; missing tables: ${missing.join(", ")}`);
 }
 
+async function assertInvoiceAccountBackfill(connection) {
+  const [unsupported] = await connection.query("SELECT DISTINCT currency FROM accounting_invoices WHERE currency <> 'USD'");
+  if (unsupported.length) {
+    throw new Error(`Invoice backfill requires USD invoices. Choose accounts for these currencies first: ${unsupported.map(({ currency }) => currency).join(", ")}.`);
+  }
+  const [owners] = await connection.query(`SELECT DISTINCT invoice.owner_person_id,
+    (SELECT COUNT(*) FROM accounts a JOIN currencies c ON c.currency_id = a.account_currency_id
+      WHERE a.owner_person_id = invoice.owner_person_id AND a.is_suspense = 1 AND a.is_placeholder = 0
+        AND a.archived_at IS NULL AND c.CurrencyAbbreviation = 'USD' AND c.currency_type = 'iso_4217') AS suspense_count,
+    (SELECT COUNT(*) FROM accounts a JOIN currencies c ON c.currency_id = a.account_currency_id
+      WHERE a.owner_person_id = invoice.owner_person_id AND a.AccountName = 'Accounts Receivable'
+        AND a.AccountType = 'asset' AND a.is_suspense = 0 AND a.is_placeholder = 0
+        AND a.archived_at IS NULL AND c.CurrencyAbbreviation = 'USD' AND c.currency_type = 'iso_4217') AS receivable_count
+    FROM accounting_invoices invoice`);
+  for (const owner of owners) {
+    if (Number(owner.suspense_count) !== 1 || Number(owner.receivable_count) > 1) {
+      throw new Error(`Invoice owner ${owner.owner_person_id} must have exactly one active USD suspense account and at most one active USD Accounts Receivable asset account.`);
+    }
+  }
+}
+
 async function main() {
   const migrations = readMigrationLedger(ledgerFilename);
   const connection = await pool.getConnection();
@@ -51,6 +72,7 @@ async function main() {
     }
     if (version === 0) await assertCoreBaseline(connection);
     for (const migration of pending) {
+      if (migration.version === 30) await assertInvoiceAccountBackfill(connection);
       console.log(`Applying ${migration.label}...`);
       for (const statement of splitMariaDbStatements(migration.sql, migration.label)) await connection.query(statement);
       const [result] = await connection.query(

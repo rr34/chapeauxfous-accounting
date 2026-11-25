@@ -40,7 +40,7 @@ function userDeletionPool(passwordHash) {
         return [[plan && Number(plan.owner_person_id) === Number(params[1]) ? plan : undefined].filter(Boolean)];
       }
       const deletionTargets = ["accounting_transaction_import_jobs", "lineitems_tags_join", "line_items",
-        "xrates", "transactions", "account_balance_assertions", "accounts", "tags", "currencies", "api_tokens"];
+        "xrates", "transactions", "account_balance_assertions", "accounting_invoices", "accounts", "tags", "currencies", "api_tokens"];
       const deletionTarget = deletionTargets.find((table) => sql.includes(`DELETE FROM ${table}`)
         || sql.includes(`DELETE j FROM ${table}`) || sql.includes(`DELETE li FROM ${table}`));
       if (deletionTarget) { state.deletedTables.push(deletionTarget); return [{ affectedRows: 1 }]; }

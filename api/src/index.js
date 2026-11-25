@@ -6,7 +6,7 @@ import { requireAuth } from "./auth.js";
 import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
-import { createInvoiceService, invoiceDraft, invoiceId, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { renderInvoicePdf } from "./invoice-pdf.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { deleteBalanceAssertion, listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
@@ -137,7 +137,10 @@ app.post("/api/invoices", ...invoiceRoute(async (owner, req) => ({
   invoice: await invoices.saveDraft(owner, invoiceDraft.parse(req.body)),
 })));
 app.post("/api/invoices/adopt", ...invoiceRoute((owner, req) =>
-  invoices.adopt(owner, stripeInvoiceId.parse(req.body?.stripeInvoiceId))));
+  invoices.adopt(owner, stripeInvoiceId.parse(req.body?.stripeInvoiceId), {
+    receivable_account_id: invoiceAccountId.optional().parse(req.body?.receivable_account_id),
+    line_account_id: invoiceAccountId.optional().parse(req.body?.line_account_id),
+  })));
 app.get("/api/invoices/:id", ...invoiceRoute(async (owner, req) => {
   const { objects: [invoice] } = await invoices.list(owner, { invoice_id: invoiceId.parse(req.params.id) });
   return { invoice };
@@ -163,6 +166,9 @@ app.patch("/api/invoices/:id/payer", ...invoiceRoute(async (owner, req) => {
   return { invoice: await invoices.correctPaidPayer(owner, invoiceId.parse(req.params.id),
     invoiceId.parse(revision), payer) };
 }));
+app.patch("/api/invoices/:id/accounts", ...invoiceRoute(async (owner, req) => ({
+  invoice: await invoices.assignAccounts(owner, invoiceId.parse(req.params.id), invoiceAccountAssignments.parse(req.body)),
+})));
 app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
   invoices.prepareSend(owner, invoiceId.parse(req.params.id))));
 app.post("/api/invoices/send", ...invoiceRoute((owner, req) =>

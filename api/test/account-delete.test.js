@@ -52,6 +52,7 @@ function deletionPool() {
           if (sql.includes("FROM accounts WHERE parent_account_id")) return [[]];
           if (sql.includes("FROM line_items WHERE account_id")) return [[]];
           if (sql.includes("FROM account_balance_assertions WHERE account_id")) return [[]];
+          if (sql.includes("FROM accounting_invoices WHERE receivable_account_id")) return [[]];
           if (sql.startsWith("DELETE FROM accounts")) {
             const [id, owner] = params;
             const matches = state.account && Number(state.account.account_id) === Number(id)

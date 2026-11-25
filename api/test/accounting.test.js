@@ -475,6 +475,7 @@ test("an owner can edit ordinary account fields", async () => {
 test("an account currency cannot change after transactions reference it", async () => {
   const runInTransaction = async (work) => work({
     async query(sql) {
+      if (sql.includes("FROM accounting_invoice")) return [[]];
       if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
       if (sql.includes("AccountName") && sql.includes("FROM accounts")) {
         return [[{
@@ -500,6 +501,7 @@ test("one postable suspense account may be designated per owner and currency", a
   const runInTransaction = async (work) => work({
     async query(sql, params) {
       statements.push({ sql, params });
+      if (sql.includes("FROM accounting_invoices")) return [[]];
       if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
       if (sql.includes("is_suspense = 1")) return [[]];
       if (sql.includes("AccountName") && sql.includes("FROM accounts")) return [[{
@@ -518,6 +520,7 @@ test("one postable suspense account may be designated per owner and currency", a
   const conflictingTransaction = async (work) => work({
     async query(sql) {
       if (sql.includes("FROM people2_people")) return [[{ person_id: 7 }]];
+      if (sql.includes("FROM accounting_invoices")) return [[]];
       if (sql.includes("is_suspense = 1")) return [[{ account_id: 8 }]];
       if (sql.includes("AccountName") && sql.includes("FROM accounts")) return [[{
         account_id: 3, AccountName: "Ask Accountant", description: null, is_placeholder: 0,
@@ -551,7 +554,7 @@ test("a newly created suspense account is checked before insertion", async () =>
   assert.equal(statements.at(-1).params[4], true);
 });
 
-function deletionTransaction({ account = { account_id: 3, AccountName: "Equity" }, children = [], lineItems = [], assertions = [] } = {}) {
+function deletionTransaction({ account = { account_id: 3, AccountName: "Equity" }, children = [], lineItems = [], assertions = [], invoices = [] } = {}) {
   const statements = [];
   const runInTransaction = async (work) => work({
     async query(sql, params) {
@@ -563,6 +566,7 @@ function deletionTransaction({ account = { account_id: 3, AccountName: "Equity" 
       if (sql.includes("FROM accounts") && sql.includes("parent_account_id")) return [children];
       if (sql.includes("FROM line_items")) return [lineItems];
       if (sql.includes("FROM account_balance_assertions")) return [assertions];
+      if (sql.includes("FROM accounting_invoices")) return [invoices];
       throw new Error(`Unexpected query: ${sql}`);
     },
   });

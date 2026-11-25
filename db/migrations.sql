@@ -7,6 +7,68 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0030: require-invoice-account-assignments
+-- Stop Accounting writers. The runner verifies one active USD suspense account
+-- per owner with invoices before applying this migration.
+ALTER TABLE accounting_invoices
+  ADD COLUMN IF NOT EXISTS receivable_account_id INT NULL
+    COMMENT 'Owner-selected same-currency asset account assigned to the invoice total.';
+
+ALTER TABLE accounting_invoice_lines
+  ADD COLUMN IF NOT EXISTS account_id INT NULL
+    COMMENT 'Owner-selected same-currency ledger account assigned to this invoice line.';
+
+INSERT INTO accounts
+  (owner_person_id, AccountName, description, AccountType, account_currency_id)
+SELECT DISTINCT invoice.owner_person_id, 'Accounts Receivable',
+       'Receivable account assigned to invoices.', 'asset', suspense.account_currency_id
+  FROM accounting_invoices AS invoice
+  JOIN accounts AS suspense ON suspense.owner_person_id = invoice.owner_person_id
+  JOIN currencies AS unit ON unit.currency_id = suspense.account_currency_id
+ WHERE invoice.currency = 'USD' AND suspense.is_suspense = 1
+   AND suspense.archived_at IS NULL AND suspense.is_placeholder = 0
+   AND unit.CurrencyAbbreviation = 'USD' AND unit.currency_type = 'iso_4217'
+   AND NOT EXISTS (
+     SELECT 1 FROM accounts AS receivable
+      WHERE receivable.owner_person_id = invoice.owner_person_id
+        AND receivable.AccountName = 'Accounts Receivable' AND receivable.AccountType = 'asset'
+        AND receivable.account_currency_id = suspense.account_currency_id AND receivable.is_suspense = 0
+        AND receivable.archived_at IS NULL AND receivable.is_placeholder = 0
+   );
+
+UPDATE accounting_invoices AS invoice
+JOIN accounts AS suspense ON suspense.owner_person_id = invoice.owner_person_id
+JOIN currencies AS unit ON unit.currency_id = suspense.account_currency_id
+JOIN accounts AS receivable ON receivable.owner_person_id = invoice.owner_person_id
+ AND receivable.account_currency_id = suspense.account_currency_id
+ SET invoice.receivable_account_id = receivable.account_id
+ WHERE invoice.receivable_account_id IS NULL AND invoice.currency = 'USD'
+   AND suspense.is_suspense = 1 AND suspense.archived_at IS NULL
+   AND suspense.is_placeholder = 0 AND unit.CurrencyAbbreviation = 'USD' AND unit.currency_type = 'iso_4217'
+   AND receivable.AccountName = 'Accounts Receivable' AND receivable.AccountType = 'asset'
+   AND receivable.is_suspense = 0 AND receivable.archived_at IS NULL AND receivable.is_placeholder = 0;
+
+UPDATE accounting_invoice_lines AS line
+JOIN accounting_invoices AS invoice ON invoice.invoice_id = line.invoice_id
+JOIN accounts AS receivable ON receivable.account_id = invoice.receivable_account_id
+JOIN accounts AS suspense ON suspense.owner_person_id = invoice.owner_person_id
+ AND suspense.account_currency_id = receivable.account_currency_id
+ SET line.account_id = suspense.account_id
+ WHERE line.account_id IS NULL AND suspense.is_suspense = 1
+   AND suspense.archived_at IS NULL AND suspense.is_placeholder = 0;
+
+ALTER TABLE accounting_invoices
+  MODIFY COLUMN receivable_account_id INT NOT NULL
+    COMMENT 'Owner-selected same-currency asset account assigned to the invoice total.',
+  ADD CONSTRAINT accounting_invoice_receivable_fk FOREIGN KEY IF NOT EXISTS accounting_invoice_receivable_fk (receivable_account_id) REFERENCES accounts (account_id);
+
+ALTER TABLE accounting_invoice_lines
+  MODIFY COLUMN account_id INT NOT NULL
+    COMMENT 'Owner-selected same-currency ledger account assigned to this invoice line.',
+  ADD CONSTRAINT accounting_invoice_line_account_fk FOREIGN KEY IF NOT EXISTS accounting_invoice_line_account_fk (account_id) REFERENCES accounts (account_id);
+
+-- end migration 0030
+
 -- migration 0029: simplify-accounting-invoice-status
 -- Stop Accounting writers before applying. Deploy the matching invoice API after verification.
 ALTER TABLE accounting_invoices

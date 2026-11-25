@@ -520,8 +520,9 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     return contract == null ? [] : [[tool.name, contract.bindings]];
   }));
   assert.deepEqual(Object.keys(objectInputContracts).sort(), [
-    "analyze_statement_observations", "commit_purchase_evidence_job", "commit_transaction_import_job", "create_account",
-    "create_reference_rates", "create_transaction", "exclude_transaction_import_exception",
+    "adopt_stripe_invoice", "analyze_statement_observations", "assign_invoice_accounts", "commit_purchase_evidence_job",
+    "commit_transaction_import_job", "create_account", "create_invoice", "create_reference_rates",
+    "create_transaction", "exclude_transaction_import_exception",
     "get_statement_import_job", "get_statement_reconciliation_context", "get_transaction", "get_transaction_import_job",
     "import_single_account_statement", "import_single_account_statement_artifact",
     "import_transactions", "list_account_objects",

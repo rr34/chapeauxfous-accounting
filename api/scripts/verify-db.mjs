@@ -40,6 +40,20 @@ try {
     throw new Error(`Accounting storage comments are incomplete: expected ${requiredTables.length} tables; found ${comments.table_count}; `
       + `${comments.missing_table_comments} table comments and ${comments.missing_column_comments} column comments are missing.`);
   }
+  if (expectedVersion >= 30) {
+    const [invalid] = await pool.query(`SELECT i.invoice_id FROM accounting_invoices i
+      JOIN accounts ar ON ar.account_id = i.receivable_account_id
+      JOIN currencies c ON c.currency_id = ar.account_currency_id
+      LEFT JOIN accounting_invoice_lines l ON l.invoice_id = i.invoice_id
+      LEFT JOIN accounts a ON a.account_id = l.account_id
+      WHERE ar.owner_person_id <> i.owner_person_id OR ar.AccountType <> 'asset' OR ar.is_suspense = 1
+        OR ar.is_placeholder = 1 OR ar.archived_at IS NOT NULL OR c.CurrencyAbbreviation <> i.currency
+        OR c.currency_type <> 'iso_4217'
+        OR (l.invoice_line_id IS NOT NULL AND (a.owner_person_id <> i.owner_person_id
+          OR a.account_currency_id <> ar.account_currency_id OR a.account_id = ar.account_id
+          OR a.is_placeholder = 1 OR a.archived_at IS NOT NULL)) LIMIT 1`);
+    if (invalid.length) throw new Error("Invoice account assignments failed owner, currency, or account-role verification.");
+  }
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);
   console.log(`Schema version ${expectedVersion} verified; ${report.checked} posted transactions balance.`);

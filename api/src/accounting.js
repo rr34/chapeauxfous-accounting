@@ -420,6 +420,19 @@ export async function updateAccount({ personId, accountId, name, description, pl
 
     const currencyChanged = Number(account.account_currency_id) !== resolvedCurrencyId;
     const becomingPlaceholder = !Boolean(account.is_placeholder) && isPlaceholder;
+    if (currencyChanged || becomingPlaceholder || type !== account.AccountType || (isSuspense && !Boolean(account.is_suspense))) {
+      const [invoices] = await connection.query(
+        "SELECT invoice_id FROM accounting_invoices WHERE receivable_account_id = ? LIMIT 1",
+        [resolvedAccountId],
+      );
+      const [invoiceLines] = currencyChanged || becomingPlaceholder ? await connection.query(
+        "SELECT invoice_line_id FROM accounting_invoice_lines WHERE account_id = ? LIMIT 1",
+        [resolvedAccountId],
+      ) : [[]];
+      if (invoices.length || invoiceLines.length) {
+        throw applicationError("Reassign this account's invoice links before changing its posting role.", 409, "ACCOUNT_HAS_INVOICES");
+      }
+    }
     if (currencyChanged || becomingPlaceholder) {
       const [lineItems] = await connection.query(
         "SELECT line_item_id FROM line_items WHERE account_id = ? LIMIT 1 FOR UPDATE",
@@ -488,6 +501,11 @@ async function requireDeletableAccount(connection, personId, resolvedAccountId, 
   if (assertions.length) {
     throw applicationError("Delete this account's balance assertions before deleting the account.", 409, "ACCOUNT_HAS_BALANCE_ASSERTIONS");
   }
+  const [invoices] = await connection.query(
+    "SELECT 1 FROM accounting_invoices WHERE receivable_account_id = ? UNION ALL SELECT 1 FROM accounting_invoice_lines WHERE account_id = ? LIMIT 1",
+    [resolvedAccountId, resolvedAccountId],
+  );
+  if (invoices.length) throw applicationError("Reassign the linked invoices before deleting this account.", 409, "ACCOUNT_HAS_INVOICES");
   return { accountId: resolvedAccountId, name: account.AccountName };
 }
 

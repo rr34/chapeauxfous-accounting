@@ -34,6 +34,7 @@ async function dataCounts(connection, personId, excludedPlanId = null) {
   const [rows] = await connection.query(
     `SELECT
        (SELECT COUNT(*) FROM accounts WHERE owner_person_id = ?) AS account_count,
+       (SELECT COUNT(*) FROM accounting_invoices WHERE owner_person_id = ?) AS invoice_count,
        (SELECT COUNT(*) FROM transactions WHERE owner_person_id = ?) AS transaction_count,
        (SELECT COUNT(*) FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
          WHERE t.owner_person_id = ?) AS line_item_count,
@@ -48,7 +49,7 @@ async function dataCounts(connection, personId, excludedPlanId = null) {
        (SELECT COUNT(*) FROM api_tokens WHERE owner_person_id = ?) AS api_token_count,
        (SELECT COUNT(*) FROM accounting_import_plans
          WHERE owner_person_id = ? AND (? IS NULL OR import_plan_id <> ?)) AS saved_plan_count`,
-    [personId, personId, personId, personId, personId, personId, personId, personId,
+    [personId, personId, personId, personId, personId, personId, personId, personId, personId,
       personId, personId, personId, excludedPlanId, excludedPlanId],
   );
   const row = rows[0] ?? {};
@@ -150,6 +151,7 @@ export async function commitUserDeletion({ pool, personId, deletionPlanId, previ
     await connection.query("UPDATE transactions SET reversal_of_transaction_id = NULL WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM transactions WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM account_balance_assertions WHERE owner_person_id = ?", [personId]);
+    await connection.query("DELETE FROM accounting_invoices WHERE owner_person_id = ?", [personId]);
     await connection.query("UPDATE accounts SET parent_account_id = NULL WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM accounts WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM tags WHERE owner_person_id = ?", [personId]);
