@@ -7,6 +7,15 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0027: retain-agent-invoice-history
+-- Apply before running the Agent invoice transfer. Additive and replayable.
+ALTER TABLE accounting_invoices
+  ADD COLUMN IF NOT EXISTS agent_invoice_id BIGINT UNSIGNED NULL COMMENT 'Original invoice ID from the legacy Agent payment store.',
+  ADD COLUMN IF NOT EXISTS agent_invoice_status VARCHAR(40) NULL COMMENT 'Original Agent collection or delivery status at import time.',
+  ADD UNIQUE KEY IF NOT EXISTS accounting_invoice_agent_identity (agent_invoice_id);
+
+-- end migration 0027
+
 -- migration 0026: stripe-invoices
 -- Apply before enabling the invoice API. Roll back by restoring a verified backup.
 CREATE TABLE IF NOT EXISTS accounting_stripe_accounts (

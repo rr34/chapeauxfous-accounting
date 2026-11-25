@@ -28,7 +28,8 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => (
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[character] ?? character));
 const statusLabel = (status: string) => ({
-  draft: "Draft", sending: "Sending", open: "Awaiting payment", paid: "Paid", void: "Void", uncollectible: "Uncollectible",
+  draft: "Draft", stripe_draft: "Stripe draft", sending: "Sending", open: "Awaiting payment",
+  paid: "Paid", void: "Void", uncollectible: "Uncollectible", needs_review: "Needs review",
 }[status] ?? status);
 
 function invoiceDraft(invoice: Invoice | null = null): Draft {

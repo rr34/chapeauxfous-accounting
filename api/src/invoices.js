@@ -69,7 +69,8 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
   ) : [[]];
   const id = row.invoice_id;
   const status = row.stripe_status && row.stripe_status !== "draft" ? row.stripe_status
-    : row.send_started_at ? "sending" : "draft";
+    : row.stripe_invoice_id && row.adopted_at ? "stripe_draft"
+      : importedLocalStatus(row) ?? (row.send_started_at ? "sending" : "draft");
   const formatter = new Intl.NumberFormat("en", { style: "currency", currency: row.currency });
   const total = formatter.format(Number(row.amount_minor) / (10 ** formatter.resolvedOptions().maximumFractionDigits));
   return {
@@ -88,6 +89,14 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
       todoRef: line.todo_ref, receiptRef: line.receipt_ref,
     })) } : {}),
   };
+}
+
+function importedLocalStatus(row) {
+  if (row.stripe_invoice_id || !row.agent_invoice_status || row.agent_invoice_status === "prepared") return null;
+  if (row.agent_invoice_status === "paid") return "paid";
+  if (row.agent_invoice_status === "voided") return "void";
+  if (row.agent_invoice_status === "uncollectible") return "uncollectible";
+  return "needs_review";
 }
 
 async function saveLines(db, id, lines) {
@@ -174,7 +183,7 @@ export function createInvoiceService(pool, {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [...values, owner, id]);
       } else {
         const row = await getRow(db, owner, id, true);
-        if (row.revision !== revision || row.send_started_at || row.stripe_invoice_id) {
+        if (row.revision !== revision || row.send_started_at || row.stripe_invoice_id || importedLocalStatus(row)) {
           throw fail("The draft changed or sending has started. Read the current invoice.", "INVOICE_REVISION_CONFLICT");
         }
         const [existing] = await db.execute(
@@ -280,7 +289,7 @@ export function createInvoiceService(pool, {
 
   async function prepareSend(owner, id) {
     const row = await getRow(pool, owner, id);
-    if (row.adopted_at || row.sent_at || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
+    if (row.adopted_at || row.sent_at || importedLocalStatus(row) || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
       throw fail("This invoice has already been issued or adopted.", "INVOICE_ALREADY_ISSUED");
     }
     if (!row.payer_name || !row.payer_email || !row.due_on || !Number(row.amount_minor)
@@ -319,7 +328,7 @@ export function createInvoiceService(pool, {
           throw fail("The invoice or Stripe account changed. Prepare a fresh confirmation.", "INVOICE_REVISION_CONFLICT");
         }
         if (!row.sent_at) {
-          if (row.adopted_at || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
+          if (row.adopted_at || importedLocalStatus(row) || ["paid", "void", "uncollectible"].includes(row.stripe_status)) {
             throw fail("This invoice can no longer be sent.", "INVOICE_ALREADY_ISSUED");
           }
           const started = row.send_started_at && Date.parse(row.send_started_at.replace(" ", "T") + "Z");
