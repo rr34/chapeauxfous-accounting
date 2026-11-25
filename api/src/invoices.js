@@ -455,5 +455,7 @@ export function createInvoiceService(pool, {
     if (row) await refresh(row.owner_person_id, row.invoice_id);
   }
 
-  return { saveDraft, correctPaidPayer, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
+    invoiceObject(db, await getRow(db, owner, id)));
+  return { saveDraft, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

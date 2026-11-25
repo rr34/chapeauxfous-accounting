@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api } from "./api";
+import { api, fetchInvoicePdf } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
 import InvoiceEditor, { blankInvoiceLine, invoiceCurrencyScale as scale,
   type InvoiceDraftFields, type PaymentMethods } from "./InvoiceEditor";
@@ -24,9 +24,6 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const json = (body: unknown, method = "POST") => ({ method, body: JSON.stringify(body) });
 const formatter = (currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency });
 const money = (amount: number, currency: string) => formatter(currency).format(amount / 10 ** scale(currency));
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-}[character] ?? character));
 const statusLabel = (status: string) => ({
   draft: "Draft", stripe_draft: "Stripe draft", sending: "Sending", open: "Awaiting payment",
   paid: "Paid", void: "Void", uncollectible: "Uncollectible", needs_review: "Needs review",
@@ -49,24 +46,33 @@ function editorMode(invoice: Invoice | null) {
   return "read";
 }
 
-function previewInvoice(invoice: Invoice) {
-  const lines = (invoice.lines ?? []).map((line) => `<tr><td>${escapeHtml(line.description)}</td>
-    <td>${escapeHtml(money(line.amountMinor, invoice.currency))}</td></tr>`).join("");
-  const preview = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Invoice preview</title>
-    <style>body{font:16px system-ui;max-width:48rem;margin:3rem auto;padding:0 1rem}
-    table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.6rem;border-bottom:1px solid #ccc}
-    th:last-child,td:last-child{text-align:right}td:first-child{white-space:pre-wrap}
-    @media print{button{display:none}body{margin:0}}</style>
-    <h1>Invoice${invoice.status === "draft" ? " draft" : ""}</h1>
-    <p>${escapeHtml(invoice.payerName ?? "")}<br>${escapeHtml(invoice.payerEmail ?? "")}</p>
-    <p>Due ${escapeHtml(invoice.dueOn ?? "date not set")}</p>
-    <p>${escapeHtml(invoice.description ?? "")}</p>
-    <table><thead><tr><th>Description</th><th>Amount</th></tr></thead><tbody>${lines}</tbody>
-    <tfoot><tr><th>Total</th><th>${escapeHtml(money(invoice.amountMinor, invoice.currency))}</th></tr></tfoot></table>
-    <p><button type="button" onclick="print()">Print / Save as PDF</button></p></html>`;
-  const url = URL.createObjectURL(new Blob([preview], { type: "text/html" }));
-  window.open(url, "_blank", "noopener,noreferrer");
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+async function openInvoicePdf(invoiceId: string, token: string, download: boolean) {
+  const tab = download ? null : window.open("about:blank", "_blank");
+  if (!download && !tab) throw new Error("Allow pop-ups for Accounting to open the invoice PDF.");
+  if (tab) {
+    tab.opener = null;
+    tab.document.title = "Opening invoice PDF…";
+    if (tab.document.body) tab.document.body.textContent = "Opening invoice PDF…";
+  }
+  try {
+    const pdf = await fetchInvoicePdf(invoiceId, token, download);
+    if (tab?.closed) return;
+    const url = URL.createObjectURL(pdf);
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    if (tab) {
+      tab.location.replace(url);
+    } else {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `invoice-${invoiceId}.pdf`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    }
+  } catch (error) {
+    tab?.close();
+    throw error;
+  }
 }
 
 async function finishStripeReturn(token: string) {
@@ -235,7 +241,10 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
       busy={busy} dirty={dirty} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
       onClose={closeEditor} onSave={(event) => saveDraft(event, draft)}
       actions={selected && <>
-        <button type="button" className="secondary" disabled={disabled || dirty} onClick={() => previewInvoice(selected)}>Preview invoice</button>
+        <button type="button" className="secondary" disabled={disabled || dirty}
+          onClick={() => void run(() => openInvoicePdf(selected.id, token, false))}>Preview PDF</button>
+        <button type="button" className="secondary" disabled={disabled || dirty}
+          onClick={() => void run(() => openInvoicePdf(selected.id, token, true))}>Download PDF</button>
         {editorMode(selected) !== "draft" && selected.lines?.length && selected.lines.length <= 100
           && selected.lines.every((line) => line.amountMinor >= 0) ? <button type="button" className="secondary"
           disabled={disabled || dirty} onClick={() => {

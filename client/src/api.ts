@@ -77,3 +77,17 @@ export async function downloadEvidenceFile(path: string, fileName: string, token
   anchor.remove();
   URL.revokeObjectURL(objectUrl);
 }
+
+export async function fetchInvoicePdf(invoiceId: string, token: string, download: boolean) {
+  const response = await fetch(`${apiBase}/invoices/${encodeURIComponent(invoiceId)}/preview-pdf${download ? "?download=true" : ""}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/pdf" },
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, payload);
+  }
+  if (response.headers.get("Content-Type")?.split(";")[0] !== "application/pdf") {
+    throw new Error("Accounting did not return a PDF.");
+  }
+  return response.blob();
+}

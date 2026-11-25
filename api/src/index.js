@@ -7,6 +7,7 @@ import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
 import { createInvoiceService, invoiceDraft, invoiceId, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
+import { renderInvoicePdf } from "./invoice-pdf.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { deleteBalanceAssertion, listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
@@ -104,14 +105,18 @@ app.post("/api/payments/stripe/webhook", express.raw({ type: "application/json",
   });
 app.use(express.json({ limit: "2mb" }));
 
-function invoiceRoute(operation) {
+function invoiceRoute(operation, respond = (res, result) => res.json(result)) {
   return [requireAuth, async (req, res, next) => {
     try {
-      res.set("Cache-Control", "no-store").json(await operation(req.auth.personId, req));
+      res.set("Cache-Control", "no-store");
+      respond(res, await operation(req.auth.personId, req));
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "INVALID_INVOICE_INPUT",
           message: error.issues.map(({ path, message }) => `${path.join(".")}: ${message}`).join(". ") });
+      }
+      if (error.code === "INVOICE_PDF_BROWSER_UNAVAILABLE") {
+        return res.status(error.status).json({ error: error.code, message: error.message });
       }
       next(error);
     }
@@ -135,6 +140,17 @@ app.post("/api/invoices/adopt", ...invoiceRoute((owner, req) =>
 app.get("/api/invoices/:id", ...invoiceRoute(async (owner, req) => {
   const { objects: [invoice] } = await invoices.list(owner, { invoice_id: invoiceId.parse(req.params.id) });
   return { invoice };
+}));
+app.get("/api/invoices/:id/preview-pdf", ...invoiceRoute(async (owner, req) => {
+  const id = invoiceId.parse(req.params.id);
+  const [invoice, issuer] = await Promise.all([invoices.readSavedInvoice(owner, id), getUser(pool, owner)]);
+  const bytes = await renderInvoicePdf(invoice, issuer?.name ?? "Accounting");
+  return { bytes, id, download: req.query.download === "true" };
+}, (res, { bytes, id, download }) => {
+  res.type("application/pdf").set({
+    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="invoice-${id}.pdf"`,
+    "X-Content-Type-Options": "nosniff",
+  }).send(bytes);
 }));
 app.patch("/api/invoices/:id", ...invoiceRoute(async (owner, req) => ({
   invoice: await invoices.saveDraft(owner, invoiceDraft.parse(req.body), {

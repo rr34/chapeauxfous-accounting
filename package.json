@@ -10,6 +10,7 @@
     "dev:api": "npm run dev --workspace api",
     "dev:client": "npm run dev --workspace client",
     "build": "npm run build --workspace client",
+    "install:pdf-browser": "playwright-core install chromium",
     "test": "npm test --workspace api",
     "schema:migrate": "npm run schema:migrate --workspace api",
     "schema:verify": "npm run schema:verify --workspace api"
