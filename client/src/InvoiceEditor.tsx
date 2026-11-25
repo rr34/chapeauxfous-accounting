@@ -39,9 +39,10 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
   </dialog>;
 }
 
-export default function InvoiceEditor({ draft, existingLineCount, mode, paymentStatus, savedTotal, busy, error,
+export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, paymentStatus, savedTotal, busy, error,
   dirty, actions, details, confirmation, onChange, onClose, onSave }: {
   draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "read";
+  invoiceNumber?: number;
   paymentStatus?: string; savedTotal?: string; busy: boolean; error: string; dirty: boolean;
   actions?: ReactNode; details?: ReactNode; confirmation?: ReactNode;
   onChange: (fields: InvoiceDraftFields) => void; onClose: () => void; onSave: (event: FormEvent) => void;
@@ -64,7 +65,7 @@ export default function InvoiceEditor({ draft, existingLineCount, mode, paymentS
   const addLine = () => onChange({ ...draft, lines: [...draft.lines, blankInvoiceLine()] });
 
   return <InvoiceDialog title={creating ? "Create invoice" : draft.payer || "Invoice draft"}
-    eyebrow={creating ? "Payments" : "Invoice"} busy={busy} onClose={onClose}>
+    eyebrow={creating ? "Payments" : `Invoice #${invoiceNumber}`} busy={busy} onClose={onClose}>
     <form className="invoice-editor-form" onSubmit={onSave}>
       <fieldset disabled={editingLocked}>
         <div className="invoice-create-grid">

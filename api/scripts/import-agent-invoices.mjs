@@ -193,13 +193,17 @@ async function main() {
   let destination;
   try {
     if (env.MARIADB_NAME === databaseName) throw new Error("Agent and Accounting must use distinct database names.");
+    destination = await pool.getConnection();
+    const [[schema]] = await destination.query("SELECT schema_version FROM accounting_schema_metadata WHERE singleton = 1");
+    if (Number(schema?.schema_version) !== 27) {
+      throw new Error("The one-time Agent importer only supports Accounting schema 27. Accounting owns invoice numbers from schema 28 onward.");
+    }
     source = await mysql.createConnection({
       host: env.MARIADB_HOST || "localhost", port: Number(env.MARIADB_PORT || 3306),
       socketPath: env.MARIADB_SOCKET || undefined, database: env.MARIADB_NAME,
       user: env.MARIADB_USER, password: env.MARIADB_PASSWORD ?? "", dateStrings: true,
       supportBigNumbers: true, bigNumberStrings: true, charset: "utf8mb4",
     });
-    destination = await pool.getConnection();
     const counts = await importAgentInvoices({ source, destination, sourcePerson, owner, apply: args.apply });
     console.log(JSON.stringify({ mode: args.apply ? "applied" : "dry-run", sourcePerson, accountingPerson: owner, ...counts }, null, 2));
   } finally {

@@ -7,6 +7,51 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0028: accounting-invoice-number-and-status
+-- Stop Accounting writers before applying. Deploy the matching invoice API after verification.
+-- Imported invoice numbers are preserved. Existing unnumbered invoices are assigned
+-- numbers after the highest preserved number for their owner, in creation order.
+ALTER TABLE accounting_invoices
+  DROP INDEX IF EXISTS accounting_invoice_agent_identity,
+  CHANGE COLUMN IF EXISTS agent_invoice_id invoice_number BIGINT UNSIGNED NULL
+    COMMENT 'Customer-facing invoice number, unique within the Accounting owner.',
+  CHANGE COLUMN IF EXISTS agent_invoice_status invoice_status VARCHAR(40) NULL
+    COMMENT 'Accounting-owned invoice lifecycle; exact provider status is kept separately.';
+
+UPDATE accounting_invoices
+   SET invoice_status = CASE
+     WHEN stripe_invoice_id IS NOT NULL AND (adopted_at IS NOT NULL OR sent_at IS NOT NULL) THEN 'issued'
+     WHEN send_started_at IS NOT NULL THEN 'sending'
+     WHEN stripe_invoice_id IS NOT NULL THEN 'issued'
+     WHEN invoice_status = 'voided' THEN 'void'
+     WHEN invoice_status IN ('paid', 'void', 'uncollectible', 'needs_review') THEN invoice_status
+     WHEN invoice_status IN ('sending', 'open', 'processing', 'failed') THEN 'needs_review'
+     ELSE 'draft'
+   END;
+
+UPDATE accounting_invoices AS invoice
+JOIN (
+  SELECT unnumbered.invoice_id,
+         COALESCE(numbered.highest, 0) + ROW_NUMBER() OVER (
+           PARTITION BY unnumbered.owner_person_id ORDER BY unnumbered.created_at, unnumbered.invoice_id
+         ) AS allocated
+    FROM accounting_invoices AS unnumbered
+    LEFT JOIN (
+      SELECT owner_person_id, MAX(invoice_number) AS highest FROM accounting_invoices GROUP BY owner_person_id
+    ) AS numbered ON numbered.owner_person_id = unnumbered.owner_person_id
+   WHERE unnumbered.invoice_number IS NULL
+) AS backfill ON backfill.invoice_id = invoice.invoice_id
+   SET invoice.invoice_number = backfill.allocated
+ WHERE invoice.invoice_number IS NULL;
+
+ALTER TABLE accounting_invoices
+  ADD UNIQUE KEY IF NOT EXISTS accounting_invoice_owner_number (owner_person_id, invoice_number),
+  MODIFY COLUMN invoice_number BIGINT UNSIGNED NOT NULL COMMENT 'Customer-facing invoice number, unique within the Accounting owner.',
+  MODIFY COLUMN invoice_status ENUM('draft','sending','issued','paid','void','uncollectible','needs_review') NOT NULL DEFAULT 'draft'
+    COMMENT 'Accounting-owned invoice lifecycle; exact provider status is kept separately.';
+
+-- end migration 0028
+
 -- migration 0027: retain-agent-invoice-history
 -- Apply before running the Agent invoice transfer. Additive and replayable.
 ALTER TABLE accounting_invoices

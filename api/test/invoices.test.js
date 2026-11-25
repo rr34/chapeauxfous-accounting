@@ -23,7 +23,7 @@ test("drafts can change recipient and append a line, while local paid invoices o
   const row = {
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Old name", payer_email: "old@example.com",
     currency: "USD", amount_minor: 2500, amount_paid_minor: 0, amount_remaining_minor: 2500,
-    payment_methods: "ach_only", agent_invoice_status: "prepared", stripe_invoice_id: null,
+    payment_methods: "ach_only", invoice_number: 16, invoice_status: "draft", stripe_invoice_id: null,
   };
   let lines = [{ invoice_line_id: id, position: 1, description: "Work", amount_minor: 2500 }];
   const db = {
@@ -57,10 +57,12 @@ test("drafts can change recipient and append a line, while local paid invoices o
     lines: [{ description: "Work edited", amount_minor: 2500 }, { description: "More work", amount_minor: 500 }] };
   const saved = await invoices.saveDraft(7, input, { id, revision });
   assert.equal(saved.payerName, "New name");
+  assert.equal(saved.invoiceNumber, 16);
+  assert.match(saved.displayName, /^#16 /);
   assert.equal(saved.amountRemainingMinor, 3000);
   assert.equal(saved.lines[0].id, id);
   assert.equal(saved.lines[1].description, "More work");
-  row.agent_invoice_status = "paid";
+  row.invoice_status = "paid";
   row.amount_paid_minor = 3000;
   row.amount_remaining_minor = 0;
   await assert.rejects(invoices.saveDraft(7, input, { id, revision: saved.revision }), { code: "INVOICE_REVISION_CONFLICT" });
@@ -116,6 +118,7 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Alice", payer_email: "alice@example.com",
     currency: "USD", amount_minor: "2500", amount_paid_minor: "0", due_on: "2099-01-15",
     payment_methods: "card_only", description: null, stripe_invoice_id: null, stripe_status: null,
+    invoice_number: 16, invoice_status: "draft",
     stripe_hosted_url: null, stripe_pdf_url: null, sent_at: null, adopted_at: null, send_started_at: null,
   };
   const calls = [];
@@ -130,11 +133,15 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       if (sql.includes("FROM accounting_invoice_lines")) return [[{
         invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", todo_ref: null, receipt_ref: null,
       }]];
-      if (sql.includes("SET stripe_account_id")) row.send_started_at ??= "2099-01-01 00:00:00";
+      if (sql.includes("SET stripe_account_id")) {
+        row.send_started_at ??= "2099-01-01 00:00:00";
+        row.invoice_status = "sending";
+      }
       else if (sql.includes("SET stripe_invoice_id")) row.stripe_invoice_id = args[0];
       else if (sql.includes("SET stripe_status")) {
         [row.stripe_status, row.amount_paid_minor, row.amount_remaining_minor, row.stripe_hosted_url, row.stripe_pdf_url] = args;
         if (args[5]) row.sent_at = "2099-01-01 00:00:00";
+        if (args[6]) row.invoice_status = "issued";
       } else assert.fail(sql);
       return [[]];
     },
@@ -169,6 +176,7 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       name: "prepare_invoice_send", arguments: { invoice_id: id },
     });
     assert.equal(prepared.status, "ready");
+    assert.match(prepared.nextAction.instruction, /invoice #16/);
     assert.deepEqual(calls, []);
     const handoff = prepared.nextAction.onApproval;
     assert.equal(handoff.tool, "send_invoice");
@@ -212,6 +220,11 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
     async execute(sql, args) {
       if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];
       if (sql.includes("RELEASE_LOCK")) return [[]];
+      if (sql.includes("FROM people2_people")) {
+        assert.match(sql, /FOR UPDATE/);
+        return [[{ person_id: 7 }]];
+      }
+      if (sql.startsWith("SELECT invoice_number")) return [[{ invoice_number: 16 }]];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[row]];
       if (sql.includes("FROM accounting_invoice_lines")) return [lines];
@@ -219,9 +232,10 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
       if (sql.startsWith("INSERT INTO accounting_invoices")) {
         if (row) throw Object.assign(new Error("duplicate"), { code: "ER_DUP_ENTRY" });
         const fields = ["invoice_id", "owner_person_id", "payer_name", "payer_email", "description", "currency",
-          "due_on", "payment_methods", "amount_minor", "revision", "stripe_account_id", "stripe_customer_id", "stripe_invoice_id"];
+          "due_on", "payment_methods", "amount_minor", "revision", "stripe_account_id", "stripe_customer_id",
+          "stripe_invoice_id", "invoice_number"];
         row = { ...Object.fromEntries(fields.map((field, index) => [field, args[index]])),
-          adopted_at: "2099-01-01 00:00:00", sent_at: null };
+          adopted_at: "2099-01-01 00:00:00", sent_at: null, invoice_status: "issued" };
       } else if (sql.includes("SET stripe_status")) {
         [row.stripe_status, row.amount_paid_minor, row.amount_remaining_minor, row.stripe_hosted_url, row.stripe_pdf_url] = args;
       } else assert.fail(sql);
@@ -245,6 +259,9 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
   } };
   const invoices = createInvoiceService(db, { env, stripeFactory: () => provider });
   const adopted = await invoices.adopt(7, "in_existing");
+  assert.equal(adopted.invoice.invoiceNumber, 17);
+  assert.equal(adopted.invoice.invoiceStatus, "issued");
+  assert.equal(adopted.invoice.stripeStatus, "open");
   assert.equal(adopted.invoice.stripeInvoiceId, "in_existing");
   assert.equal(adopted.invoice.hostedInvoiceUrl, remote.hosted_invoice_url);
   assert.equal(adopted.invoice.amountRemainingMinor, 2000);

@@ -130,6 +130,7 @@ app.post("/api/payments/stripe/complete", ...invoiceRoute((owner, req) =>
   invoices.completeConnect(owner, z.string().max(2000).parse(req.body?.completionCode), req.body?.browserKey)));
 app.get("/api/invoices", ...invoiceRoute((owner, req) => invoices.list(owner, {
   cursor: invoiceId.optional().parse(req.query.cursor),
+  invoice_number: z.coerce.number().int().positive().optional().parse(req.query.invoice_number),
   text: z.string().trim().min(1).max(255).optional().parse(req.query.text),
 })));
 app.post("/api/invoices", ...invoiceRoute(async (owner, req) => ({
@@ -145,10 +146,10 @@ app.get("/api/invoices/:id/preview-pdf", ...invoiceRoute(async (owner, req) => {
   const id = invoiceId.parse(req.params.id);
   const [invoice, issuer] = await Promise.all([invoices.readSavedInvoice(owner, id), getUser(pool, owner)]);
   const bytes = await renderInvoicePdf(invoice, issuer?.name ?? "Accounting");
-  return { bytes, id, download: req.query.download === "true" };
-}, (res, { bytes, id, download }) => {
+  return { bytes, invoiceNumber: invoice.invoiceNumber, download: req.query.download === "true" };
+}, (res, { bytes, invoiceNumber, download }) => {
   res.type("application/pdf").set({
-    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="invoice-${id}.pdf"`,
+    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="invoice-${invoiceNumber}.pdf"`,
     "X-Content-Type-Options": "nosniff",
   }).send(bytes);
 }));

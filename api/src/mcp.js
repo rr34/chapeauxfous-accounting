@@ -714,7 +714,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
       ...(allowUnbound ? { allowUnbound: true } : {}) }] : [],
   });
   const invoiceOutput = z.object({
-    id: invoiceId, sourceRef: z.string(), displayName: z.string(), status: z.string(),
+    id: invoiceId, invoiceNumber: z.number().int().positive(), sourceRef: z.string(), displayName: z.string(),
+    status: z.string(), invoiceStatus: z.string(), stripeStatus: z.string().nullable(),
     revision: z.uuid(), payerName: z.string().nullable(), payerEmail: z.string().nullable(),
     description: z.string().nullable(), currency: z.string(), dueOn: z.string().nullable(),
     paymentMethods: z.string(), amountMinor: z.number().int(), amountPaidMinor: z.number().int(),
@@ -734,8 +735,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, (input) => safeToolResult(() => operation(input)));
   invoiceTool("list_invoices", {
     title: "List invoices",
-    description: "List compact saved invoices by payer, email, description, or Stripe invoice ID using the text filter and cursor. Supply an exact Accounting invoice UUID to retrieve all lines and refresh its Stripe state. If refreshFailed is true, Stripe status and amounts are the last saved values. Collection status does not imply a ledger posting.",
+    description: "List compact saved invoices newest number first. Use invoice_number by itself to read one exact customer-facing invoice number, including its lines and current Stripe state. The text filter supports payer, email, description, and Stripe ID. Use invoice_id for an existing Accounting object binding. Refer to invoices by invoiceNumber when speaking to the user. If refreshFailed is true, Stripe status and amounts are the last saved values.",
     inputSchema: { invoice_id: invoiceId.optional(), cursor: invoiceId.optional(),
+      invoice_number: z.number().int().positive().optional(),
       text: z.string().trim().min(1).max(255).optional(),
       limit: z.number().int().min(1).max(50).default(25) },
     outputSchema: { ...resultOutput, objects: z.array(invoiceOutput), nextCursor: invoiceId.nullable() },
@@ -747,8 +749,9 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
         summary: "An owner-scoped customer invoice with its invoice lines and collection status.",
         identity: { field: "id", summary: "Stable invoice UUID." },
         reference: { field: "sourceRef", summary: "Stable Accounting invoice reference." },
-        display: { field: "displayName", summary: "Customer name and billed total." },
-        qualifiers: [{ field: "status", summary: "Current or last observed collection status." },
+        display: { field: "displayName", summary: "Customer-facing invoice number, recipient, and billed total." },
+        qualifiers: [{ field: "invoiceNumber", summary: "Customer-facing invoice number, unique within this owner." },
+          { field: "status", summary: "Current collection status, using Stripe when available." },
           { field: "currency", summary: "ISO currency code for invoice amounts." }],
       }],
     } },

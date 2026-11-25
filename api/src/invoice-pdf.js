@@ -18,7 +18,7 @@ export function invoicePdfHtml(invoice, issuerName) {
     <td class="line-description">${escapedHtml(line.description)}</td>
     <td>${money(line.amountMinor)}</td>
   </tr>`).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Invoice ${escapedHtml(invoice.id)}</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Invoice #${escapedHtml(invoice.invoiceNumber)}</title>
   <style>
     @page { size: Letter; margin: .65in; }
     * { box-sizing: border-box; }
@@ -41,7 +41,7 @@ export function invoicePdfHtml(invoice, issuerName) {
     footer { margin-top: 36px; padding-top: 12px; color: #62695e; border-top: 1px solid #dde1d8; font-size: 11px; }
   </style></head><body>
     <header><div><h1>Invoice</h1><div class="muted">From ${escapedHtml(issuerName)}</div></div>
-      <div class="meta"><span>Invoice</span><strong>#${escapedHtml(invoice.id)}</strong><span>Due</span><strong>${escapedHtml(due)}</strong><span>Currency</span><strong>${escapedHtml(invoice.currency)}</strong></div>
+      <div class="meta"><span>Invoice</span><strong>#${escapedHtml(invoice.invoiceNumber)}</strong><span>Due</span><strong>${escapedHtml(due)}</strong><span>Currency</span><strong>${escapedHtml(invoice.currency)}</strong></div>
     </header>
     <section class="recipient"><strong>Bill to</strong><p>${escapedHtml(invoice.payerName || "Not set")}</p><p class="muted">${escapedHtml(invoice.payerEmail)}</p></section>
     ${invoice.description ? `<div class="description">${escapedHtml(invoice.description)}</div>` : ""}

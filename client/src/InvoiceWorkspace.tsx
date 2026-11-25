@@ -8,7 +8,7 @@ type StripeConnection = { configured: boolean; stripeAccountId: string | null;
   webhookConfigured?: boolean; missingConnectSettings?: string[] };
 type InvoiceLine = { id: string; description: string; amountMinor: number; todoRef: string | null; receiptRef: string | null };
 type Invoice = {
-  id: string; revision: string; displayName: string; status: string; payerName: string | null;
+  id: string; invoiceNumber: number; revision: string; displayName: string; status: string; payerName: string | null;
   payerEmail: string | null; description: string | null; currency: string; dueOn: string | null;
   amountMinor: number; amountPaidMinor: number; amountRemainingMinor: number;
   paymentMethods: PaymentMethods; stripeInvoiceId: string | null; refreshFailed: boolean;
@@ -26,7 +26,7 @@ const formatter = (currency: string) => new Intl.NumberFormat(undefined, { style
 const money = (amount: number, currency: string) => formatter(currency).format(amount / 10 ** scale(currency));
 const statusLabel = (status: string) => ({
   draft: "Draft", stripe_draft: "Stripe draft", sending: "Sending", open: "Awaiting payment",
-  paid: "Paid", void: "Void", uncollectible: "Uncollectible", needs_review: "Needs review",
+  issued: "Issued", paid: "Paid", void: "Void", uncollectible: "Uncollectible", needs_review: "Needs review",
 }[status] ?? status);
 
 function invoiceDraft(invoice: Invoice | null = null): Draft {
@@ -46,7 +46,7 @@ function editorMode(invoice: Invoice | null) {
   return "read";
 }
 
-async function openInvoicePdf(invoiceId: string, token: string, download: boolean) {
+async function openInvoicePdf(invoice: Invoice, token: string, download: boolean) {
   const tab = download ? null : window.open("about:blank", "_blank");
   if (!download && !tab) throw new Error("Allow pop-ups for Accounting to open the invoice PDF.");
   if (tab) {
@@ -55,7 +55,7 @@ async function openInvoicePdf(invoiceId: string, token: string, download: boolea
     if (tab.document.body) tab.document.body.textContent = "Opening invoice PDF…";
   }
   try {
-    const pdf = await fetchInvoicePdf(invoiceId, token, download);
+    const pdf = await fetchInvoicePdf(invoice.id, token, download);
     if (tab?.closed) return;
     const url = URL.createObjectURL(pdf);
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
@@ -64,7 +64,7 @@ async function openInvoicePdf(invoiceId: string, token: string, download: boolea
     } else {
       const link = document.createElement("a");
       link.href = url;
-      link.download = `invoice-${invoiceId}.pdf`;
+      link.download = `invoice-${invoice.invoiceNumber}.pdf`;
       document.body.append(link);
       link.click();
       link.remove();
@@ -236,15 +236,16 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
     {busy && <p role="status">Working…</p>}
     {draft && <InvoiceEditor key={draft.invoice?.id ?? "new"} draft={draft}
       existingLineCount={draft.invoice ? draft.invoice.lines?.length ?? 0 : null}
+      invoiceNumber={draft.invoice?.invoiceNumber}
       mode={editorMode(draft.invoice)} paymentStatus={selected && statusLabel(selected.status) || undefined}
       savedTotal={selected ? money(selected.amountMinor, selected.currency) : undefined}
       busy={busy} dirty={dirty} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
       onClose={closeEditor} onSave={(event) => saveDraft(event, draft)}
       actions={selected && <>
         <button type="button" className="secondary" disabled={disabled || dirty}
-          onClick={() => void run(() => openInvoicePdf(selected.id, token, false))}>Preview PDF</button>
+          onClick={() => void run(() => openInvoicePdf(selected, token, false))}>Preview PDF</button>
         <button type="button" className="secondary" disabled={disabled || dirty}
-          onClick={() => void run(() => openInvoicePdf(selected.id, token, true))}>Download PDF</button>
+          onClick={() => void run(() => openInvoicePdf(selected, token, true))}>Download PDF</button>
         {editorMode(selected) !== "draft" && selected.lines?.length && selected.lines.length <= 100
           && selected.lines.every((line) => line.amountMinor >= 0) ? <button type="button" className="secondary"
           disabled={disabled || dirty} onClick={() => {
@@ -265,7 +266,7 @@ export default function InvoiceWorkspace({ token }: { token: string }) {
       </>}
       details={<>
         {selected?.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
-        {selected?.stripeInvoiceId && <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding · {selected.stripeInvoiceId}</p>}
+        {selected?.stripeInvoiceId && <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding</p>}
       </>}
       confirmation={confirm && <div className="invoice-confirmation" role="group" aria-label="Confirm sending">
           <p>{confirm.instruction}</p>
