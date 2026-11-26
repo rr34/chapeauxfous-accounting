@@ -93,7 +93,8 @@ async function ledgerSnapshot(connection, personId, { lock = false } = {}) {
   );
   const [lines] = await connection.query(
     `SELECT li.line_item_id, li.transaction_id, li.amount_units, li.value_units, li.memo, li.account_id,
-            li.reconciliation_state, li.reconciled_at, li.source_id
+            li.reconciliation_state, li.reconciled_at, li.source_id,
+            EXISTS (SELECT 1 FROM accounting_invoice_payments p WHERE p.line_item_id = li.line_item_id) AS has_invoice_payment
        FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
       WHERE t.owner_person_id = ? ORDER BY li.transaction_id, li.line_item_id${suffix}`,
     [personId],
@@ -247,6 +248,9 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
     }
     if (selected.transactions.some((row) => row.source_system === invoicePostingSource)) {
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes an issued invoice posting.");
+    }
+    if (selected.lines.some((line) => Boolean(line.has_invoice_payment))) {
+      throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes a receipt applied to an invoice.");
     }
     const accountData = await accountDataFingerprint(connection, personId);
     const importHistory = removeImportHistory
@@ -421,6 +425,10 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     if (selected.transactions.some((item) => item.source_system === invoicePostingSource)) {
       await invalidate(connection, planId, personId, "INVOICE_POSTING");
       return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The selection includes an issued invoice posting.") };
+    }
+    if (selected.lines.some((line) => Boolean(line.has_invoice_payment))) {
+      await invalidate(connection, planId, personId, "INVOICE_PAYMENT");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The selection includes a receipt applied to an invoice.") };
     }
     const targetSet = new Set(transactionIds);
     const externalReversals = snapshot.transactions.filter((item) =>

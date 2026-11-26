@@ -8,6 +8,7 @@ import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
 import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { renderInvoicePdf } from "./invoice-pdf.js";
+import { invoicePaymentInput } from "./invoice-payments.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
 import { getUser, loginUser, registerUser } from "./users.js";
@@ -199,6 +200,12 @@ app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
 app.post("/api/invoices/:id/issue", ...invoiceRoute(async (owner, req) => ({
   invoice: await invoices.issue(owner, invoiceId.parse(req.params.id), invoiceIssue.parse(req.body)),
 })));
+app.get("/api/invoices/:id/payment-credits", ...invoiceRoute(async (owner, req) => ({
+  credits: await invoices.paymentCredits(owner, invoiceId.parse(req.params.id),
+    z.string().trim().min(1).max(255).optional().parse(req.query.text)),
+})));
+app.post("/api/invoices/:id/payments", ...invoiceRoute((owner, req) =>
+  invoices.applyPayment(owner, invoiceId.parse(req.params.id), invoicePaymentInput.parse(req.body))));
 app.post("/api/invoices/send", ...invoiceRoute((owner, req) =>
   invoices.send(owner, z.string().max(2000).parse(req.body?.sendToken))));
 

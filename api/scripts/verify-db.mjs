@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pool, databaseName } from "../src/db.js";
 import { verifyAllPostedTransactions } from "../src/accounting.js";
+import { invoiceMinorToLedgerUnits } from "../src/invoice-payments.js";
 import { accountingStorageTables } from "../src/schema-description.js";
 import { readMigrationLedger } from "./migrations.mjs";
 
@@ -53,6 +54,33 @@ try {
           OR a.account_currency_id <> ar.account_currency_id OR a.account_id = ar.account_id
           OR a.is_placeholder = 1 OR a.archived_at IS NOT NULL)) LIMIT 1`);
     if (invalid.length) throw new Error("Invoice account assignments failed owner, currency, or account-role verification.");
+  }
+  if (expectedVersion >= 32) {
+    const [invalid] = await pool.query(`SELECT p.payment_id FROM accounting_invoice_payments p
+      JOIN accounting_invoices i ON i.invoice_id = p.invoice_id
+      JOIN line_items l ON l.line_item_id = p.line_item_id
+      JOIN transactions t ON t.transaction_id = l.transaction_id
+      WHERE t.owner_person_id <> i.owner_person_id OR t.TransactionState <> 'posted'
+        OR l.account_id <> i.receivable_account_id OR l.amount_units >= 0
+        OR p.amount_minor = 0 OR i.stripe_invoice_id IS NOT NULL LIMIT 1`);
+    const [unbalanced] = await pool.query(`SELECT i.invoice_id FROM accounting_invoices i
+      JOIN accounting_invoice_payments p ON p.invoice_id = i.invoice_id
+      GROUP BY i.invoice_id, i.amount_minor, i.amount_paid_minor, i.amount_remaining_minor, i.invoice_status
+      HAVING SUM(p.amount_minor) <> i.amount_paid_minor OR i.amount_remaining_minor IS NULL
+        OR i.amount_paid_minor + i.amount_remaining_minor <> i.amount_minor
+        OR (i.amount_remaining_minor = 0 AND i.invoice_status <> 'paid')
+        OR (i.amount_remaining_minor > 0 AND i.invoice_status <> 'open') LIMIT 1`);
+    if (invalid.length || unbalanced.length) throw new Error("Invoice payment allocations failed ledger or balance verification.");
+    const [credits] = await pool.query(`SELECT i.currency, c.scale, l.amount_units, SUM(p.amount_minor) AS applied_minor
+      FROM accounting_invoice_payments p
+      JOIN accounting_invoices i ON i.invoice_id = p.invoice_id
+      JOIN line_items l ON l.line_item_id = p.line_item_id
+      JOIN accounts a ON a.account_id = l.account_id
+      JOIN currencies c ON c.currency_id = a.account_currency_id
+      GROUP BY l.line_item_id, i.currency, c.scale, l.amount_units`);
+    if (credits.some((line) => invoiceMinorToLedgerUnits(line.applied_minor, line.currency, line.scale) > -BigInt(line.amount_units))) {
+      throw new Error("An invoice payment allocation exceeds its ledger credit.");
+    }
   }
   const report = await verifyAllPostedTransactions(pool);
   if (!report.valid) throw new Error(`Ledger verification failed: ${JSON.stringify(report.failures)}`);

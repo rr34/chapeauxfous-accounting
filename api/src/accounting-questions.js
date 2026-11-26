@@ -248,7 +248,7 @@ export async function openAccountingQuestion({ pool, personId, lineItemId, audie
   });
 }
 
-async function resolveAccountingQuestionWithConnection(connection, { personId, lineItemId, targetAccountId,
+export async function resolveAccountingQuestionWithConnection(connection, { personId, lineItemId, targetAccountId,
   resolution }) {
   const line = await requireOwnedPostedLine(connection, personId, lineItemId);
   const status = await currentQuestionStatus(connection, personId, lineItemId);

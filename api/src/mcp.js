@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceStatus, stripeInvoiceId } from "./invoices.js";
+import { linkInvoicePaymentInput, recordInvoicePaymentInput } from "./invoice-payments.js";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
@@ -715,6 +716,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     ...accountPaths.map((path) => ({ path, objectType: "accounting.account", value: "id" }))],
   });
   const invoiceAccountPaths = ["/receivable_account_id", "/lines/*/account_id"];
+  const paymentOutput = z.object({
+    id: z.uuid(), amountMinor: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
+  });
+  const paymentCreditOutput = z.object({
+    lineItemId: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
+    description: z.string().nullable(), accountName: z.string(), fromSuspense: z.boolean(), availableMinor: z.number().int().positive(),
+  });
   const invoiceOutput = z.object({
     id: invoiceId, invoiceNumber: z.number().int().positive(), sourceRef: z.string(), displayName: z.string(),
     status: invoiceStatus, invoiceStatus, stripeStatus: z.string().nullable(),
@@ -726,6 +734,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     hostedInvoiceUrl: z.string().nullable(), stripePdfUrl: z.string().nullable(),
     sentAt: z.string().nullable(), adoptedAt: z.string().nullable(), refreshFailed: z.boolean(),
     postingTransactionId: z.number().int().positive().nullable().optional(),
+    payments: z.array(paymentOutput).optional(),
     lines: z.array(z.object({
       id: invoiceId, sourceRef: z.string(), position: z.number().int(), description: z.string(),
       amountMinor: z.number().int(), accountId: invoiceAccountId, receiptRef: z.string().nullable(),
@@ -805,6 +814,36 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     }) },
     annotations: readOnly, _meta: invoiceMeta(true),
   }, ({ invoice_id }) => invoices.prepareSend(personId, invoice_id));
+  invoiceTool("list_invoice_payment_credits", {
+    title: "Find existing invoice payments",
+    description: "Find existing receipt credits available for this exact locally issued invoice. Filter by date, transaction number, memo, or account name. Return available amounts in invoice minor units and identify suspense credits that would move to A/R on application.",
+    inputSchema: { invoice_id: invoiceId, text: z.string().trim().min(1).max(255).optional() },
+    outputSchema: { ...resultOutput, credits: z.array(paymentCreditOutput) },
+    annotations: readOnly, _meta: invoiceMeta(true),
+  }, async ({ invoice_id, text }) => ({ credits: await invoices.paymentCredits(personId, invoice_id, text) }));
+  const appliedInvoicePayment = { ...invoiceResult, payment: paymentOutput, idempotentReplay: z.boolean(), effectReceipt: effectReceiptSchema };
+  const applyPayment = (name, method) => async (input) => {
+    const { invoice_id, ...payment } = input;
+    const result = await invoices.applyPayment(personId, invoice_id, { ...payment, method });
+    return { ...result, effectReceipt: effectReceipt(name, input, result.idempotentReplay ? "unchanged" : "committed", [
+      { type: "invoice", id: result.invoice.id }, { type: "transaction", id: result.payment.transactionId },
+    ]) };
+  };
+  invoiceTool("record_invoice_payment", {
+    title: "Record invoice payment",
+    description: "Record money the user already received against a locally issued invoice, including partial payments. Use the exact invoice revision, date, receiving asset account, and amount in invoice minor units. Creates a posted receipt and applies it to A/R. Keep request_id unchanged on exact retries.",
+    inputSchema: { invoice_id: invoiceId, ...recordInvoicePaymentInput.omit({ method: true }).shape },
+    outputSchema: appliedInvoicePayment, annotations: idempotentWrite,
+    _meta: invoiceMeta(true, false, ["/receiving_account_id"]),
+  }, applyPayment("record_invoice_payment", "record"));
+  invoiceTool("link_invoice_payment", {
+    title: "Link invoice payment",
+    description: "Apply an existing ledger receipt, in whole or in part, to a locally issued invoice. Read the invoice revision and use a line_item_id returned by list_invoice_payment_credits for it. If the credit is in suspense, confirm the amount to move to A/R before acting. Supply the exact amount in invoice minor units and keep request_id unchanged on exact retries.",
+    inputSchema: { invoice_id: invoiceId, ...linkInvoicePaymentInput.omit({ method: true }).shape },
+    outputSchema: appliedInvoicePayment, annotations: idempotentWrite,
+    _meta: toolMetadata("accounting.invoices", { dependencies: ["list_invoices", "list_invoice_payment_credits"],
+      objectInputs: [{ path: "/invoice_id", objectType: "accounting.invoice", value: "id" }] }),
+  }, applyPayment("link_invoice_payment", "link"));
   invoiceTool("send_invoice", {
     title: "Send confirmed invoice",
     description: "Execute the exact prepared send handoff after explicit user confirmation. Posts the newly issued invoice to A/R on Stripe finalization and sends it to the payer through Stripe. A successful result includes the hosted invoice URL when available.",

@@ -139,6 +139,7 @@ export async function commitUserDeletion({ pool, personId, deletionPlanId, previ
     }
 
     await connection.query("DELETE FROM accounting_transaction_import_jobs WHERE owner_person_id = ?", [personId]);
+    await connection.query("DELETE FROM accounting_invoices WHERE owner_person_id = ?", [personId]);
     await connection.query(
       `DELETE j FROM lineitems_tags_join j
         JOIN line_items li ON li.line_item_id = j.tagged_line_item_id
@@ -153,7 +154,6 @@ export async function commitUserDeletion({ pool, personId, deletionPlanId, previ
     await connection.query("UPDATE transactions SET reversal_of_transaction_id = NULL WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM transactions WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM account_balance_assertions WHERE owner_person_id = ?", [personId]);
-    await connection.query("DELETE FROM accounting_invoices WHERE owner_person_id = ?", [personId]);
     const [evidence] = await connection.query(
       "SELECT storage_key FROM accounting_evidence_files WHERE owner_person_id = ? FOR UPDATE", [personId]);
     if (evidence.length) await connection.query("DELETE FROM accounting_evidence_files WHERE owner_person_id = ?", [personId]);

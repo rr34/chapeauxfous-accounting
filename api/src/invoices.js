@@ -4,6 +4,8 @@ import { z } from "zod";
 import { createTransaction, invoicePostingSource, validateTransaction } from "./accounting.js";
 import { withConnectionTransaction, withPoolTransaction } from "./db.js";
 import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
+import { findInvoicePaymentCredits, invoiceMinorToLedgerUnits, invoicePaymentInput, linkInvoicePayment,
+  paymentReceivable, readInvoicePayments, recordInvoicePayment } from "./invoice-payments.js";
 
 const policies = {
   ach_only: ["us_bank_account"],
@@ -89,6 +91,8 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
   const id = row.invoice_id;
   const status = row.invoice_status;
   const posting = includeLines && status !== "draft" ? await invoicePosting(db, row) : null;
+  const payments = posting && !row.stripe_invoice_id && Number(row.amount_paid_minor) > 0
+    ? await readInvoicePayments(db, id) : [];
   const invoiceNumber = Number(row.invoice_number);
   const formatter = new Intl.NumberFormat("en", { style: "currency", currency: row.currency });
   const total = formatter.format(Number(row.amount_minor) / (10 ** formatter.resolvedOptions().maximumFractionDigits));
@@ -106,6 +110,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     stripePdfUrl: row.stripe_pdf_url, sentAt: row.sent_at, adoptedAt: row.adopted_at, refreshFailed,
     ...(includeLines ? {
       postingTransactionId: posting ? Number(posting.transaction_id) : null,
+      payments,
       lines: lines.map((line) => ({
         id: line.invoice_line_id, sourceRef: `accounting://invoice-lines/${line.invoice_line_id}`,
         position: line.position, description: line.description, amountMinor: Number(line.amount_minor),
@@ -226,18 +231,7 @@ async function invoicePostingInput(db, row) {
   }
   const accounts = await resolveInvoiceAccounts(db, row.owner_person_id, row.currency, row.receivable_account_id,
     lines.map((line) => line.account_id));
-  const minorScale = new Intl.NumberFormat("en", { style: "currency", currency: row.currency })
-    .resolvedOptions().maximumFractionDigits;
-  const multiplier = 10n ** BigInt(Math.max(0, accounts.scale - minorScale));
-  const divisor = 10n ** BigInt(Math.max(0, minorScale - accounts.scale));
-  const units = (amount) => {
-    const scaled = BigInt(amount) * multiplier;
-    const value = scaled / divisor;
-    if (scaled % divisor || value > 9223372036854775807n || value < -9223372036854775808n) {
-      throw fail("An invoice amount cannot be represented in the ledger currency units.", "INVOICE_POSTING_AMOUNT_INVALID", 400);
-    }
-    return String(value);
-  };
+  const units = (amount) => String(invoiceMinorToLedgerUnits(amount, row.currency, accounts.scale));
   return {
     personId: Number(row.owner_person_id), description: `Invoice #${row.invoice_number} · ${row.payer_name}`,
     valuationCurrencyId: accounts.currencyId, sourceSystem: invoicePostingSource, sourceId: row.invoice_id,
@@ -340,6 +334,54 @@ export function createInvoiceService(pool, {
       await db.execute(`UPDATE accounting_invoices SET invoice_status = 'open', amount_remaining_minor = amount_minor, revision = ?
         WHERE owner_person_id = ? AND invoice_id = ?`, [randomUUID(), owner, id]);
       return invoiceObject(db, await getRow(db, owner, id));
+    });
+  }
+
+  async function requirePayableInvoice(db, row) {
+    if (row.stripe_invoice_id) throw fail("Manage payments for this hosted invoice in Stripe.", "INVOICE_STRIPE_PAYMENT_MANAGED");
+    if (row.invoice_status !== "open" || !await invoicePosting(db, row)) {
+      throw fail("Issue the invoice before applying payments.", "INVOICE_NOT_PAYABLE");
+    }
+  }
+
+  async function paymentCredits(owner, id, text) {
+    const row = await getRow(pool, owner, id);
+    await requirePayableInvoice(pool, row);
+    return findInvoicePaymentCredits(pool, row, await paymentReceivable(pool, row), text);
+  }
+
+  async function applyPayment(owner, id, input) {
+    const data = invoicePaymentInput.parse(input);
+    const requestHash = createHash("sha256").update(JSON.stringify(data)).digest();
+    return withPoolTransaction(pool, async (db) => {
+      const row = await getRow(db, owner, id, true);
+      const [[existing]] = await db.execute(`SELECT request_sha256 FROM accounting_invoice_payments
+        WHERE invoice_id = ? AND payment_id = ?`, [id, data.request_id]);
+      if (existing) {
+        if (!requestHash.equals(existing.request_sha256)) {
+          throw fail("This payment request was already used with different details.", "INVOICE_PAYMENT_REQUEST_CONFLICT");
+        }
+        const invoice = await invoiceObject(db, row);
+        return { invoice, payment: invoice.payments.find(({ id: paymentId }) => paymentId === data.request_id), idempotentReplay: true };
+      }
+      if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before applying a payment.", "INVOICE_REVISION_CONFLICT");
+      await requirePayableInvoice(db, row);
+      const amount = BigInt(data.amount_minor);
+      const paid = BigInt(row.amount_paid_minor);
+      const remaining = BigInt(row.amount_remaining_minor ?? row.amount_minor);
+      if (amount > remaining) throw fail("The payment exceeds the invoice’s outstanding balance.", "INVOICE_PAYMENT_EXCEEDS_BALANCE", 400);
+      const ar = await paymentReceivable(db, row, true);
+      const units = invoiceMinorToLedgerUnits(amount, row.currency, ar.scale);
+      const { lineItemId } = data.method === "record"
+        ? await recordInvoicePayment(db, row, ar, data, units, postTransaction)
+        : await linkInvoicePayment(db, row, ar, data, units);
+      await db.execute(`INSERT INTO accounting_invoice_payments (payment_id, invoice_id, line_item_id, amount_minor, request_sha256)
+        VALUES (?, ?, ?, ?, ?)`, [data.request_id, id, lineItemId, data.amount_minor, requestHash]);
+      await db.execute(`UPDATE accounting_invoices SET amount_paid_minor = ?, amount_remaining_minor = ?, invoice_status = ?, revision = ?
+        WHERE owner_person_id = ? AND invoice_id = ?`, [String(paid + amount), String(remaining - amount),
+        amount === remaining ? "paid" : "open", randomUUID(), owner, id]);
+      const invoice = await invoiceObject(db, await getRow(db, owner, id));
+      return { invoice, payment: invoice.payments.find((payment) => payment.id === data.request_id), idempotentReplay: false };
     });
   }
 
@@ -719,5 +761,6 @@ export function createInvoiceService(pool, {
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
     invoiceObject(db, await getRow(db, owner, id)));
-  return { saveDraft, issue, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  return { saveDraft, issue, paymentCredits, applyPayment, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice,
+    list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

@@ -49,6 +49,8 @@ export function invoicePdfHtml(invoice, issuerName) {
     ${invoice.description ? `<div class="description">${escapedHtml(invoice.description)}</div>` : ""}
     <table><thead><tr><th class="line-number">Line</th><th>Description</th><th>Amount</th></tr></thead><tbody>${lineRows}</tbody></table>
     <div class="total"><strong>Total</strong><strong>${money(invoice.amountMinor)}</strong></div>
+    ${invoice.amountPaidMinor > 0 ? `<div class="total"><strong>Payments applied</strong><strong>${money(invoice.amountPaidMinor)}</strong></div>
+    <div class="total"><strong>Balance due</strong><strong>${money(invoice.amountRemainingMinor)}</strong></div>` : ""}
     <footer>${invoice.status === "draft" ? "Draft invoice preview." : "Accounting invoice preview."}</footer>
   </body></html>`;
 }

@@ -775,7 +775,8 @@ export async function updateTransaction({ personId, transactionId, description, 
     await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
 
     const [existingRows] = await connection.query(
-      `SELECT line_item_id, account_id, amount_units, value_units, reconciliation_state
+      `SELECT line_item_id, account_id, amount_units, value_units, reconciliation_state,
+              EXISTS (SELECT 1 FROM accounting_invoice_payments p WHERE p.line_item_id = line_items.line_item_id) AS has_invoice_payment
          FROM line_items
         WHERE transaction_id = ?
         ORDER BY line_item_id
@@ -799,6 +800,14 @@ export async function updateTransaction({ personId, transactionId, description, 
     }
 
     const reconciledRows = existingRows.filter((row) => row.reconciliation_state === "reconciled");
+    for (const existing of existingRows.filter((row) => Boolean(row.has_invoice_payment))) {
+      const submitted = lineItems.find((line) => Number(line.id) === Number(existing.line_item_id));
+      if (!submitted || Number(submitted.accountId) !== Number(existing.account_id)
+        || integerString(submitted.amountUnits, "amountUnits") !== String(existing.amount_units)
+        || (submitted.valueUnits != null && integerString(submitted.valueUnits, "valueUnits") !== String(existing.value_units))) {
+        throw applicationError("A line applied to an invoice must keep its account and amount.", 409, "INVOICE_PAYMENT_LINE_LOCKED");
+      }
+    }
     if (reconciledRows.length) {
       const transaction = transactionRows[0];
       if (String(transaction.TransactionDate) !== resolvedTransactionDate

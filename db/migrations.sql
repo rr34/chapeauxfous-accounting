@@ -7,6 +7,25 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0032: invoice-payment-allocations
+CREATE TABLE IF NOT EXISTS accounting_invoice_payments (
+  payment_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY COMMENT 'Stable request ID for one payment allocation.',
+  invoice_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'Accounting invoice whose receivable is reduced.',
+  line_item_id BIGINT NOT NULL COMMENT 'Posted A/R credit line that funds the allocation.',
+  amount_minor BIGINT UNSIGNED NOT NULL COMMENT 'Exact amount applied in invoice minor units.',
+  request_sha256 BINARY(32) NOT NULL COMMENT 'Binds the request ID to its original payment parameters.',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Time Accounting recorded the allocation.',
+  FOREIGN KEY (invoice_id) REFERENCES accounting_invoices (invoice_id) ON DELETE CASCADE,
+  FOREIGN KEY (line_item_id) REFERENCES line_items (line_item_id)
+) ENGINE=InnoDB COMMENT='Allocation of a posted ledger receipt to a locally issued Accounting invoice. One receipt can cover multiple invoices.';
+
+ALTER TABLE accounting_invoices
+  MODIFY COLUMN amount_paid_minor BIGINT UNSIGNED NOT NULL DEFAULT 0
+    COMMENT 'Amount paid in minor units from local allocations or the connected Stripe invoice.',
+  MODIFY COLUMN amount_remaining_minor BIGINT UNSIGNED NULL DEFAULT NULL
+    COMMENT 'Outstanding amount in minor units from local allocations or the connected Stripe invoice.';
+-- end migration 0032
+
 -- migration 0031: remove-invoice-todo-references
 -- Stop Accounting writers before applying. Deploy the matching API afterward.
 -- The Agent invoice line description snapshot was copied into description at import.
