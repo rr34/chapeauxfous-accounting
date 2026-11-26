@@ -108,7 +108,6 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editSection, setEditSection] = useState<"accounts" | "receipts" | null>(null);
   const [receipts, setReceipts] = useState<ReceiptPage>({ objects: [], nextCursor: null });
-  const [adoptId, setAdoptId] = useState("");
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -242,26 +241,11 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
   return <section className="account-register invoice-workspace" aria-label="Invoices">
     <div className="section-heading"><h2>Invoices</h2><button className="secondary" type="button"
       disabled={disabled} onClick={() => { setDraft(invoiceDraft()); setSelected(null); }}>New invoice</button></div>
-    <div className="invoice-actions">
-      {connection?.stripeAccountId ? <span>Stripe connected · {connection.stripeAccountId}</span>
-        : connection && (connection.configured || connection.missingConnectSettings?.length === 0)
-          ? <button className="primary" type="button" disabled={disabled}
-            onClick={() => void run(connectStripe)}>Connect Stripe</button>
-          : null}
-      {connection?.stripeAccountId && <form className="invoice-inline-form" onSubmit={(event) => {
-        event.preventDefault();
-        void run(async () => {
-          const { invoice, idempotentReplay } = await api<{ invoice: Invoice; idempotentReplay: boolean }>(
-            "/invoices/adopt", json({ stripeInvoiceId: adoptId.trim() }), token);
-          setAdoptId("");
-          await reloadAfterChange(invoice, idempotentReplay ? "Invoice already in Accounting." : "Stripe invoice imported.");
-        });
-      }}>
-        <label>Existing Stripe invoice ID<input value={adoptId} placeholder="in_…" required
-          onChange={(event) => setAdoptId(event.target.value)} disabled={disabled} /></label>
-        <button className="secondary" disabled={disabled}>Import invoice</button>
-      </form>}
-    </div>
+    {connection && !connection.stripeAccountId && (connection.configured || connection.missingConnectSettings?.length === 0) &&
+      <div className="invoice-actions">
+        <button className="primary" type="button" disabled={disabled}
+          onClick={() => void run(connectStripe)}>Connect Stripe</button>
+      </div>}
     {connection && (!connection.configured || !connection.stripeAccountId) && <details className="invoice-setup"
       open={Boolean(connection.missingConnectSettings?.length)}>
       <summary>Stripe setup</summary>
