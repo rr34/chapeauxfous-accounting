@@ -727,7 +727,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     sentAt: z.string().nullable(), adoptedAt: z.string().nullable(), refreshFailed: z.boolean(),
     lines: z.array(z.object({
       id: invoiceId, sourceRef: z.string(), position: z.number().int(), description: z.string(),
-      amountMinor: z.number().int(), accountId: invoiceAccountId, todoRef: z.string().nullable(), receiptRef: z.string().nullable(),
+      amountMinor: z.number().int(), accountId: invoiceAccountId, receiptRef: z.string().nullable(),
     })).optional(),
   });
   const resultOutput = { contractVersion: z.literal(MCP_CONTRACT_VERSION), status: z.string() };
@@ -769,7 +769,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, async (input) => ({ invoice: await invoices.saveDraft(personId, input) }));
   invoiceTool("update_invoice", {
     title: "Update invoice draft",
-    description: "Read the exact invoice first. Supply its revision and the complete desired draft. Preserve unspecified fields and existing lines in their original positions, including source references. New lines may be appended.",
+    description: "Read the exact invoice first. Supply its revision and the complete desired draft. Preserve unspecified fields and existing lines in their original positions, including receipt references. New lines may be appended.",
     inputSchema: { invoice_id: invoiceId, revision: z.uuid(), ...invoiceDraft.shape },
     outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, revision, ...input }) => ({

@@ -33,7 +33,6 @@ export function normalizeAgentInvoice(row, sourceLines) {
   const lines = sourceLines.map((line) => ({
     position: Number(line.line_position), description: line.description_snapshot,
     amount: minorUnits(line.amount_minor_snapshot),
-    todoRef: line.personal_task_id == null ? null : `agent-slayer://todos/${line.personal_task_id}`,
     receiptRef: line.file_id == null ? null : `agent-slayer://files/${line.file_id}`,
   }));
   if (!lines.length || lines.some((line, index) => line.position !== index + 1)
@@ -61,7 +60,7 @@ async function snapshot(source, sourcePerson) {
       created_at_utc, opened_at_utc
       FROM payment_invoices ORDER BY payment_invoice_id`);
     const [lines] = await source.query(`SELECT line.payment_invoice_id, line.line_position, line.description_snapshot,
-      line.amount_minor_snapshot, line.personal_task_id, receipt.file_id FROM payment_invoice_lines line
+      line.amount_minor_snapshot, receipt.file_id FROM payment_invoice_lines line
       LEFT JOIN payment_invoice_line_receipts_join receipt USING (payment_invoice_line_id)
       ORDER BY line.payment_invoice_id, line.line_position`);
     const byInvoice = new Map();
@@ -90,8 +89,8 @@ async function createInvoice(db, owner, invoice) {
     row.stripe_customer_id, row.stripe_invoice_id, row.hosted_invoice_url, row.opened_at_utc, row.stripe_invoice_id,
     row.created_at_utc, row.payment_invoice_id, row.status]);
   await db.query(`INSERT INTO accounting_invoice_lines
-    (invoice_line_id, invoice_id, position, description, amount_minor, todo_ref, receipt_ref) VALUES ?`,
-  [lines.map((line) => [randomUUID(), id, line.position, line.description, line.amount, line.todoRef, line.receiptRef])]);
+    (invoice_line_id, invoice_id, position, description, amount_minor, receipt_ref) VALUES ?`,
+  [lines.map((line) => [randomUUID(), id, line.position, line.description, line.amount, line.receiptRef])]);
 }
 
 async function findAction(db, owner, account, invoice, apply) {
@@ -134,8 +133,8 @@ async function enrichInvoice(db, id, invoice) {
   [row.payment_invoice_id, row.status, row.payer_name_snapshot, row.payer_email_snapshot, row.description,
     row.due_on, row.payment_method_policy, row.created_at_utc, row.opened_at_utc, id]);
   for (const line of lines) {
-    await db.execute(`UPDATE accounting_invoice_lines SET description = ?, todo_ref = ?, receipt_ref = ?
-      WHERE invoice_id = ? AND position = ?`, [line.description, line.todoRef, line.receiptRef, id, line.position]);
+    await db.execute(`UPDATE accounting_invoice_lines SET description = ?, receipt_ref = ?
+      WHERE invoice_id = ? AND position = ?`, [line.description, line.receiptRef, id, line.position]);
   }
 }
 

@@ -60,7 +60,7 @@ test("drafts can change recipient and append a line, while local paid invoices o
     },
     async query(sql, [values]) {
       assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor, , , account_id]) =>
+      lines = values.map(([invoice_line_id, , position, description, amount_minor, , account_id]) =>
         ({ invoice_line_id, position, description, amount_minor, account_id }));
     },
   };
@@ -156,7 +156,7 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[{ ...row }]];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
       if (sql.includes("FROM accounting_invoice_lines")) return [[{
-        invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", todo_ref: null, receipt_ref: null, account_id: 12,
+        invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", receipt_ref: null, account_id: 12,
       }]];
       if (sql.includes("SET stripe_account_id")) {
         row.send_started_at ??= "2099-01-01 00:00:00";
@@ -238,8 +238,8 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
     async query(sql, [values]) {
       assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor, todo_ref, receipt_ref, account_id]) =>
-        ({ invoice_line_id, position, description, amount_minor, todo_ref, receipt_ref, account_id }));
+      lines = values.map(([invoice_line_id, , position, description, amount_minor, receipt_ref, account_id]) =>
+        ({ invoice_line_id, position, description, amount_minor, receipt_ref, account_id }));
     },
     async execute(sql, args) {
       if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];

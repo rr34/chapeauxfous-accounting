@@ -7,6 +7,12 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0031: remove-invoice-todo-references
+-- Stop Accounting writers before applying. Deploy the matching API afterward.
+-- The Agent invoice line description snapshot was copied into description at import.
+ALTER TABLE accounting_invoice_lines DROP COLUMN IF EXISTS todo_ref;
+-- end migration 0031
+
 -- migration 0030: require-invoice-account-assignments
 -- Stop Accounting writers. The runner verifies one active USD suspense account
 -- per owner with invoices before applying this migration.

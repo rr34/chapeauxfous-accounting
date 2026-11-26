@@ -7,7 +7,7 @@ import InvoiceEditor, { blankInvoiceLine, invoiceCurrencyScale as scale,
 
 type StripeConnection = { configured: boolean; stripeAccountId: string | null;
   webhookConfigured?: boolean; missingConnectSettings?: string[] };
-type InvoiceLine = { id: string; description: string; amountMinor: number; accountId: number; todoRef: string | null; receiptRef: string | null };
+type InvoiceLine = { id: string; description: string; amountMinor: number; accountId: number; receiptRef: string | null };
 type Invoice = {
   id: string; invoiceNumber: number; revision: string; displayName: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible"; payerName: string | null;
@@ -40,7 +40,7 @@ function invoiceDraft(invoice: Invoice | null = null): Draft {
     receivableAccountId: invoice?.receivableAccountId,
     lines: invoice?.lines?.map((line) => ({
       key: line.id, description: line.description, amount: unitsToDecimal(String(line.amountMinor), scale(invoice.currency)),
-      todoRef: line.todoRef, receiptRef: line.receiptRef, accountId: line.accountId,
+      receiptRef: line.receiptRef, accountId: line.accountId,
     })) ?? [blankInvoiceLine()],
   };
 }
@@ -218,11 +218,11 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
         payment_methods: value.methods, revision: value.invoice?.revision,
         receivable_account_id: value.receivableAccountId,
         lines: value.lines.filter((line, index) => index < (value.invoice?.lines?.length ?? 0)
-          || line.description.trim() || line.amount.trim() || line.todoRef?.trim() || line.receiptRef?.trim())
+          || line.description.trim() || line.amount.trim() || line.receiptRef?.trim())
           .map((line) => ({
             description: line.description, amount_minor: Number(decimalToUnits(line.amount.trim() || "0", digits)),
             account_id: line.accountId,
-            todo_ref: line.todoRef?.trim() || null, receipt_ref: line.receiptRef?.trim() || null,
+            receipt_ref: line.receiptRef?.trim() || null,
           })),
       };
       const path = value.invoice ? `/invoices/${value.invoice.id}` : "/invoices";

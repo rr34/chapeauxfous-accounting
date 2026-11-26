@@ -9,8 +9,6 @@ const policies = {
   card_only: ["card"],
   card_and_ach: ["card", "us_bank_account"],
 };
-const reference = (kind) => z.string().max(512)
-  .regex(new RegExp(`^agent-slayer://${kind}/[1-9][0-9]*$`)).nullable().optional();
 export const invoiceId = z.uuid();
 export const invoiceStatus = z.enum(["draft", "open", "paid", "void", "uncollectible"]);
 export const invoicePayer = z.object({
@@ -43,7 +41,6 @@ export const invoiceDraft = z.object({
     description: z.string().trim().min(1).max(1000),
     amount_minor: z.number().int().min(0).max(99999999).default(0),
     account_id: invoiceAccountId.optional(),
-    todo_ref: reference("todos"),
     receipt_ref: invoiceReceiptRef.nullable().optional(),
   })).min(1).max(100),
 });
@@ -108,7 +105,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
       id: line.invoice_line_id, sourceRef: `accounting://invoice-lines/${line.invoice_line_id}`,
       position: line.position, description: line.description, amountMinor: Number(line.amount_minor),
       accountId: Number(line.account_id),
-      todoRef: line.todo_ref, receiptRef: line.receipt_ref,
+      receiptRef: line.receipt_ref,
     })) } : {}),
   };
 }
@@ -145,10 +142,10 @@ async function nextInvoiceNumber(db, owner) {
 async function saveLines(db, id, lines) {
   await db.query(
     `INSERT INTO accounting_invoice_lines
-     (invoice_line_id, invoice_id, position, description, amount_minor, todo_ref, receipt_ref, account_id) VALUES ?`,
+     (invoice_line_id, invoice_id, position, description, amount_minor, receipt_ref, account_id) VALUES ?`,
     [lines.map((line, index) => [
       line.id ?? randomUUID(), id, index + 1, line.description, line.amount_minor,
-      line.todo_ref ?? null, line.receipt_ref ?? null, line.account_id,
+      line.receipt_ref ?? null, line.account_id,
     ])],
   );
 }

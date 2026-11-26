@@ -1,10 +1,12 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, type FormEvent, type ReactNode } from "react";
+import AccountCombobox from "./AccountCombobox";
+import { accountFullNames } from "./account-names";
 import { decimalToUnits } from "./money";
 import type { Account } from "./types";
 
 export type PaymentMethods = "ach_only" | "card_only" | "card_and_ach";
 export type EditableInvoiceLine = {
-  key: string; description: string; amount: string; accountId?: number; todoRef?: string | null; receiptRef?: string | null;
+  key: string; description: string; amount: string; accountId?: number; receiptRef?: string | null;
 };
 export type InvoiceDraftFields = {
   payer: string; email: string; description: string; currency: string; due: string;
@@ -53,7 +55,6 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   actions?: ReactNode; details?: ReactNode; confirmation?: ReactNode;
   onChange: (fields: InvoiceDraftFields) => void; onClose: () => void; onSave: (event: FormEvent) => void;
 }) {
-  const [references, setReferences] = useState<string | null>(null);
   const creating = existingLineCount === null;
   const editable = mode === "draft";
   const payerEditable = editable || mode === "payer";
@@ -61,8 +62,16 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   const receiptsEditable = editable || mode === "receipts";
   const selectable = accounts.filter((account) => !account.placeholder && account.archivedAt == null
     && account.currencyCode === draft.currency);
+  const accountNames = accountFullNames(accounts);
+  const lineAccountChoices = selectable.filter((account) => account.id !== draft.receivableAccountId)
+    .map((account) => ({
+      value: String(account.id), label: accountNames.get(account.id) ?? account.name, currencyCode: account.currencyCode,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+  const defaultLineAccountLabel = "Default suspense account";
+  if (editable) lineAccountChoices.unshift({ value: "", label: defaultLineAccountLabel, currencyCode: draft.currency });
   const editingLocked = busy || Boolean(confirmation);
-  const started = draft.lines.some((line) => line.description.trim() || line.amount.trim() || line.todoRef || line.receiptRef);
+  const started = draft.lines.some((line) => line.description.trim() || line.amount.trim() || line.receiptRef);
   const total = (() => {
     try {
       const scale = invoiceCurrencyScale(draft.currency);
@@ -116,9 +125,6 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           </div></div>
         <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
           <div className="invoice-line-heading"><span>Line {index + 1}</span><div className="invoice-actions">
-            <strong>{line.todoRef ? "To-do" : "Manual line"}</strong>
-            {editable && <button className="secondary" type="button" aria-expanded={references === line.key || Boolean(line.todoRef || line.receiptRef)}
-              onClick={() => setReferences(references === line.key ? null : line.key)}>References</button>}
             {editable && index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
               onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>Remove</button>}
           </div></div>
@@ -126,16 +132,14 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             onChange={(event) => setLine(line.key, { description: event.target.value })} /></label>
           <label>Amount ({draft.currency || "currency"}) {editable && <small>Use 0.00 for no charge</small>}<input inputMode="decimal"
             value={line.amount} placeholder="0.00" readOnly={!editable} onChange={(event) => setLine(line.key, { amount: event.target.value })} /></label>
-          <label className="invoice-line-references">Line account<select value={line.accountId ?? ""} disabled={!accountsEditable}
-            onChange={(event) => setLine(line.key, { accountId: Number(event.target.value) || undefined })}>
-            <option value="" disabled={mode === "accounts"}>Default suspense account</option>
-            {selectable.filter((account) => account.id !== draft.receivableAccountId)
-              .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
-          </select></label>
-          {(references === line.key || line.todoRef || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
-            <label>Agent to-do reference<input value={line.todoRef ?? ""} placeholder="agent-slayer://todos/…" readOnly={!editable}
-              onChange={(event) => setLine(line.key, { todoRef: event.target.value })} /></label>
-          </div>}
+          <div className="invoice-line-references invoice-line-account">
+            <label htmlFor={`line-account-${line.key}`}>Line account</label>
+            <AccountCombobox id={`line-account-${line.key}`} label={`Line account for line ${index + 1}`}
+              value={line.accountId == null ? "" : String(line.accountId)} choices={lineAccountChoices}
+              selectedLabel={line.accountId == null ? defaultLineAccountLabel : accountNames.get(line.accountId)}
+              disabled={!accountsEditable || editingLocked} clearOnType={false}
+              onChange={(accountId) => setLine(line.key, { accountId: accountId ? Number(accountId) : undefined })} />
+          </div>
           {(receiptsEditable || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
             <label>Receipt<select value={line.receiptRef ?? ""} disabled={!receiptsEditable}
               onChange={(event) => setLine(line.key, { receiptRef: event.target.value || null })}>

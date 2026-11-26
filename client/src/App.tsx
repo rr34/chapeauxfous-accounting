@@ -6,6 +6,8 @@ import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs"
 import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import InvoiceWorkspace from "./InvoiceWorkspace";
+import AccountCombobox from "./AccountCombobox";
+import { accountFullNames } from "./account-names";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
   CanonicalImportRecord, CurrencyType, EvidenceFile, TransactionDetail, TransactionImportException,
@@ -162,22 +164,6 @@ function buildAccountTree(accounts: Account[]): AccountTreeNode[] {
   return (childrenByParentId.get(null) ?? []).map((account) => addChildren(account, new Set()));
 }
 
-function accountFullNames(accounts: Account[]) {
-  const byId = new Map(accounts.map((account) => [account.id, account]));
-  const names = new Map<number, string>();
-  function resolve(account: Account, visiting = new Set<number>()): string {
-    const known = names.get(account.id);
-    if (known) return known;
-    if (visiting.has(account.id)) return account.name;
-    const parent = account.parentAccountId == null ? null : byId.get(account.parentAccountId);
-    const fullName = parent ? `${resolve(parent, new Set(visiting).add(account.id))}:${account.name}` : account.name;
-    names.set(account.id, fullName);
-    return fullName;
-  }
-  for (const account of accounts) resolve(account);
-  return names;
-}
-
 function ParentAccountPicker({ accounts, value, onChange, unavailableIds = new Set<number>() }: {
   accounts: Account[]; value: string; onChange: (value: string) => void; unavailableIds?: Set<number>;
 }) {
@@ -248,103 +234,6 @@ function ParentAccountPicker({ accounts, value, onChange, unavailableIds = new S
         </button>)}
         {normalizedQuery && visibleRows.length === 0 && <p>No accounts match “{query}”.</p>}
       </div>
-    </div>}
-  </div>;
-}
-
-type AccountChoice = { value: string; label: string; currencyCode: string };
-
-function AccountCombobox({ value, choices, onChange, label, placeholder = "Type to find an account…" }: {
-  value: string; choices: AccountChoice[]; onChange: (value: string) => void; label: string; placeholder?: string;
-}) {
-  const listId = useId();
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const interactingWithList = useRef(false);
-  const selected = choices.find((choice) => choice.value === value) ?? null;
-  const [query, setQuery] = useState(selected?.label ?? "");
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(-1);
-  useEffect(() => { if (!open) setQuery(selected?.label ?? ""); }, [selected?.label, open]);
-  const normalized = query.trim().toLocaleLowerCase("en-US");
-  const matches = normalized
-    ? choices.filter((choice) => `${choice.label} ${choice.currencyCode}`.toLocaleLowerCase("en-US").includes(normalized)).slice(0, 40)
-    : [];
-
-  useEffect(() => {
-    if (!open || activeIndex < 0) return;
-    document.getElementById(`${listId}-option-${activeIndex}`)?.scrollIntoView({ block: "nearest" });
-  }, [activeIndex, listId, open]);
-
-  useEffect(() => {
-    const closeFromOutsidePointer = (event: PointerEvent) => {
-      if (wrapperRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-      setActiveIndex(-1);
-    };
-    const finishListInteraction = () => {
-      if (!interactingWithList.current) return;
-      interactingWithList.current = false;
-      inputRef.current?.focus({ preventScroll: true });
-    };
-    window.addEventListener("pointerdown", closeFromOutsidePointer);
-    window.addEventListener("pointerup", finishListInteraction);
-    window.addEventListener("pointercancel", finishListInteraction);
-    return () => {
-      window.removeEventListener("pointerdown", closeFromOutsidePointer);
-      window.removeEventListener("pointerup", finishListInteraction);
-      window.removeEventListener("pointercancel", finishListInteraction);
-    };
-  }, []);
-
-  const choose = (choice: AccountChoice) => {
-    onChange(choice.value);
-    setQuery(choice.label);
-    setOpen(false);
-    setActiveIndex(-1);
-  };
-
-  return <div className="account-combobox" ref={wrapperRef} onBlur={(event) => {
-    if (!event.relatedTarget || event.currentTarget.contains(event.relatedTarget)) return;
-    setOpen(false);
-    setActiveIndex(-1);
-  }}>
-    <input ref={inputRef} role="combobox" aria-label={label} aria-expanded={open} aria-controls={listId}
-      aria-activedescendant={open && activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined}
-      aria-autocomplete="list" autoComplete="off" value={query}
-      placeholder={placeholder}
-      onFocus={() => { if (!open) { setOpen(true); setQuery(""); setActiveIndex(-1); } }}
-      onChange={(event) => { setQuery(event.target.value); setOpen(true); setActiveIndex(-1); onChange(""); }}
-      onKeyDown={(event) => {
-        if (event.key === "ArrowDown" && matches.length) {
-          event.preventDefault();
-          setOpen(true);
-          setActiveIndex((current) => current < matches.length - 1 ? current + 1 : 0);
-        } else if (event.key === "ArrowUp" && matches.length) {
-          event.preventDefault();
-          setOpen(true);
-          setActiveIndex((current) => current > 0 ? current - 1 : matches.length - 1);
-        } else if (event.key === "Enter" && open && activeIndex >= 0 && matches[activeIndex]) {
-          event.preventDefault();
-          choose(matches[activeIndex]);
-        } else if (event.key === "Escape" && open) {
-          event.preventDefault();
-          setOpen(false);
-          setActiveIndex(-1);
-          setQuery(selected?.label ?? "");
-        }
-      }} />
-    {open && <div className="account-combobox-list" id={listId} role="listbox"
-      onPointerDownCapture={() => { interactingWithList.current = true; }}>
-      {!normalized && <span>Type part of an account name to filter.</span>}
-      {normalized && matches.map((choice, index) => <button type="button" role="option" key={choice.value}
-        id={`${listId}-option-${index}`} aria-selected={index === activeIndex}
-        className={index === activeIndex ? "active" : undefined}
-        onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActiveIndex(index)}
-        onClick={() => choose(choice)}>
-        <strong>{choice.label}</strong><small>{choice.currencyCode}</small>
-      </button>)}
-      {normalized && !matches.length && <span>No postable accounts match “{query}”.</span>}
     </div>}
   </div>;
 }

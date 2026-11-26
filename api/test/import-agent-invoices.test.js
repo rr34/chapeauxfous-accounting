@@ -10,14 +10,14 @@ const row = {
   processor_status: null, hosted_invoice_url: null, due_on: null, opened_at_utc: null,
 };
 const line = { payment_invoice_id: "17", line_position: 1, description_snapshot: "Work",
-  amount_minor_snapshot: "2500", personal_task_id: "15", file_id: "4" };
+  amount_minor_snapshot: "2500", file_id: "4" };
 
-test("preserves local payment status and exact source references", () => {
+test("preserves local payment status, line descriptions, and receipt references", () => {
   const invoice = normalizeAgentInvoice(row, [line]);
   assert.equal(invoice.row.status, "paid");
   assert.equal(invoice.remaining, 0);
   assert.equal(invoice.stripeStatus, null);
-  assert.equal(invoice.lines[0].todoRef, "agent-slayer://todos/15");
+  assert.equal(invoice.lines[0].description, line.description_snapshot);
   assert.equal(invoice.lines[0].receiptRef, "agent-slayer://files/4");
   assert.throws(() => normalizeAgentInvoice(row, [{ ...line, amount_minor_snapshot: "2400" }]), /total validation/);
 });
@@ -51,7 +51,7 @@ test("dry run is read-only, apply is atomic, and retry skips already imported in
     async query(sql, args) {
       if (sql === "START TRANSACTION READ ONLY") return;
       assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      assert.deepEqual(args[0][0].slice(-2), ["agent-slayer://todos/15", "agent-slayer://files/4"]);
+      assert.deepEqual(args[0][0].slice(3), ["Work", 2500, "agent-slayer://files/4"]);
     },
     async beginTransaction() {}, async commit() { committed++; }, async rollback() {},
   };
