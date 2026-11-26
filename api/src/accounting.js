@@ -4,6 +4,8 @@ import { requireAccessibleCurrency } from "./currencies.js";
 import { normalBalanceSign, normalBalanceUnits } from "./account-balances.js";
 import { normalizeTransactionAt, transactionAtForDatabase, transactionAtFromDatabase } from "./transaction-time.js";
 
+export const invoicePostingSource = "accounting_invoice";
+
 function applicationError(message, status = 400, code = "INVALID_ACCOUNTING_OPERATION", details = undefined) {
   return Object.assign(new Error(message), { status, code, details });
 }
@@ -760,13 +762,16 @@ export async function updateTransaction({ personId, transactionId, description, 
 
   return runInTransaction(async (connection) => {
     const [transactionRows] = await connection.query(
-      `SELECT transaction_id, TransactionState, TransactionDate, TransactionAtUtc, valuation_currency_id
+      `SELECT transaction_id, TransactionState, TransactionDate, TransactionAtUtc, valuation_currency_id, source_system
          FROM transactions
         WHERE transaction_id = ? AND owner_person_id = ?
         FOR UPDATE`,
       [resolvedTransactionId, personId],
     );
     if (!transactionRows.length) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
+    if (transactionRows[0].source_system === invoicePostingSource) {
+      throw applicationError("This transaction records an issued invoice.", 409, "INVOICE_POSTING_LOCKED");
+    }
     await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
 
     const [existingRows] = await connection.query(

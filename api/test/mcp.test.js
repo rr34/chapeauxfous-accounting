@@ -525,7 +525,7 @@ test("the MCP exposes scoped tool and object contracts", async () => {
     "create_transaction", "exclude_transaction_import_exception",
     "get_statement_import_job", "get_statement_reconciliation_context", "get_transaction", "get_transaction_import_job",
     "import_single_account_statement", "import_single_account_statement_artifact",
-    "import_transactions", "list_account_objects",
+    "import_transactions", "issue_invoice", "list_account_objects",
     "list_accounting_question_objects", "list_accounting_questions", "list_balance_assertion_objects",
     "list_currency_objects", "list_evidence_file_objects", "list_invoices", "list_line_item_objects", "list_purchase_evidence_job_objects",
     "list_reference_rates", "list_statement_import_job_objects", "list_transaction_import_exceptions", "list_transaction_import_job_objects",

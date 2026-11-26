@@ -16,8 +16,7 @@ export const pool = mysql.createPool({
   charset: "utf8mb4",
 });
 
-export async function withPoolTransaction(transactionPool, work) {
-  const connection = await transactionPool.getConnection();
+export async function withConnectionTransaction(connection, work) {
   try {
     await connection.beginTransaction();
     const result = await work(connection);
@@ -30,6 +29,13 @@ export async function withPoolTransaction(transactionPool, work) {
       console.error("Transaction rollback could not complete.", rollbackError);
     }
     throw error;
+  }
+}
+
+export async function withPoolTransaction(transactionPool, work) {
+  const connection = await transactionPool.getConnection();
+  try {
+    return await withConnectionTransaction(connection, work);
   } finally {
     connection.release();
   }

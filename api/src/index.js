@@ -6,7 +6,7 @@ import { requireAuth } from "./auth.js";
 import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
-import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { renderInvoicePdf } from "./invoice-pdf.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
@@ -196,6 +196,9 @@ app.patch("/api/invoices/:id/receipts", ...invoiceRoute(async (owner, req) => ({
 })));
 app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
   invoices.prepareSend(owner, invoiceId.parse(req.params.id))));
+app.post("/api/invoices/:id/issue", ...invoiceRoute(async (owner, req) => ({
+  invoice: await invoices.issue(owner, invoiceId.parse(req.params.id), invoiceIssue.parse(req.body)),
+})));
 app.post("/api/invoices/send", ...invoiceRoute((owner, req) =>
   invoices.send(owner, z.string().max(2000).parse(req.body?.sendToken))));
 

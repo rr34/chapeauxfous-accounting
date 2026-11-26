@@ -18,6 +18,7 @@ type Invoice = {
   sentAt: string | null; lines?: InvoiceLine[];
   sendPending: boolean; sendReviewRequired: boolean;
   receivableAccountId: number;
+  postingTransactionId?: number | null;
 };
 type Draft = InvoiceDraftFields & { invoice: Invoice | null };
 type Page = { objects: Invoice[]; nextCursor: string | null };
@@ -99,7 +100,9 @@ async function finishStripeReturn(token: string) {
   }
 }
 
-export default function InvoiceWorkspace({ token, accounts }: { token: string; accounts: Account[] }) {
+export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
+  token: string; accounts: Account[]; onOpenPosting: (id: number) => Promise<void>;
+}) {
   const [connection, setConnection] = useState<StripeConnection | null>(null);
   const [page, setPage] = useState<Page>({ objects: [], nextCursor: null });
   const [filter, setFilter] = useState("");
@@ -109,6 +112,7 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
   const [editSection, setEditSection] = useState<"accounts" | "receipts" | null>(null);
   const [receipts, setReceipts] = useState<ReceiptPage>({ objects: [], nextCursor: null });
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
+  const [issueDate, setIssueDate] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -230,13 +234,14 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
     });
   }
 
-  const disabled = busy || confirm !== null;
+  const disabled = busy || confirm !== null || issueDate !== null;
+  const postingTransactionId = selected?.postingTransactionId;
   const dirty = Boolean(draft && (!draft.invoice || JSON.stringify(draft) !== JSON.stringify(invoiceDraft(draft.invoice))));
   const closeEditor = () => {
     if (editSection && selected) {
       setEditSection(null); setDraft(invoiceDraft(selected)); setError(""); return;
     }
-    setDraft(null); setSelected(null); setConfirm(null); setError("");
+    setDraft(null); setSelected(null); setConfirm(null); setIssueDate(null); setError("");
   };
   return <section className="account-register invoice-workspace" aria-label="Invoices">
     <div className="section-heading"><h2>Invoices</h2><button className="secondary" type="button"
@@ -281,7 +286,8 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
       busy={busy} dirty={dirty} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
       onClose={closeEditor} onSave={(event) => saveDraft(event, draft)}
       actions={selected && !editSection && <>
-        {editorMode(selected) !== "draft" && <button type="button" className="secondary" disabled={disabled || dirty}
+        {editorMode(selected) !== "draft" && !selected.postingTransactionId && !selected.sendPending &&
+          <button type="button" className="secondary" disabled={disabled || dirty}
           onClick={() => { setEditSection("accounts"); setError(""); }}>Edit accounts</button>}
         {editorMode(selected) !== "draft" && Boolean(selected.lines?.length) && <button type="button" className="secondary"
           disabled={disabled || dirty} onClick={() => { setEditSection("receipts"); setError(""); }}>Edit receipts</button>}
@@ -297,23 +303,32 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
             setSelected(null);
             setError("");
           }}>Copy to new draft</button> : null}
+        {editorMode(selected) === "draft" && selected.amountMinor > 0 && selected.payerName && !confirm && issueDate === null &&
+          <button className="secondary" type="button" disabled={busy || dirty} onClick={() => {
+            const now = new Date();
+            setIssueDate(new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10));
+            setError("");
+          }}>Issue invoice</button>}
         {connection?.configured && connection.stripeAccountId && !selected.sentAt && !selected.adoptedAt
-          && !selected.sendReviewRequired && (selected.status === "draft" || selected.sendPending) && !confirm &&
+          && !selected.sendReviewRequired && (selected.status === "draft" || selected.sendPending) && !confirm && issueDate === null &&
           <button className="primary" type="button" disabled={busy || dirty} onClick={() => void run(async () => {
             const result = await api<{ nextAction: Confirmation }>(`/invoices/${selected.id}/prepare-send`, json({}), token);
             setConfirm(result.nextAction);
           })}>{selected.sendPending ? "Resume sending" : "Send invoice"}</button>}
         {selected.stripeInvoiceId && <button type="button" className="secondary" disabled={disabled}
           onClick={() => void run(() => openInvoice(selected.id))}>Refresh Stripe status</button>}
+        {postingTransactionId != null && <button type="button" className="secondary" disabled={disabled || dirty}
+          onClick={() => void run(() => onOpenPosting(postingTransactionId))}>View ledger posting</button>}
         {selected.hostedInvoiceUrl && <a href={selected.hostedInvoiceUrl} target="_blank" rel="noreferrer">Hosted invoice</a>}
         {selected.stripePdfUrl && <a href={selected.stripePdfUrl} target="_blank" rel="noreferrer">Stripe PDF</a>}
       </>}
       details={<>
         {selected?.sendReviewRequired && <p className="error">Review the previous delivery attempt before editing or sending this invoice.</p>}
         {selected?.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
-        {selected?.stripeInvoiceId && <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding</p>}
+        {selected && (selected.stripeInvoiceId || selected.postingTransactionId) &&
+          <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding</p>}
       </>}
-      confirmation={confirm && <div className="invoice-confirmation" role="group" aria-label="Confirm sending">
+      confirmation={confirm ? <div className="invoice-confirmation" role="group" aria-label="Confirm sending">
           <p>{confirm.instruction}</p>
           <div className="invoice-actions">
             <button className="primary" type="button" disabled={busy} onClick={() => void run(async () => {
@@ -324,7 +339,21 @@ export default function InvoiceWorkspace({ token, accounts }: { token: string; a
             })}>Yes, send invoice</button>
             <button className="secondary" type="button" disabled={busy} onClick={() => setConfirm(null)}>Not yet</button>
           </div>
-        </div>} />}
+        </div>
+        : issueDate !== null && selected && <div className="invoice-confirmation" role="group" aria-label="Issue invoice">
+        <p>Post {money(selected.amountMinor, selected.currency)} to Accounts Receivable and issue invoice #{selected.invoiceNumber} without sending it through Stripe.</p>
+        <label>Posting date<input type="date" value={issueDate} disabled={busy}
+          onChange={(event) => setIssueDate(event.target.value)} /></label>
+        <div className="invoice-actions">
+          <button className="primary" type="button" disabled={busy || !issueDate} onClick={() => void run(async () => {
+            const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${selected.id}/issue`,
+              json({ revision: selected.revision, issue_date: issueDate }), token);
+            setIssueDate(null);
+            await reloadAfterChange(invoice, "Invoice issued and posted to the ledger.");
+          })}>Post and issue</button>
+          <button className="secondary" type="button" disabled={busy} onClick={() => setIssueDate(null)}>Cancel</button>
+        </div>
+      </div>} />}
     <form className="invoice-inline-form" onSubmit={(event) => {
       event.preventDefault();
       void run(async () => {

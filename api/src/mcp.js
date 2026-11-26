@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
-import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceStatus, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceStatus, stripeInvoiceId } from "./invoices.js";
 import * as z from "zod/v4";
 import { requireApiToken } from "./api-tokens.js";
 import {
@@ -725,6 +725,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
     amountRemainingMinor: z.number().int(), stripeInvoiceId: z.string().nullable(),
     hostedInvoiceUrl: z.string().nullable(), stripePdfUrl: z.string().nullable(),
     sentAt: z.string().nullable(), adoptedAt: z.string().nullable(), refreshFailed: z.boolean(),
+    postingTransactionId: z.number().int().positive().nullable().optional(),
     lines: z.array(z.object({
       id: invoiceId, sourceRef: z.string(), position: z.number().int(), description: z.string(),
       amountMinor: z.number().int(), accountId: invoiceAccountId, receiptRef: z.string().nullable(),
@@ -777,10 +778,22 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }));
   invoiceTool("assign_invoice_accounts", {
     title: "Assign invoice accounts",
-    description: "Assign the invoice total to an exact active same-currency receivable asset account, or assign one or more exact invoice lines to ledger accounts. Read the invoice and target accounts first. Pass the invoice revision and only the assignments to change. Works for issued or paid invoices and changes neither billing terms nor ledger postings.",
+    description: "Assign the invoice total to an exact active same-currency receivable asset account, or assign one or more exact invoice lines to ledger accounts. Read the invoice and target accounts first. Pass the invoice revision and only the assignments to change. Available before sending or where a historic invoice has no linked posting.",
     inputSchema: { invoice_id: invoiceId, ...invoiceAccountAssignments.shape },
     outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, ...input }) => ({ invoice: await invoices.assignAccounts(personId, invoice_id, input) }));
+  invoiceTool("issue_invoice", {
+    title: "Issue invoice",
+    description: "Use when the user asks to issue a saved invoice without sending through Stripe. Read the exact invoice and use its revision and the requested accounting date. Posts one balanced A/R transaction from the saved account assignments, opens the invoice, and returns its postingTransactionId.",
+    inputSchema: { invoice_id: invoiceId, ...invoiceIssue.shape },
+    outputSchema: { ...invoiceResult, effectReceipt: effectReceiptSchema },
+    annotations: { ...writesData, idempotentHint: true }, _meta: invoiceMeta(true),
+  }, async ({ invoice_id, ...input }) => {
+    const invoice = await invoices.issue(personId, invoice_id, input);
+    return { invoice, effectReceipt: effectReceipt("issue_invoice", { invoice_id, ...input }, "upserted", [
+      { type: "invoice", id: invoice.id }, { type: "transaction", id: invoice.postingTransactionId },
+    ]) };
+  });
   invoiceTool("prepare_invoice_send", {
     title: "Prepare invoice send confirmation",
     description: "Use only when the user explicitly requests sending this invoice. Validate the exact draft and connected Stripe account. Present the returned instruction and wait for approval of its exact handoff.",
@@ -794,7 +807,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, ({ invoice_id }) => invoices.prepareSend(personId, invoice_id));
   invoiceTool("send_invoice", {
     title: "Send confirmed invoice",
-    description: "Execute the exact prepared send handoff after explicit user confirmation. Sends the invoice to the payer through Stripe. A successful result proves Stripe responded to the send, and includes the hosted invoice URL when available.",
+    description: "Execute the exact prepared send handoff after explicit user confirmation. Posts the newly issued invoice to A/R on Stripe finalization and sends it to the payer through Stripe. A successful result includes the hosted invoice URL when available.",
     inputSchema: { send_token: sendToken },
     outputSchema: { ...invoiceResult, idempotentReplay: z.boolean() },
     annotations: { ...writesData, idempotentHint: true, openWorldHint: true },

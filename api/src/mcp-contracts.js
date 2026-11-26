@@ -459,10 +459,10 @@ export const accountingCapabilityManifest = Object.freeze({
     {
       id: "accounting.invoices",
       title: "Invoices and Stripe payments",
-      summary: "Draft, revise, send, adopt, and track invoices and Stripe collection without general-ledger setup.",
+      summary: "Draft, post, send, adopt, and track invoices and Stripe collection.",
       aliases: ["invoice", "invoices", "billing", "get paid", "stripe", "accounts receivable"],
-      guidance: "Use payer name and email snapshots, never a contact database ID. Prepare sending only on an explicit send request and execute the exact provider handoff after confirmation. Adopt an existing Stripe invoice by its exact ID without issuing a new one. Keep collection status distinct from ledger posting.",
-      tools: ["list_invoices", "create_invoice", "update_invoice", "assign_invoice_accounts", "prepare_invoice_send", "send_invoice", "adopt_stripe_invoice", "get_stripe_setup"],
+      guidance: "Use payer name and email snapshots. Draft account assignments are prospective. Use issue_invoice for an explicit request to post and issue an invoice without Stripe. Prepare Stripe sending only on an explicit send request and execute the exact provider handoff after confirmation. Adopt an existing Stripe invoice by its exact ID. Keep collection status distinct from ledger posting.",
+      tools: ["list_invoices", "create_invoice", "update_invoice", "assign_invoice_accounts", "issue_invoice", "prepare_invoice_send", "send_invoice", "adopt_stripe_invoice", "get_stripe_setup"],
       dependencies: ["accounting.accounts"],
       attachmentHints: [],
       contextViews: [],

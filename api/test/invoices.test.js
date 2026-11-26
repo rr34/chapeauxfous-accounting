@@ -19,9 +19,9 @@ const env = {
   ACCOUNTING_STRIPE_STATE_SECRET: "fixture-state-secret-at-least-32-characters",
 };
 const accounts = [
-  { account_id: 11, type: "asset", name: "Accounts Receivable", is_suspense: 0, account_currency_id: 1 },
-  { account_id: 12, type: "expense", name: "Suspense", is_suspense: 1, account_currency_id: 1 },
-  { account_id: 13, type: "income", name: "Revenue", is_suspense: 0, account_currency_id: 1 },
+  { account_id: 11, type: "asset", name: "Accounts Receivable", is_suspense: 0, account_currency_id: 1, scale: 2 },
+  { account_id: 12, type: "expense", name: "Suspense", is_suspense: 1, account_currency_id: 1, scale: 2 },
+  { account_id: 13, type: "income", name: "Revenue", is_suspense: 0, account_currency_id: 1, scale: 2 },
 ];
 
 test("drafts can change recipient and append a line, while local paid invoices only accept recipient correction", async () => {
@@ -40,6 +40,7 @@ test("drafts can change recipient and append a line, while local paid invoices o
         return [[{ ...row }]];
       }
       if (sql.includes("SELECT") && sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.includes("FROM transactions")) return [[]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.startsWith("DELETE FROM accounting_invoice_lines")) { lines = []; return; }
       if (sql.startsWith("UPDATE accounting_invoices SET receivable_account_id")) {
@@ -104,6 +105,71 @@ test("drafts can change recipient and append a line, while local paid invoices o
     { payer_name: "Another name", payer_email: null }), { code: "INVOICE_PAYER_LOCKED" });
 });
 
+test("issuing a draft posts its assigned accounts once and rolls back a failed ledger write", async () => {
+  const row = {
+    invoice_id: id, owner_person_id: 7, revision, payer_name: "Alice", payer_email: null,
+    currency: "USD", amount_minor: "2500", amount_paid_minor: "0", payment_methods: "ach_only",
+    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11,
+  };
+  const lines = [
+    { invoice_line_id: revision, description: "Labor", amount_minor: "2100", account_id: 13 },
+    { invoice_line_id: id, description: "Parts", amount_minor: "400", account_id: 12 },
+  ];
+  let posting;
+  let failPosting = true;
+  let transactionOpen = false;
+  let writes = 0;
+  const db = {
+    getConnection: async () => db,
+    async beginTransaction() { assert.equal(transactionOpen, false); transactionOpen = true; },
+    async commit() { transactionOpen = false; },
+    async rollback() { posting = undefined; transactionOpen = false; },
+    release() {},
+    async execute(sql, args) {
+      if (sql.startsWith("SELECT * FROM accounting_invoices")) {
+        assert.deepEqual(args, [7, id]);
+        return [[{ ...row }]];
+      }
+      if (sql.includes("FROM transactions")) {
+        assert.deepEqual(args, [7, "accounting_invoice", id]);
+        return [[posting].filter(Boolean)];
+      }
+      if (sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.includes("FROM accounts a JOIN currencies")) return [accounts.map((account) => ({ ...account, scale: 3 }))];
+      assert.match(sql, /SET invoice_status = 'open'/);
+      assert.equal(transactionOpen, true);
+      row.invoice_status = "open";
+      row.amount_remaining_minor = row.amount_minor;
+      row.revision = args[0];
+      return [[]];
+    },
+  };
+  const invoices = createInvoiceService(db, { env, postTransaction: (input, runInTransaction) => runInTransaction(async (connection) => {
+    assert.equal(connection, db);
+    assert.equal(transactionOpen, true);
+    assert.equal(input.sourceId, id);
+    assert.equal(input.sourceSystem, "accounting_invoice");
+    assert.equal(input.transactionDate, "2026-11-26");
+    assert.deepEqual(input.lineItems.map((line) => [line.accountId, line.amountUnits]), [[11, "25000"], [13, "-21000"], [12, "-4000"]]);
+    posting = { transaction_id: 42, TransactionDate: input.transactionDate };
+    writes++;
+    if (failPosting) throw new Error("Ledger write failed");
+  }) });
+  const input = { revision, issue_date: "2026-11-26" };
+  await assert.rejects(invoices.issue(7, id, input), /Ledger write failed/);
+  assert.equal(row.invoice_status, "draft");
+  assert.equal(posting, undefined);
+  failPosting = false;
+  const issued = await invoices.issue(7, id, input);
+  assert.equal(issued.status, "open");
+  assert.equal(issued.amountRemainingMinor, 2500);
+  assert.equal(issued.postingTransactionId, 42);
+  assert.equal((await invoices.issue(7, id, input)).postingTransactionId, 42);
+  assert.equal(writes, 2);
+  await assert.rejects(invoices.assignAccounts(7, id, { revision: issued.revision, receivable_account_id: 11 }),
+    { code: "INVOICE_POSTING_ACCOUNTS_LOCKED" });
+});
+
 test("Stripe setup returns to the initiating Accounting owner and browser", async () => {
   const browserKey = "9a029d16-737b-451c-8707-53d161b0d38f";
   const accounts = new Map();
@@ -147,6 +213,9 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     stripe_hosted_url: null, stripe_pdf_url: null, sent_at: null, adopted_at: null, send_started_at: null,
   };
   const calls = [];
+  let posting;
+  let finalized = false;
+  let failSend = true;
   const db = {
     getConnection: async () => db,
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
@@ -155,6 +224,8 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       if (sql.includes("RELEASE_LOCK")) return [[]];
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[{ ...row }]];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
+      if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
+      if (sql.includes("FROM transactions")) return [[posting].filter(Boolean)];
       if (sql.includes("FROM accounting_invoice_lines")) return [[{
         invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", receipt_ref: null, account_id: 12,
       }]];
@@ -171,6 +242,8 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     },
   };
   const status = { id: "in_real", customer: "cus_real", status: "open", amount_paid: 0, amount_remaining: 2500,
+    currency: "usd", total: 2500, status_transitions: { finalized_at: Date.UTC(2026, 10, 26) / 1000 },
+    metadata: {},
     hosted_invoice_url: "https://invoice.stripe.com/i/existing" };
   const step = (name, value) => async (...args) => {
     assert.equal(args.at(-1).stripeAccount, accountId);
@@ -184,12 +257,33 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     invoiceItems: { create: step("line", {}) },
     invoices: {
       create: step("create", { id: "in_real" }),
-      retrieve: async () => ({ ...status, status: "draft" }),
-      finalizeInvoice: step("finalize", status),
-      sendInvoice: step("send", status),
+      retrieve: async () => finalized ? status : { ...status, status: "draft", status_transitions: {} },
+      update: async (remoteId, { metadata }, options) => {
+        assert.equal(remoteId, status.id);
+        await step("mark", null)(options);
+        status.metadata = metadata;
+      },
+      finalizeInvoice: async (...args) => {
+        finalized = true;
+        return step("finalize", status)(...args);
+      },
+      sendInvoice: async (...args) => {
+        assert.equal(posting.transaction_id, 42);
+        await step("send", status)(...args);
+        if (failSend) throw new Error("Delivery was interrupted");
+        return status;
+      },
     },
   };
-  const invoices = createInvoiceService(db, { env, stripeFactory: () => stripe });
+  const invoices = createInvoiceService(db, { env, stripeFactory: () => stripe,
+    postTransaction: async (input, inTransaction) => inTransaction(async (connection) => {
+      assert.equal(connection, db);
+      assert.equal(input.transactionDate, "2026-11-26");
+      assert.deepEqual(input.lineItems.map((line) => line.amountUnits), ["2500", "-2500"]);
+      assert.equal(posting, undefined);
+      posting = { transaction_id: 42, TransactionDate: input.transactionDate };
+      calls.push("post");
+    }) });
   const server = createAccountingMcpServer({ personId: 7, pool: db, services: { invoices } });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
@@ -218,12 +312,17 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     row.revision = id;
     await assert.rejects(invoices.send(7, handoff.arguments.send_token), { code: "INVOICE_REVISION_CONFLICT" });
     row.revision = revision;
+    await assert.rejects(invoices.send(7, handoff.arguments.send_token), { code: "STRIPE_SEND_UNCONFIRMED" });
+    assert.equal(row.invoice_status, "open");
+    assert.equal(row.sent_at, null);
+    failSend = false;
     const result = await client.callTool({ name: handoff.tool, arguments: handoff.arguments });
     assert.equal(Boolean(result.isError), false, JSON.stringify(result.structuredContent ?? result.content));
     assert.equal(result.structuredContent.invoice.hostedInvoiceUrl, status.hosted_invoice_url);
-    assert.deepEqual(calls, ["customer", "create", "line", "finalize", "send"]);
+    assert.equal(result.structuredContent.invoice.postingTransactionId, 42);
+    assert.deepEqual(calls, ["customer", "create", "mark", "line", "finalize", "post", "send", "send"]);
     assert.equal((await invoices.send(7, handoff.arguments.send_token)).idempotentReplay, true);
-    assert.equal(calls.length, 5);
+    assert.equal(calls.length, 8);
   } finally {
     await client.close();
     await server.close();
@@ -251,6 +350,7 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
       if (sql.startsWith("SELECT invoice_number")) return [[{ invoice_number: 16 }]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
+      if (sql.includes("FROM transactions")) return [[]];
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[row]];
       if (sql.includes("FROM accounting_invoice_lines")) return [lines];
       if (sql.startsWith("SELECT invoice_id")) return [row ? [row] : []];
@@ -291,6 +391,7 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
   assert.equal(adopted.invoice.stripeInvoiceId, "in_existing");
   assert.equal(adopted.invoice.hostedInvoiceUrl, remote.hosted_invoice_url);
   assert.equal(adopted.invoice.amountRemainingMinor, 2000);
+  assert.equal(adopted.invoice.postingTransactionId, null);
   assert.equal(adopted.invoice.lines[0].description, "Work");
   assert.equal((await invoices.adopt(7, "in_existing")).idempotentReplay, true);
   await assert.rejects(invoices.prepareSend(7, adopted.invoice.id), { code: "INVOICE_ALREADY_ISSUED" });

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { invoicePostingSource } from "./accounting.js";
 import { withPoolTransaction } from "./db.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
 
@@ -244,6 +245,9 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "One or more selected transactions do not exist or are not owner-scoped.",
         { missingTransactionIds: ids.filter((id) => !found.has(id)) });
     }
+    if (selected.transactions.some((row) => row.source_system === invoicePostingSource)) {
+      throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes an issued invoice posting.");
+    }
     const accountData = await accountDataFingerprint(connection, personId);
     const importHistory = removeImportHistory
       ? await importHistoryFingerprint(connection, personId) : { jobCount: 0, itemCount: 0, requestCount: 0, sha256: null };
@@ -413,6 +417,10 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
     if (selected.transactions.length !== transactionIds.length || snapshotHash(selected) !== payload.snapshotSha256) {
       await invalidate(connection, planId, personId, "DATABASE_STATE_CHANGED");
       return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "A planned transaction changed after preview.") };
+    }
+    if (selected.transactions.some((item) => item.source_system === invoicePostingSource)) {
+      await invalidate(connection, planId, personId, "INVOICE_POSTING");
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The selection includes an issued invoice posting.") };
     }
     const targetSet = new Set(transactionIds);
     const externalReversals = snapshot.transactions.filter((item) =>

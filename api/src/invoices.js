@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import Stripe from "stripe";
 import { z } from "zod";
-import { withPoolTransaction } from "./db.js";
+import { createTransaction, invoicePostingSource } from "./accounting.js";
+import { withConnectionTransaction, withPoolTransaction } from "./db.js";
 import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
 
 const policies = {
@@ -10,6 +11,7 @@ const policies = {
   card_and_ach: ["card", "us_bank_account"],
 };
 export const invoiceId = z.uuid();
+export const invoiceIssue = z.object({ revision: z.uuid(), issue_date: z.iso.date() });
 export const invoiceStatus = z.enum(["draft", "open", "paid", "void", "uncollectible"]);
 export const invoicePayer = z.object({
   payer_name: z.string().trim().min(1).max(500).nullable().optional(),
@@ -86,6 +88,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
   ) : [[]];
   const id = row.invoice_id;
   const status = row.invoice_status;
+  const posting = includeLines && status !== "draft" ? await invoicePosting(db, row) : null;
   const invoiceNumber = Number(row.invoice_number);
   const formatter = new Intl.NumberFormat("en", { style: "currency", currency: row.currency });
   const total = formatter.format(Number(row.amount_minor) / (10 ** formatter.resolvedOptions().maximumFractionDigits));
@@ -101,12 +104,14 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     amountRemainingMinor: Number(row.amount_remaining_minor ?? row.amount_minor),
     stripeInvoiceId: row.stripe_invoice_id, hostedInvoiceUrl: row.stripe_hosted_url,
     stripePdfUrl: row.stripe_pdf_url, sentAt: row.sent_at, adoptedAt: row.adopted_at, refreshFailed,
-    ...(includeLines ? { lines: lines.map((line) => ({
-      id: line.invoice_line_id, sourceRef: `accounting://invoice-lines/${line.invoice_line_id}`,
-      position: line.position, description: line.description, amountMinor: Number(line.amount_minor),
-      accountId: Number(line.account_id),
-      receiptRef: line.receipt_ref,
-    })) } : {}),
+    ...(includeLines ? {
+      postingTransactionId: posting ? Number(posting.transaction_id) : null,
+      lines: lines.map((line) => ({
+        id: line.invoice_line_id, sourceRef: `accounting://invoice-lines/${line.invoice_line_id}`,
+        position: line.position, description: line.description, amountMinor: Number(line.amount_minor),
+        accountId: Number(line.account_id), receiptRef: line.receipt_ref,
+      })),
+    } : {}),
   };
 }
 
@@ -153,7 +158,7 @@ async function saveLines(db, id, lines) {
 async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAccountIds) {
   const ids = [...new Set([receivableId, ...lineAccountIds].filter((id) => id != null))];
   const [accounts] = await db.execute(`SELECT a.account_id, a.AccountType AS type, a.AccountName AS name,
-    a.is_suspense, a.account_currency_id
+    a.is_suspense, a.account_currency_id, c.scale
     FROM accounts a JOIN currencies c ON c.currency_id = a.account_currency_id
     WHERE a.owner_person_id = ? AND a.archived_at IS NULL AND a.is_placeholder = 0
       AND c.CurrencyAbbreviation = ? AND c.currency_type = 'iso_4217'
@@ -177,7 +182,46 @@ async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAcc
     }
     return Number(account.account_id);
   });
-  return { receivableId: Number(receivable.account_id), lineIds };
+  return { receivableId: Number(receivable.account_id), lineIds,
+    currencyId: Number(receivable.account_currency_id), scale: Number(receivable.scale) };
+}
+
+async function invoicePosting(db, row) {
+  const [[posting]] = await db.execute(`SELECT transaction_id, TransactionDate FROM transactions
+    WHERE owner_person_id = ? AND source_system = ? AND source_id = ? AND TransactionState = 'posted'`,
+  [row.owner_person_id, invoicePostingSource, row.invoice_id]);
+  return posting ?? null;
+}
+
+async function invoicePostingInput(db, row) {
+  const [lines] = await db.execute(
+    "SELECT * FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [row.invoice_id],
+  );
+  const total = BigInt(row.amount_minor);
+  if (!lines.length || total <= 0n || lines.reduce((sum, line) => sum + BigInt(line.amount_minor), 0n) !== total) {
+    throw fail("Set a positive invoice total that equals the saved line amounts.", "INVOICE_POSTING_TOTAL_INVALID", 400);
+  }
+  const accounts = await resolveInvoiceAccounts(db, row.owner_person_id, row.currency, row.receivable_account_id,
+    lines.map((line) => line.account_id));
+  const minorScale = new Intl.NumberFormat("en", { style: "currency", currency: row.currency })
+    .resolvedOptions().maximumFractionDigits;
+  const multiplier = 10n ** BigInt(Math.max(0, accounts.scale - minorScale));
+  const divisor = 10n ** BigInt(Math.max(0, minorScale - accounts.scale));
+  const units = (amount) => {
+    const scaled = BigInt(amount) * multiplier;
+    const value = scaled / divisor;
+    if (scaled % divisor || value > 9223372036854775807n || value < -9223372036854775808n) {
+      throw fail("An invoice amount cannot be represented in the ledger currency units.", "INVOICE_POSTING_AMOUNT_INVALID", 400);
+    }
+    return String(value);
+  };
+  return {
+    personId: Number(row.owner_person_id), description: `Invoice #${row.invoice_number} · ${row.payer_name}`,
+    valuationCurrencyId: accounts.currencyId, sourceSystem: invoicePostingSource, sourceId: row.invoice_id,
+    lineItems: [{ accountId: accounts.receivableId, amountUnits: units(total), memo: row.description },
+      ...lines.map((line, index) => ({ accountId: accounts.lineIds[index], amountUnits: units(-BigInt(line.amount_minor)),
+        memo: line.description, sourceId: line.invoice_line_id }))],
+  };
 }
 
 async function withInvoiceLock(pool, id, work) {
@@ -203,6 +247,7 @@ function stripeDate(date, endOfDay = false) {
 export function createInvoiceService(pool, {
   env = process.env,
   stripeFactory = (key) => new Stripe(key, { timeout: 20000, maxNetworkRetries: 1 }),
+  postTransaction = createTransaction,
 } = {}) {
   const secret = env.ACCOUNTING_STRIPE_STATE_SECRET;
   const browserDigest = (key) => createHash("sha256").update(stripeBrowserKey.parse(key)).digest("hex");
@@ -221,8 +266,20 @@ export function createInvoiceService(pool, {
     return row.stripe_account_id;
   }
 
-  async function sync(db, owner, id, remote, sent = false) {
+  async function sync(db, owner, id, remote, { sent = false, postFinalized = false } = {}) {
     const appStatus = invoiceStatus.safeParse(remote.status);
+    const finalizedAt = remote.status_transitions?.finalized_at;
+    if (postFinalized && remote.metadata?.accounting_invoice_id === id && remote.metadata?.accounting_ledger_posting === "1"
+      && finalizedAt && ["open", "paid", "uncollectible"].includes(remote.status)) {
+      const row = await getRow(db, owner, id, true);
+      if (row.send_started_at && !row.adopted_at && row.stripe_invoice_id === remote.id && !await invoicePosting(db, row)) {
+        if (remote.currency?.toUpperCase() !== row.currency || Number(remote.total) !== Number(row.amount_minor)) {
+          throw fail("Stripe’s finalized currency or total differs from the saved invoice.", "INVOICE_STRIPE_POSTING_MISMATCH");
+        }
+        await postTransaction({ ...await invoicePostingInput(db, row),
+          transactionDate: new Date(finalizedAt * 1000).toISOString().slice(0, 10) }, (work) => work(db));
+      }
+    }
     await db.execute(`UPDATE accounting_invoices SET stripe_status = ?, amount_paid_minor = ?,
       amount_remaining_minor = ?, stripe_hosted_url = ?, stripe_pdf_url = ?,
       sent_at = IF(?, COALESCE(sent_at, UTC_TIMESTAMP(6)), sent_at),
@@ -233,12 +290,33 @@ export function createInvoiceService(pool, {
     return getRow(db, owner, id);
   }
 
-  async function refresh(owner, id) {
+  async function refresh(owner, id, { postFinalized = false } = {}) {
     return withInvoiceLock(pool, id, async (db) => {
       const row = await getRow(db, owner, id);
       if (!row.stripe_invoice_id) return invoiceObject(db, row);
       const remote = await stripe().invoices.retrieve(row.stripe_invoice_id, {}, { stripeAccount: row.stripe_account_id });
-      return invoiceObject(db, await sync(db, owner, id, remote));
+      const updated = await withConnectionTransaction(db, () => sync(db, owner, id, remote, { postFinalized }));
+      return invoiceObject(db, updated);
+    });
+  }
+
+  async function issue(owner, id, input) {
+    const data = invoiceIssue.parse(input);
+    return withPoolTransaction(pool, async (db) => {
+      const row = await getRow(db, owner, id, true);
+      if (row.invoice_status === "open" && !row.stripe_invoice_id) {
+        const posting = await invoicePosting(db, row);
+        if (posting?.TransactionDate === data.issue_date) return invoiceObject(db, row);
+      }
+      if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before issuing.", "INVOICE_REVISION_CONFLICT");
+      if (row.invoice_status !== "draft" || row.stripe_invoice_id || row.send_started_at || row.send_review_required) {
+        throw fail("Only a saved draft can be issued.", "INVOICE_ALREADY_ISSUED");
+      }
+      if (!row.payer_name) throw fail("Set a payer name before issuing the invoice.", "INVOICE_INCOMPLETE", 400);
+      await postTransaction({ ...await invoicePostingInput(db, row), transactionDate: data.issue_date }, (work) => work(db));
+      await db.execute(`UPDATE accounting_invoices SET invoice_status = 'open', amount_remaining_minor = amount_minor, revision = ?
+        WHERE owner_person_id = ? AND invoice_id = ?`, [randomUUID(), owner, id]);
+      return invoiceObject(db, await getRow(db, owner, id));
     });
   }
 
@@ -296,6 +374,9 @@ export function createInvoiceService(pool, {
     return withPoolTransaction(pool, async (db) => {
       const row = await getRow(db, owner, id, true);
       if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before assigning accounts.", "INVOICE_REVISION_CONFLICT");
+      if (sendPending(row) || (row.invoice_status !== "draft" && await invoicePosting(db, row))) {
+        throw fail("The invoice accounts are locked by its posting or delivery.", "INVOICE_POSTING_ACCOUNTS_LOCKED");
+      }
       const [lines] = await db.execute("SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [id]);
       const changes = new Map((data.lines ?? []).map((line) => [line.invoice_line_id, line.account_id]));
       if (changes.size !== (data.lines?.length ?? 0) || [...changes.keys()].some((key) => !lines.some((line) => line.invoice_line_id === key))) {
@@ -462,7 +543,7 @@ export function createInvoiceService(pool, {
     const methods = { ach_only: "bank account only", card_only: "card only", card_and_ach: "card or bank account" };
     return { contractVersion: 1, status: "ready", nextAction: {
       type: "request_user_confirmation",
-      instruction: `Send invoice #${row.invoice_number} for ${row.currency} ${total} to ${row.payer_name} at ${row.payer_email}, due ${row.due_on}, accepting ${methods[row.payment_methods]}?`,
+      instruction: `Post and send invoice #${row.invoice_number} for ${row.currency} ${total} to ${row.payer_name} at ${row.payer_email}, due ${row.due_on}, accepting ${methods[row.payment_methods]}?`,
       onApproval: { tool: "send_invoice", arguments: { send_token: token } },
     } };
   }
@@ -481,6 +562,7 @@ export function createInvoiceService(pool, {
         }
         if (!row.sent_at) {
           assertCanSend(row);
+          if (!await invoicePosting(db, row)) await invoicePostingInput(db, row);
           await db.execute(`UPDATE accounting_invoices SET stripe_account_id = ?,
             send_started_at = COALESCE(send_started_at, UTC_TIMESTAMP(6))
             WHERE owner_person_id = ? AND invoice_id = ?`, [plan.accountId, owner, plan.id]);
@@ -503,8 +585,14 @@ export function createInvoiceService(pool, {
           await db.execute(`UPDATE accounting_invoices SET stripe_invoice_id = ?, stripe_customer_id = ?
             WHERE owner_person_id = ? AND invoice_id = ?`, [remoteId, customer.id, owner, plan.id]);
         }
-        const remote = await client.invoices.retrieve(remoteId, {}, { stripeAccount: plan.accountId });
+        let remote = await client.invoices.retrieve(remoteId, {}, { stripeAccount: plan.accountId });
         if (remote.status === "draft") {
+          // Mark the Stripe draft before finalization so a webhook can recover an interrupted posting.
+          if (remote.metadata?.accounting_ledger_posting !== "1") {
+            await client.invoices.update(remoteId, {
+              metadata: { accounting_invoice_id: plan.id, accounting_ledger_posting: "1" },
+            }, options("record-posting"));
+          }
           const invoice = await invoiceObject(db, row);
           for (const line of invoice.lines) {
             await client.invoiceItems.create({
@@ -512,13 +600,15 @@ export function createInvoiceService(pool, {
               amount: line.amountMinor, currency: row.currency.toLowerCase(),
             }, options(`line-${line.id}`));
           }
-          await client.invoices.finalizeInvoice(remoteId, {}, options("finalize"));
-        } else if (remote.status !== "open") {
-          await sync(db, owner, plan.id, remote);
+          remote = await client.invoices.finalizeInvoice(remoteId, {}, options("finalize"));
+        }
+        await withConnectionTransaction(db, () => sync(db, owner, plan.id, remote, { postFinalized: true }));
+        if (remote.status !== "open") {
           throw fail(`Stripe reports this invoice as ${remote.status}.`, "INVOICE_NOT_OPEN");
         }
         const sent = await client.invoices.sendInvoice(remoteId, {}, options("send"));
-        return { invoice: await invoiceObject(db, await sync(db, owner, plan.id, sent, true)), idempotentReplay: false };
+        const updated = await withConnectionTransaction(db, () => sync(db, owner, plan.id, sent, { sent: true }));
+        return { invoice: await invoiceObject(db, updated), idempotentReplay: false };
       } catch (error) {
         if (error.status) throw error;
         throw fail("Stripe send could not be confirmed. Check the invoice before retrying.", "STRIPE_SEND_UNCONFIRMED");
@@ -592,10 +682,10 @@ export function createInvoiceService(pool, {
     if (!event.account || event.data.object?.object !== "invoice" || !event.type.startsWith("invoice.")) return;
     const [[row]] = await pool.execute(`SELECT owner_person_id, invoice_id FROM accounting_invoices
       WHERE stripe_account_id = ? AND stripe_invoice_id = ?`, [event.account, event.data.object.id]);
-    if (row) await refresh(row.owner_person_id, row.invoice_id);
+    if (row) await refresh(row.owner_person_id, row.invoice_id, { postFinalized: true });
   }
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
     invoiceObject(db, await getRow(db, owner, id)));
-  return { saveDraft, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  return { saveDraft, issue, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }
