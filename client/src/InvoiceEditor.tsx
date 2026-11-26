@@ -43,12 +43,14 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
   </dialog>;
 }
 
-export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, paymentStatus, savedTotal, busy, error,
-  accounts, receipts, hasMoreReceipts, onMoreReceipts, onUploadReceipt,
+export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, receivableAccountLocked, paymentStatus, savedTotal, busy, error,
+  accounts, receipts, hasMoreReceipts, onMoreReceipts, onReceiptChange, onUploadReceipt,
   dirty, actions, details, confirmation, onChange, onClose, onSave }: {
-  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "receipts" | "read";
+  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "read";
+  receivableAccountLocked: boolean;
   accounts: Account[];
   receipts: InvoiceReceiptOption[]; hasMoreReceipts: boolean; onMoreReceipts: () => void;
+  onReceiptChange: (lineId: string, receiptRef: string | null) => void;
   onUploadReceipt: (lineId: string, file: File) => void;
   invoiceNumber?: number;
   paymentStatus?: string; savedTotal?: string; busy: boolean; error: string; dirty: boolean;
@@ -59,7 +61,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   const editable = mode === "draft";
   const payerEditable = editable || mode === "payer";
   const accountsEditable = editable || mode === "accounts";
-  const receiptsEditable = editable || mode === "receipts";
+  const receiptsEditable = mode !== "accounts";
   const selectable = accounts.filter((account) => !account.placeholder && account.archivedAt == null
     && account.currencyCode === draft.currency);
   const accountNames = accountFullNames(accounts);
@@ -98,7 +100,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase(),
               receivableAccountId: undefined, lines: draft.lines.map((line) => ({ ...line, accountId: undefined })) })} /></label>
         </div>
-        <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable}
+        <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
           onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
           <option value="" disabled={!creating}>Default Accounts Receivable</option>
           {selectable.filter((account) => account.type === "asset" && !account.suspense)
@@ -123,6 +125,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             {receiptsEditable && hasMoreReceipts && <button className="secondary" type="button" onClick={onMoreReceipts}>Load more receipts</button>}
             {editable && <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button>}
           </div></div>
+        {receiptsEditable && !editable && draft.lines.length > 0 && <small>Receipt changes save automatically.</small>}
         <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
           <div className="invoice-line-heading"><span>Line {index + 1}</span><div className="invoice-actions">
             {editable && index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
@@ -142,7 +145,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           </div>
           {(receiptsEditable || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
             <label>Receipt<select value={line.receiptRef ?? ""} disabled={!receiptsEditable}
-              onChange={(event) => setLine(line.key, { receiptRef: event.target.value || null })}>
+              onChange={(event) => onReceiptChange(line.key, event.target.value || null)}>
               <option value="">No receipt</option>
               {line.receiptRef && !receipts.some((file) => file.sourceRef === line.receiptRef) &&
                 <option value={line.receiptRef}>{line.receiptRef.startsWith("agent-slayer:")
@@ -160,7 +163,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
       </fieldset>
       {creating && <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>}
       {mode === "payer" && <p className="muted">You can correct the recipient on this locally paid invoice.</p>}
-      {mode === "read" && <p className="muted">This invoice is read-only. Use a draft to change the recipient or lines.</p>}
+      {mode === "accounts" && receivableAccountLocked && <p className="muted">Saving changes updates the original ledger posting.</p>}
       {details}
       {confirmation}
       {error && <p className="error" role="alert">{error}</p>}
@@ -168,8 +171,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
         {actions}
         <button className="secondary" type="button" disabled={busy} onClick={onClose}>{mode === "read" ? "Close" : "Cancel"}</button>
         {mode !== "read" && <button className="primary" type="submit" disabled={editingLocked || !dirty || (editable && !started)}>
-          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : mode === "accounts" ? "Save accounts"
-            : mode === "receipts" ? "Save receipts" : "Save changes"}
+          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : mode === "accounts" ? "Save accounts" : "Save changes"}
         </button>}
       </footer>
     </form>

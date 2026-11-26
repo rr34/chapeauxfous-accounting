@@ -100,8 +100,8 @@ async function finishStripeReturn(token: string) {
   }
 }
 
-export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
-  token: string; accounts: Account[]; onOpenPosting: (id: number) => Promise<void>;
+export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPostingChanged }: {
+  token: string; accounts: Account[]; onOpenPosting: (id: number) => Promise<void>; onPostingChanged: () => Promise<void>;
 }) {
   const [connection, setConnection] = useState<StripeConnection | null>(null);
   const [page, setPage] = useState<Page>({ objects: [], nextCursor: null });
@@ -109,7 +109,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Invoice | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [editSection, setEditSection] = useState<"accounts" | "receipts" | null>(null);
+  const [editingAccounts, setEditingAccounts] = useState(false);
   const [receipts, setReceipts] = useState<ReceiptPage>({ objects: [], nextCursor: null });
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [issueDate, setIssueDate] = useState<string | null>(null);
@@ -168,34 +168,36 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
     setSelected(invoice);
     setPage((current) => ({ ...current, objects: current.objects.map((item) => item.id === id ? invoice : item) }));
     setDraft(invoiceDraft(invoice));
-    setEditSection(null);
+    setEditingAccounts(false);
     setConfirm(null);
   }
 
   async function reloadAfterChange(invoice: Invoice, message: string) {
     setSelected(invoice);
     setDraft(invoiceDraft(invoice));
-    setEditSection(null);
+    setEditingAccounts(false);
     setConfirm(null);
     setNotice(message);
     setPage(await fetchPage());
   }
 
+  async function saveLineReceipt(value: Draft, lineId: string, receiptRef: string | null) {
+    let invoice = value.invoice;
+    if (invoice && editorMode(invoice) !== "draft") {
+      const { invoice: updated } = await api<{ invoice: Invoice }>(`/invoices/${invoice.id}/receipts`,
+        json({ revision: invoice.revision, lines: [{ invoice_line_id: lineId, receipt_ref: receiptRef }] }, "PATCH"), token);
+      invoice = updated;
+      setSelected(updated);
+    }
+    setDraft((current) => current && { ...current, invoice, lines: current.lines.map((line) =>
+      line.key === lineId ? { ...line, receiptRef } : line) });
+  }
+
   function saveDraft(event: FormEvent, value: Draft) {
     event.preventDefault();
-    const mode = editSection ?? editorMode(value.invoice);
+    const mode = editingAccounts ? "accounts" : editorMode(value.invoice);
     if (mode === "read") return;
     void run(async () => {
-      if (mode === "receipts" && value.invoice) {
-        const original = new Map(value.invoice.lines?.map((line) => [line.id, line.receiptRef ?? null]));
-        const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${value.invoice.id}/receipts`,
-          json({ revision: value.invoice.revision,
-            lines: value.lines.filter((line) => original.get(line.key) !== (line.receiptRef ?? null))
-              .map((line) => ({ invoice_line_id: line.key, receipt_ref: line.receiptRef ?? null })),
-          }, "PATCH"), token);
-        await reloadAfterChange(invoice, "Invoice receipts saved.");
-        return;
-      }
       if (mode === "accounts" && value.invoice) {
         const original = new Map(value.invoice.lines?.map((line) => [line.id, line.accountId]));
         const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${value.invoice.id}/accounts`,
@@ -205,6 +207,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
               .map((line) => ({ invoice_line_id: line.key, account_id: line.accountId })),
           }, "PATCH"), token);
         await reloadAfterChange(invoice, "Invoice accounts saved.");
+        if (invoice.postingTransactionId != null) await onPostingChanged();
         return;
       }
       const payer = { payer_name: value.payer.trim() || null, payer_email: value.email.trim() || null };
@@ -238,8 +241,8 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
   const postingTransactionId = selected?.postingTransactionId;
   const dirty = Boolean(draft && (!draft.invoice || JSON.stringify(draft) !== JSON.stringify(invoiceDraft(draft.invoice))));
   const closeEditor = () => {
-    if (editSection && selected) {
-      setEditSection(null); setDraft(invoiceDraft(selected)); setError(""); return;
+    if (editingAccounts && selected) {
+      setEditingAccounts(false); setDraft(invoiceDraft(selected)); setError(""); return;
     }
     setDraft(null); setSelected(null); setConfirm(null); setIssueDate(null); setError("");
   };
@@ -267,30 +270,29 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting }: {
     {draft && <InvoiceEditor key={draft.invoice?.id ?? "new"} draft={draft}
       existingLineCount={draft.invoice ? draft.invoice.lines?.length ?? 0 : null}
       invoiceNumber={draft.invoice?.invoiceNumber}
-      accounts={accounts} mode={editSection ?? editorMode(draft.invoice)}
+      accounts={accounts} mode={editingAccounts ? "accounts" : editorMode(draft.invoice)}
+      receivableAccountLocked={draft.invoice?.postingTransactionId != null}
       receipts={receipts.objects} hasMoreReceipts={receipts.nextCursor != null}
       onMoreReceipts={() => void run(async () => {
         const next = await api<ReceiptPage>(`/invoice-receipts?cursor=${encodeURIComponent(receipts.nextCursor ?? "")}`, {}, token);
         setReceipts((current) => ({ nextCursor: next.nextCursor,
           objects: [...current.objects, ...next.objects.filter((file) => !current.objects.some((known) => known.sourceRef === file.sourceRef))] }));
       })}
+      onReceiptChange={(lineId, receiptRef) => void run(() => saveLineReceipt(draft, lineId, receiptRef))}
       onUploadReceipt={(lineId, file) => void run(async () => {
         const { receipt } = await uploadInvoiceReceipt<{ receipt: InvoiceReceiptOption }>(file, token);
         setReceipts((current) => ({ ...current,
           objects: [receipt, ...current.objects.filter((entry) => entry.sourceRef !== receipt.sourceRef)] }));
-        setDraft((current) => current && { ...current, lines: current.lines.map((line) =>
-          line.key === lineId ? { ...line, receiptRef: receipt.sourceRef } : line) });
+        await saveLineReceipt(draft, lineId, receipt.sourceRef);
       })}
       paymentStatus={selected && statusLabel(selected.status) || undefined}
       savedTotal={selected ? money(selected.amountMinor, selected.currency) : undefined}
       busy={busy} dirty={dirty} error={error} onChange={(fields) => setDraft({ ...fields, invoice: draft.invoice })}
       onClose={closeEditor} onSave={(event) => saveDraft(event, draft)}
-      actions={selected && !editSection && <>
-        {editorMode(selected) !== "draft" && !selected.postingTransactionId && !selected.sendPending &&
+      actions={selected && !editingAccounts && <>
+        {editorMode(selected) !== "draft" && (!selected.sendPending || postingTransactionId != null) &&
           <button type="button" className="secondary" disabled={disabled || dirty}
-          onClick={() => { setEditSection("accounts"); setError(""); }}>Edit accounts</button>}
-        {editorMode(selected) !== "draft" && Boolean(selected.lines?.length) && <button type="button" className="secondary"
-          disabled={disabled || dirty} onClick={() => { setEditSection("receipts"); setError(""); }}>Edit receipts</button>}
+          onClick={() => { setEditingAccounts(true); setError(""); }}>Edit accounts</button>}
         <button type="button" className="secondary" disabled={disabled || dirty}
           onClick={() => void run(() => openInvoicePdf(selected, token, false))}>Preview PDF</button>
         <button type="button" className="secondary" disabled={disabled || dirty}

@@ -3982,7 +3982,7 @@ export default function App() {
           ? <ChartOfAccounts accounts={accounts} currencies={currencies} selectedAccountId={selectedAccountId}
               token={token} onSelectAccount={selectAccount} onChanged={refresh} />
           : workspaceView === "invoices"
-          ? <InvoiceWorkspace token={token} accounts={accounts} onOpenPosting={async (id) => {
+          ? <InvoiceWorkspace token={token} accounts={accounts} onPostingChanged={refreshAfterTransaction} onOpenPosting={async (id) => {
             const { transaction } = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token);
             openTransactionInRegister(transaction);
           }} />

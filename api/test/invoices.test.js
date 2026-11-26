@@ -116,14 +116,20 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
     { invoice_line_id: id, description: "Parts", amount_minor: "400", account_id: 12 },
   ];
   let posting;
+  let ledgerLines = [];
+  let before;
   let failPosting = true;
   let transactionOpen = false;
   let writes = 0;
   const db = {
     getConnection: async () => db,
-    async beginTransaction() { assert.equal(transactionOpen, false); transactionOpen = true; },
+    async beginTransaction() {
+      assert.equal(transactionOpen, false);
+      transactionOpen = true;
+      before = structuredClone({ posting, ledgerLines });
+    },
     async commit() { transactionOpen = false; },
-    async rollback() { posting = undefined; transactionOpen = false; },
+    async rollback() { ({ posting, ledgerLines } = before); transactionOpen = false; },
     release() {},
     async execute(sql, args) {
       if (sql.startsWith("SELECT * FROM accounting_invoices")) {
@@ -136,11 +142,45 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
       }
       if (sql.includes("FROM accounting_invoice_lines")) return [lines];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts.map((account) => ({ ...account, scale: 3 }))];
+      if (sql.includes("FROM line_items")) {
+        assert.match(sql, /FOR UPDATE/);
+        assert.equal(args[0], 42);
+        return [ledgerLines.filter((line) => args.slice(1).includes(line.source_id))];
+      }
+      if (sql.startsWith("UPDATE line_items")) {
+        assert.equal(transactionOpen, true);
+        assert.equal(args[2], 42);
+        ledgerLines.find((line) => line.line_item_id === args[1]).account_id = args[0];
+        return [[]];
+      }
+      if (sql.startsWith("UPDATE transactions")) {
+        assert.deepEqual(args, [42, 7]);
+        return [[]];
+      }
+      if (sql.includes("SET receivable_account_id")) {
+        [row.receivable_account_id, row.revision] = args;
+        return [[]];
+      }
+      if (sql.startsWith("UPDATE accounting_invoice_lines")) {
+        lines.find((line) => line.invoice_line_id === args[2]).account_id = args[0];
+        return [[]];
+      }
       assert.match(sql, /SET invoice_status = 'open'/);
       assert.equal(transactionOpen, true);
       row.invoice_status = "open";
       row.amount_remaining_minor = row.amount_minor;
       row.revision = args[0];
+      return [[]];
+    },
+    async query(sql, args) {
+      assert.equal(transactionOpen, true);
+      assert.match(sql, /FOR UPDATE/);
+      if (sql.includes("FROM transactions")) {
+        assert.deepEqual(args, [42, 7]);
+        return [[{ ...posting, valuation_currency_id: 1 }]];
+      }
+      if (sql.includes("FROM line_items")) return [ledgerLines];
+      assert.match(sql, /FROM xrates/);
       return [[]];
     },
   };
@@ -152,6 +192,11 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
     assert.equal(input.transactionDate, "2026-11-26");
     assert.deepEqual(input.lineItems.map((line) => [line.accountId, line.amountUnits]), [[11, "25000"], [13, "-21000"], [12, "-4000"]]);
     posting = { transaction_id: 42, TransactionDate: input.transactionDate };
+    ledgerLines = input.lineItems.map((line, index) => ({
+      line_item_id: index + 1, source_id: line.sourceId, account_id: line.accountId, amount_units: line.amountUnits,
+      value_units: line.amountUnits, account_owner_person_id: 7, account_currency_id: 1,
+      is_placeholder: 0, reconciliation_state: index === 2 ? "reconciled" : "unreconciled",
+    }));
     writes++;
     if (failPosting) throw new Error("Ledger write failed");
   }) });
@@ -166,8 +211,20 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
   assert.equal(issued.postingTransactionId, 42);
   assert.equal((await invoices.issue(7, id, input)).postingTransactionId, 42);
   assert.equal(writes, 2);
-  await assert.rejects(invoices.assignAccounts(7, id, { revision: issued.revision, receivable_account_id: 11 }),
-    { code: "INVOICE_POSTING_ACCOUNTS_LOCKED" });
+  await assert.rejects(invoices.assignAccounts(7, id, { revision: issued.revision, receivable_account_id: 13 }),
+    { code: "INVOICE_RECEIVABLE_ACCOUNT_LOCKED" });
+  const labor = { invoice_line_id: revision, account_id: 12 };
+  const parts = { invoice_line_id: id, account_id: 13 };
+  await assert.rejects(invoices.assignAccounts(7, id, { revision: issued.revision, lines: [labor, parts] }),
+    { code: "RECONCILED_LINE_IMMUTABLE" });
+  assert.deepEqual(ledgerLines.map((line) => line.account_id), [11, 13, 12]);
+  assert.deepEqual(lines.map((line) => line.account_id), [13, 12]);
+  const reassigned = await invoices.assignAccounts(7, id, { revision: issued.revision, lines: [labor] });
+  assert.deepEqual(reassigned.lines.map((line) => line.accountId), [12, 12]);
+  assert.equal(reassigned.postingTransactionId, 42);
+  assert.equal(reassigned.amountRemainingMinor, 2500);
+  assert.deepEqual(ledgerLines.map((line) => [line.line_item_id, line.account_id, line.amount_units]),
+    [[1, 11, "25000"], [2, 12, "-21000"], [3, 12, "-4000"]]);
 });
 
 test("Stripe setup returns to the initiating Accounting owner and browser", async () => {

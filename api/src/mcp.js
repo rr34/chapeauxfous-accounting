@@ -778,7 +778,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }));
   invoiceTool("assign_invoice_accounts", {
     title: "Assign invoice accounts",
-    description: "Assign the invoice total to an exact active same-currency receivable asset account, or assign one or more exact invoice lines to ledger accounts. Read the invoice and target accounts first. Pass the invoice revision and only the assignments to change. Available before sending or where a historic invoice has no linked posting.",
+    description: "Read the invoice and target accounts first. Supply the revision and only the account assignments to change. Before posting, the receivable and line accounts can be assigned. On posted invoices, moving an unreconciled invoice line to an active account of the same currency updates that line and its existing ledger posting together. Its A/R account stays fixed.",
     inputSchema: { invoice_id: invoiceId, ...invoiceAccountAssignments.shape },
     outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, ...input }) => ({ invoice: await invoices.assignAccounts(personId, invoice_id, input) }));

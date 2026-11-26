@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import Stripe from "stripe";
 import { z } from "zod";
-import { createTransaction, invoicePostingSource } from "./accounting.js";
+import { createTransaction, invoicePostingSource, validateTransaction } from "./accounting.js";
 import { withConnectionTransaction, withPoolTransaction } from "./db.js";
 import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
 
@@ -186,11 +186,34 @@ async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAcc
     currencyId: Number(receivable.account_currency_id), scale: Number(receivable.scale) };
 }
 
-async function invoicePosting(db, row) {
+async function invoicePosting(db, row, lock = false) {
   const [[posting]] = await db.execute(`SELECT transaction_id, TransactionDate FROM transactions
-    WHERE owner_person_id = ? AND source_system = ? AND source_id = ? AND TransactionState = 'posted'`,
+    WHERE owner_person_id = ? AND source_system = ? AND source_id = ? AND TransactionState = 'posted'${lock ? " FOR UPDATE" : ""}`,
   [row.owner_person_id, invoicePostingSource, row.invoice_id]);
   return posting ?? null;
+}
+
+async function reclassifyInvoicePosting(db, owner, posting, assignments) {
+  const transactionId = posting.transaction_id;
+  const sourceIds = assignments.map(({ line }) => line.invoice_line_id);
+  const [ledgerLines] = await db.execute(`SELECT line_item_id, source_id, account_id, reconciliation_state
+    FROM line_items WHERE transaction_id = ? AND source_id IN (${sourceIds.map(() => "?").join(",")})
+    ORDER BY line_item_id FOR UPDATE`, [transactionId, ...sourceIds]);
+  const bySource = new Map(ledgerLines.map((line) => [line.source_id, line]));
+  for (const { line, accountId } of assignments) {
+    const ledgerLine = bySource.get(line.invoice_line_id);
+    if (!ledgerLine || Number(ledgerLine.account_id) !== Number(line.account_id)) {
+      throw fail("An invoice line no longer matches its ledger posting.", "INVOICE_POSTING_LINE_MISMATCH");
+    }
+    if (ledgerLine.reconciliation_state === "reconciled") {
+      throw fail("A reconciled ledger line cannot move to another account.", "RECONCILED_LINE_IMMUTABLE");
+    }
+    await db.execute("UPDATE line_items SET account_id = ? WHERE line_item_id = ? AND transaction_id = ?",
+      [accountId, ledgerLine.line_item_id, transactionId]);
+  }
+  await validateTransaction(db, Number(transactionId), owner, { lock: true });
+  await db.execute("UPDATE transactions SET UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
+    [transactionId, owner]);
 }
 
 async function invoicePostingInput(db, row) {
@@ -374,23 +397,32 @@ export function createInvoiceService(pool, {
     return withPoolTransaction(pool, async (db) => {
       const row = await getRow(db, owner, id, true);
       if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before assigning accounts.", "INVOICE_REVISION_CONFLICT");
-      if (sendPending(row) || (row.invoice_status !== "draft" && await invoicePosting(db, row))) {
-        throw fail("The invoice accounts are locked by its posting or delivery.", "INVOICE_POSTING_ACCOUNTS_LOCKED");
+      const posting = row.invoice_status === "draft" ? null : await invoicePosting(db, row, true);
+      if (sendPending(row) && !posting) {
+        throw fail("Account assignments are locked while the invoice is being issued through Stripe.", "INVOICE_POSTING_ACCOUNTS_LOCKED");
+      }
+      if (posting && data.receivable_account_id != null && data.receivable_account_id !== Number(row.receivable_account_id)) {
+        throw fail("The receivable account is fixed once the invoice is posted.", "INVOICE_RECEIVABLE_ACCOUNT_LOCKED");
       }
       const [lines] = await db.execute("SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [id]);
       const changes = new Map((data.lines ?? []).map((line) => [line.invoice_line_id, line.account_id]));
       if (changes.size !== (data.lines?.length ?? 0) || [...changes.keys()].some((key) => !lines.some((line) => line.invoice_line_id === key))) {
         throw fail("Use distinct line IDs from this invoice.", "INVOICE_ACCOUNT_LINES_INVALID", 400);
       }
+      const targetLines = posting ? lines.filter((line) => changes.has(line.invoice_line_id)
+        && changes.get(line.invoice_line_id) !== Number(line.account_id)) : lines;
+      if (posting && targetLines.length === 0) return invoiceObject(db, row);
       const accounts = await resolveInvoiceAccounts(db, owner, row.currency,
         data.receivable_account_id ?? row.receivable_account_id,
-        lines.map((line) => changes.get(line.invoice_line_id) ?? line.account_id));
+        targetLines.map((line) => changes.get(line.invoice_line_id) ?? line.account_id));
+      const assignments = targetLines.flatMap((line, index) => changes.has(line.invoice_line_id)
+        ? [{ line, accountId: accounts.lineIds[index] }] : []);
+      if (posting) await reclassifyInvoicePosting(db, owner, posting, assignments);
       await db.execute("UPDATE accounting_invoices SET receivable_account_id = ?, revision = ? WHERE owner_person_id = ? AND invoice_id = ?",
         [accounts.receivableId, randomUUID(), owner, id]);
-      for (const [index, line] of lines.entries()) {
-        if (!changes.has(line.invoice_line_id)) continue;
+      for (const { line, accountId } of assignments) {
         await db.execute("UPDATE accounting_invoice_lines SET account_id = ? WHERE invoice_id = ? AND invoice_line_id = ?",
-          [accounts.lineIds[index], id, line.invoice_line_id]);
+          [accountId, id, line.invoice_line_id]);
       }
       return invoiceObject(db, await getRow(db, owner, id));
     });
