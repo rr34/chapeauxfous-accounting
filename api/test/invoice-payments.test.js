@@ -8,6 +8,32 @@ process.env.MYSQL_DATABASE = "accounting_test";
 const { createInvoiceService } = await import("../src/invoices.js");
 const { invoicePdfHtml } = await import("../src/invoice-pdf.js");
 
+test("historical invoices show ledger payment links without an app-issued posting", async () => {
+  const id = randomUUID();
+  const paymentId = randomUUID();
+  const row = { invoice_id: id, invoice_number: 27, owner_person_id: 7, invoice_status: "paid",
+    currency: "USD", amount_minor: "49800", amount_paid_minor: "49800", amount_remaining_minor: "0",
+    stripe_invoice_id: null };
+  const invoices = createInvoiceService({
+    async execute(sql, args) {
+      if (sql.startsWith("SELECT * FROM accounting_invoices")) {
+        assert.deepEqual(args, [7, id]);
+        return [[row]];
+      }
+      if (sql.includes("FROM accounting_invoice_lines") || sql.includes("FROM transactions")) return [[]];
+      assert.match(sql, /FROM accounting_invoice_payments/);
+      assert.deepEqual(args, [id]);
+      return [[{ payment_id: paymentId, transaction_id: "16573", amount_minor: "49800",
+        TransactionDate: "2025-09-09" }]];
+    },
+  });
+  const { objects: [invoice] } = await invoices.list(7, { invoice_id: id });
+  assert.equal(invoice.postingTransactionId, null);
+  assert.deepEqual(invoice.payments, [
+    { id: paymentId, transactionId: 16573, amountMinor: 49800, date: "2025-09-09" },
+  ]);
+});
+
 test("new and existing receipts settle a posted invoice in partial amounts", async () => {
   const id = randomUUID();
   const owner = 7;

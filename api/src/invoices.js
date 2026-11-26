@@ -91,7 +91,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
   const id = row.invoice_id;
   const status = row.invoice_status;
   const posting = includeLines && status !== "draft" ? await invoicePosting(db, row) : null;
-  const payments = posting && !row.stripe_invoice_id && Number(row.amount_paid_minor) > 0
+  const payments = includeLines && !row.stripe_invoice_id && Number(row.amount_paid_minor) > 0
     ? await readInvoicePayments(db, id) : [];
   const invoiceNumber = Number(row.invoice_number);
   const formatter = new Intl.NumberFormat("en", { style: "currency", currency: row.currency });

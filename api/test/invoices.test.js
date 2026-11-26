@@ -40,6 +40,7 @@ test("drafts can change recipient and append a line, while local paid invoices o
         return [[{ ...row }]];
       }
       if (sql.includes("SELECT") && sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.includes("FROM accounting_invoice_payments")) return [[]];
       if (sql.includes("FROM transactions")) return [[]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.startsWith("DELETE FROM accounting_invoice_lines")) { lines = []; return; }
