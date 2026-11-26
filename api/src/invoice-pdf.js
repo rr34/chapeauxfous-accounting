@@ -15,7 +15,8 @@ export function invoicePdfHtml(invoice, issuerName) {
   }).format(new Date(`${invoice.dueOn}T00:00:00Z`)) : "Not set";
   const lineRows = invoice.lines.map((line) => `<tr>
     <td class="line-number">${escapedHtml(line.position)}</td>
-    <td class="line-description">${escapedHtml(line.description)}</td>
+    <td class="line-description">${escapedHtml(line.description)}${line.receiptName
+      ? `<div class="line-receipt">${escapedHtml(line.receiptName)}</div>` : ""}</td>
     <td>${money(line.amountMinor)}</td>
   </tr>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Invoice #${escapedHtml(invoice.invoiceNumber)}</title>
@@ -35,6 +36,7 @@ export function invoicePdfHtml(invoice, issuerName) {
     td { padding: 13px 10px; border-bottom: 1px solid #dde1d8; vertical-align: top; }
     .line-number { width: 54px; color: #62695e; text-align: center; font-variant-numeric: tabular-nums; }
     .line-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .line-receipt { margin-top: 7px; color: #58634f; font-size: 11px; white-space: normal; }
     th:last-child, td:last-child { width: 150px; text-align: right; }
     .total { display: flex; justify-content: flex-end; gap: 30px; margin-top: 18px; font-size: 18px; }
     .description { margin: 0 0 28px; padding: 14px 16px; background: #f4f5f1; white-space: pre-wrap; overflow-wrap: anywhere; }

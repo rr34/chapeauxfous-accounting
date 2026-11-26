@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import Stripe from "stripe";
 import { z } from "zod";
 import { withPoolTransaction } from "./db.js";
+import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
 
 const policies = {
   ach_only: ["us_bank_account"],
@@ -19,6 +20,12 @@ export const invoicePayer = z.object({
 export const stripeBrowserKey = z.uuid();
 export const stripeInvoiceId = z.string().regex(/^in_[a-zA-Z0-9]+$/).max(255);
 export const invoiceAccountId = z.number().int().positive();
+const invoiceReceiptRef = z.string().max(512)
+  .regex(/^(?:agent-slayer:\/\/files\/[1-9][0-9]*|accounting:\/\/evidence-files\/[1-9][0-9]{0,15})$/u);
+export const invoiceReceiptAssignments = z.object({
+  revision: z.uuid(),
+  lines: z.array(z.object({ invoice_line_id: z.uuid(), receipt_ref: invoiceReceiptRef.nullable() })).min(1).max(500),
+});
 export const invoiceAccountAssignments = z.object({
   revision: z.uuid(),
   receivable_account_id: invoiceAccountId.optional(),
@@ -37,7 +44,7 @@ export const invoiceDraft = z.object({
     amount_minor: z.number().int().min(0).max(99999999).default(0),
     account_id: invoiceAccountId.optional(),
     todo_ref: reference("todos"),
-    receipt_ref: reference("files"),
+    receipt_ref: invoiceReceiptRef.nullable().optional(),
   })).min(1).max(100),
 });
 
@@ -247,6 +254,7 @@ export function createInvoiceService(pool, {
         data.currency, data.due_on ?? null, data.payment_methods, total, randomUUID()];
       if (revision == null) {
         const invoiceNumber = await nextInvoiceNumber(db, owner);
+        await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
         const accounts = await resolveInvoiceAccounts(db, owner, data.currency, data.receivable_account_id,
           data.lines.map((line) => line.account_id));
         data.lines.forEach((line, index) => { line.account_id = accounts.lineIds[index]; });
@@ -259,6 +267,7 @@ export function createInvoiceService(pool, {
           || row.send_started_at || row.send_review_required) {
           throw fail("The draft changed or sending has started. Read the current invoice.", "INVOICE_REVISION_CONFLICT");
         }
+        await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
         const [existing] = await db.execute(
           "SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position",
           [id],
@@ -305,6 +314,27 @@ export function createInvoiceService(pool, {
         await db.execute("UPDATE accounting_invoice_lines SET account_id = ? WHERE invoice_id = ? AND invoice_line_id = ?",
           [accounts.lineIds[index], id, line.invoice_line_id]);
       }
+      return invoiceObject(db, await getRow(db, owner, id));
+    });
+  }
+
+  async function assignReceipts(owner, id, input) {
+    const data = invoiceReceiptAssignments.parse(input);
+    return withPoolTransaction(pool, async (db) => {
+      const row = await getRow(db, owner, id, true);
+      if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before attaching receipts.", "INVOICE_REVISION_CONFLICT");
+      const [lines] = await db.execute("SELECT invoice_line_id FROM accounting_invoice_lines WHERE invoice_id = ?", [id]);
+      const ownIds = new Set(lines.map((line) => line.invoice_line_id));
+      if (new Set(data.lines.map((line) => line.invoice_line_id)).size !== data.lines.length
+        || data.lines.some((line) => !ownIds.has(line.invoice_line_id))) {
+        throw fail("Use distinct line IDs from this invoice.", "INVOICE_RECEIPT_LINES_INVALID", 400);
+      }
+      await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
+      for (const line of data.lines) {
+        await db.execute("UPDATE accounting_invoice_lines SET receipt_ref = ? WHERE invoice_id = ? AND invoice_line_id = ?",
+          [line.receipt_ref, id, line.invoice_line_id]);
+      }
+      await db.execute("UPDATE accounting_invoices SET revision = ? WHERE owner_person_id = ? AND invoice_id = ?", [randomUUID(), owner, id]);
       return invoiceObject(db, await getRow(db, owner, id));
     });
   }
@@ -570,5 +600,5 @@ export function createInvoiceService(pool, {
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
     invoiceObject(db, await getRow(db, owner, id)));
-  return { saveDraft, assignAccounts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
+  return { saveDraft, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice, list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

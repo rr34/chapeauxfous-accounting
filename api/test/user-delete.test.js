@@ -39,6 +39,7 @@ function userDeletionPool(passwordHash) {
         const plan = state.plans.get(params[0]);
         return [[plan && Number(plan.owner_person_id) === Number(params[1]) ? plan : undefined].filter(Boolean)];
       }
+      if (sql.includes("SELECT storage_key FROM accounting_evidence_files")) return [[]];
       const deletionTargets = ["accounting_transaction_import_jobs", "lineitems_tags_join", "line_items",
         "xrates", "transactions", "account_balance_assertions", "accounting_invoices", "accounts", "tags", "currencies", "api_tokens"];
       const deletionTarget = deletionTargets.find((table) => sql.includes(`DELETE FROM ${table}`)

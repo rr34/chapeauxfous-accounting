@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { verifyPassword } from "./auth.js";
 import { withPoolTransaction } from "./db.js";
 import { pruneOwnerAccountingImportPlans } from "./import-plan-retention.js";
+import { removeEvidenceStorageFile } from "./statement-import-jobs.js";
 
 function userDeleteError(message, code = "USER_DELETE_PLAN_STATE_CONFLICT", status = 409) {
   return Object.assign(new Error(message), { code, status });
@@ -35,6 +36,7 @@ async function dataCounts(connection, personId, excludedPlanId = null) {
     `SELECT
        (SELECT COUNT(*) FROM accounts WHERE owner_person_id = ?) AS account_count,
        (SELECT COUNT(*) FROM accounting_invoices WHERE owner_person_id = ?) AS invoice_count,
+       (SELECT COUNT(*) FROM accounting_evidence_files WHERE owner_person_id = ?) AS evidence_file_count,
        (SELECT COUNT(*) FROM transactions WHERE owner_person_id = ?) AS transaction_count,
        (SELECT COUNT(*) FROM line_items li JOIN transactions t ON t.transaction_id = li.transaction_id
          WHERE t.owner_person_id = ?) AS line_item_count,
@@ -49,7 +51,7 @@ async function dataCounts(connection, personId, excludedPlanId = null) {
        (SELECT COUNT(*) FROM api_tokens WHERE owner_person_id = ?) AS api_token_count,
        (SELECT COUNT(*) FROM accounting_import_plans
          WHERE owner_person_id = ? AND (? IS NULL OR import_plan_id <> ?)) AS saved_plan_count`,
-    [personId, personId, personId, personId, personId, personId, personId, personId, personId,
+    [personId, personId, personId, personId, personId, personId, personId, personId, personId, personId,
       personId, personId, personId, excludedPlanId, excludedPlanId],
   );
   const row = rows[0] ?? {};
@@ -105,11 +107,11 @@ export async function previewUserDeletion({ pool, personId, currentPassword }) {
 }
 
 export async function commitUserDeletion({ pool, personId, deletionPlanId, previewDigest,
-  currentPassword, confirmationText }) {
+  currentPassword, confirmationText, evidenceRoot }) {
   const planId = String(deletionPlanId ?? "").trim();
   const suppliedDigest = String(previewDigest ?? "").trim().replace(/^sha256:/, "");
   if (!planId) throw userDeleteError("User-deletion plan not found.", "USER_DELETE_PLAN_NOT_FOUND", 404);
-  return withPoolTransaction(pool, async (connection) => {
+  const { result, storageKeys } = await withPoolTransaction(pool, async (connection) => {
     const plan = await loadPlan(connection, personId, planId, true);
     if (plan.plan_status !== "ready" || Boolean(plan.is_expired)) {
       throw userDeleteError("User-deletion plan is no longer ready.", "USER_DELETE_PLAN_INVALIDATED");
@@ -152,6 +154,9 @@ export async function commitUserDeletion({ pool, personId, deletionPlanId, previ
     await connection.query("DELETE FROM transactions WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM account_balance_assertions WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM accounting_invoices WHERE owner_person_id = ?", [personId]);
+    const [evidence] = await connection.query(
+      "SELECT storage_key FROM accounting_evidence_files WHERE owner_person_id = ? FOR UPDATE", [personId]);
+    if (evidence.length) await connection.query("DELETE FROM accounting_evidence_files WHERE owner_person_id = ?", [personId]);
     await connection.query("UPDATE accounts SET parent_account_id = NULL WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM accounts WHERE owner_person_id = ?", [personId]);
     await connection.query("DELETE FROM tags WHERE owner_person_id = ?", [personId]);
@@ -160,6 +165,13 @@ export async function commitUserDeletion({ pool, personId, deletionPlanId, previ
     await connection.query("DELETE FROM accounting_import_plans WHERE owner_person_id = ?", [personId]);
     const [deletedUser] = await connection.query("DELETE FROM people2_people WHERE person_id = ?", [personId]);
     if (Number(deletedUser.affectedRows) !== 1) throw new Error("User deletion did not remove the account identity.");
-    return { status: "committed", deleted: { userCount: 1, ...counts }, confirmation: "account_and_owned_data_deleted" };
+    return { result: { status: "committed", deleted: { userCount: 1, ...counts },
+      confirmation: "account_and_owned_data_deleted" }, storageKeys: evidence.map((file) => file.storage_key) };
   });
+  let evidenceCleanupFailures = 0;
+  for (const storageKey of storageKeys) {
+    try { await removeEvidenceStorageFile({ evidenceRoot, storageKey }); }
+    catch (error) { evidenceCleanupFailures++; console.error("Could not remove deleted user evidence:", error); }
+  }
+  return evidenceCleanupFailures ? { ...result, evidenceCleanupFailures } : result;
 }

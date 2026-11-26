@@ -10,6 +10,7 @@ export type InvoiceDraftFields = {
   payer: string; email: string; description: string; currency: string; due: string;
   methods: PaymentMethods; receivableAccountId?: number; lines: EditableInvoiceLine[];
 };
+export type InvoiceReceiptOption = { sourceRef: string; displayName: string };
 
 export function invoiceCurrencyScale(currency: string) {
   return new Intl.NumberFormat(undefined, { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
@@ -41,9 +42,12 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
 }
 
 export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, paymentStatus, savedTotal, busy, error,
-  accounts, dirty, actions, details, confirmation, onChange, onClose, onSave }: {
-  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "read";
+  accounts, receipts, hasMoreReceipts, onMoreReceipts, onUploadReceipt,
+  dirty, actions, details, confirmation, onChange, onClose, onSave }: {
+  draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "receipts" | "read";
   accounts: Account[];
+  receipts: InvoiceReceiptOption[]; hasMoreReceipts: boolean; onMoreReceipts: () => void;
+  onUploadReceipt: (lineId: string, file: File) => void;
   invoiceNumber?: number;
   paymentStatus?: string; savedTotal?: string; busy: boolean; error: string; dirty: boolean;
   actions?: ReactNode; details?: ReactNode; confirmation?: ReactNode;
@@ -54,6 +58,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   const editable = mode === "draft";
   const payerEditable = editable || mode === "payer";
   const accountsEditable = editable || mode === "accounts";
+  const receiptsEditable = editable || mode === "receipts";
   const selectable = accounts.filter((account) => !account.placeholder && account.archivedAt == null
     && account.currencyCode === draft.currency);
   const editingLocked = busy || Boolean(confirmation);
@@ -105,7 +110,10 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           <option value="card_only">Credit card only</option>
         </select></label>
         <div className="invoice-line-heading"><h3>Invoice lines</h3>
-          {editable && <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button>}</div>
+          <div className="invoice-actions">
+            {receiptsEditable && hasMoreReceipts && <button className="secondary" type="button" onClick={onMoreReceipts}>Load more receipts</button>}
+            {editable && <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button>}
+          </div></div>
         <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
           <div className="invoice-line-heading"><span>Line {index + 1}</span><div className="invoice-actions">
             <strong>{line.todoRef ? "To-do" : "Manual line"}</strong>
@@ -127,8 +135,22 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           {(references === line.key || line.todoRef || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
             <label>Agent to-do reference<input value={line.todoRef ?? ""} placeholder="agent-slayer://todos/…" readOnly={!editable}
               onChange={(event) => setLine(line.key, { todoRef: event.target.value })} /></label>
-            <label>Agent receipt reference<input value={line.receiptRef ?? ""} placeholder="agent-slayer://files/…" readOnly={!editable}
-              onChange={(event) => setLine(line.key, { receiptRef: event.target.value })} /></label>
+          </div>}
+          {(receiptsEditable || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
+            <label>Receipt<select value={line.receiptRef ?? ""} disabled={!receiptsEditable}
+              onChange={(event) => setLine(line.key, { receiptRef: event.target.value || null })}>
+              <option value="">No receipt</option>
+              {line.receiptRef && !receipts.some((file) => file.sourceRef === line.receiptRef) &&
+                <option value={line.receiptRef}>{line.receiptRef.startsWith("agent-slayer:")
+                  ? "Agent receipt · Upload in Accounting to include it" : `Receipt #${line.receiptRef.split("/").at(-1)}`}</option>}
+              {receipts.map((file) => <option key={file.sourceRef} value={file.sourceRef}>{file.displayName}</option>)}
+            </select></label>
+            {receiptsEditable && <label>Upload receipt<input type="file" accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = "";
+                if (file) onUploadReceipt(line.key, file);
+              }} /></label>}
           </div>}
         </article>)}</div>
       </fieldset>
@@ -142,7 +164,8 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
         {actions}
         <button className="secondary" type="button" disabled={busy} onClick={onClose}>{mode === "read" ? "Close" : "Cancel"}</button>
         {mode !== "read" && <button className="primary" type="submit" disabled={editingLocked || !dirty || (editable && !started)}>
-          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : mode === "accounts" ? "Save accounts" : "Save changes"}
+          {creating ? "Create draft" : mode === "payer" ? "Save recipient" : mode === "accounts" ? "Save accounts"
+            : mode === "receipts" ? "Save receipts" : "Save changes"}
         </button>}
       </footer>
     </form>

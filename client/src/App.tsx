@@ -109,6 +109,7 @@ type UserDeletionPreview = {
     email: string;
     accountCount: number;
     invoiceCount: number;
+    evidenceFileCount: number;
     transactionCount: number;
     lineItemCount: number;
     assertionCount: number;
@@ -3545,6 +3546,7 @@ function AccountDataDialog({ user, token, onClearLedger, onDeleted, onClose }: {
           <div><span>Transactions</span><strong>{preview.summary.transactionCount}</strong></div>
           <div><span>Accounts</span><strong>{preview.summary.accountCount}</strong></div>
           <div><span>Invoices</span><strong>{preview.summary.invoiceCount}</strong></div>
+          <div><span>Evidence files</span><strong>{preview.summary.evidenceFileCount}</strong></div>
           <div><span>Import jobs</span><strong>{preview.summary.importJobCount}</strong></div>
           <div><span>API tokens</span><strong>{preview.summary.apiTokenCount}</strong></div>
         </div>

@@ -91,3 +91,19 @@ export async function fetchInvoicePdf(invoiceId: string, token: string, download
   }
   return response.blob();
 }
+
+export async function uploadInvoiceReceipt<T>(file: File, token: string): Promise<T> {
+  const extension = file.name.split(".").at(-1)?.toLowerCase();
+  const inferred = extension === "pdf" ? "application/pdf" : extension === "png" ? "image/png"
+    : ["jpg", "jpeg"].includes(extension ?? "") ? "image/jpeg" : "";
+  const mediaType = ["application/pdf", "image/png", "image/jpeg"].includes(file.type) ? file.type : inferred;
+  if (!mediaType) throw new Error("Choose a PDF, JPEG, or PNG receipt.");
+  if (file.size > 20 * 1024 * 1024) throw new Error("Each receipt must be 20 MiB or smaller.");
+  const response = await fetch(`${apiBase}/invoice-receipts`, {
+    method: "POST", headers: { Authorization: `Bearer ${token}`,
+      "Content-Type": mediaType, "X-File-Name": encodeURIComponent(file.name) }, body: file,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new ApiError(response.status, payload);
+  return payload as T;
+}

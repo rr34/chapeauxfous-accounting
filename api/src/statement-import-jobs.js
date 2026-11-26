@@ -152,6 +152,31 @@ function evidenceValue(row) {
   };
 }
 
+export async function storeAccountingEvidence({ db, evidenceRoot, personId, fileName, mediaType, bytes }) {
+  const name = safeFileName(fileName);
+  const content = evidenceBytes(bytes, mediaType);
+  const digest = createHash("sha256").update(content).digest("hex");
+  const storageKey = await persistEvidenceBytes({ evidenceRoot, personId, digest, bytes: content,
+    extension: evidenceExtension(mediaType) });
+  const [result] = await db.query(`INSERT INTO accounting_evidence_files
+    (owner_person_id, original_file_name, media_type, byte_size, sha256, storage_key)
+    VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE evidence_file_id = LAST_INSERT_ID(evidence_file_id)`,
+  [personId, name, mediaType, content.length, digest, storageKey]);
+  return getEvidenceFile({ pool: db, personId, evidenceFileId: Number(result.insertId) });
+}
+
+export async function readAccountingEvidenceBytes(evidenceRoot, row) {
+  const filePath = evidencePath(evidenceRoot, String(row.storage_key));
+  const fileStat = await stat(filePath);
+  if (fileStat.size !== Number(row.byte_size)) throw statementError("Stored evidence size failed verification.",
+    "EVIDENCE_STORAGE_CONFLICT", undefined, 500);
+  const bytes = await readFile(filePath);
+  if (bytes.length !== fileStat.size || createHash("sha256").update(bytes).digest("hex") !== row.sha256) {
+    throw statementError("Stored evidence checksum failed verification.", "EVIDENCE_STORAGE_CONFLICT", undefined, 500);
+  }
+  return bytes;
+}
+
 function accountDisplayName(row) {
   return String(row.AccountName);
 }
@@ -398,7 +423,7 @@ export async function listStatementImportJobObjectsPage(pool, personId, {
 }
 
 export async function listEvidenceFileObjectsPage(pool, personId, {
-  limit = 100, cursor = null, evidenceFileId = null,
+  limit = 100, cursor = null, evidenceFileId = null, mediaTypes = null, maximumBytes = null,
 } = {}) {
   const resolvedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const clauses = ["ef.owner_person_id = ?"];
@@ -412,6 +437,11 @@ export async function listEvidenceFileObjectsPage(pool, personId, {
     clauses.push("ef.evidence_file_id < ?");
     params.push(positiveId(cursor, "Evidence cursor"));
   }
+  if (mediaTypes?.length) {
+    clauses.push(`ef.media_type IN (${mediaTypes.map(() => "?").join(",")})`);
+    params.push(...mediaTypes);
+  }
+  if (maximumBytes != null) { clauses.push("ef.byte_size <= ?"); params.push(maximumBytes); }
   const [rows] = await pool.query(
     `SELECT ef.evidence_file_id, ef.original_file_name, ef.media_type, ef.byte_size, ef.sha256,
             ef.start_date, ef.start_amount_units, ef.end_date, ef.end_amount_units,
@@ -590,11 +620,15 @@ export async function deleteStatementImportJob({ pool, personId, statementImport
       `SELECT
          (SELECT COUNT(*) FROM accounting_statement_import_jobs WHERE evidence_file_id = ?) AS job_count,
          (SELECT COUNT(*) FROM line_item_evidence_links WHERE evidence_file_id = ?) AS line_count,
-         (SELECT COUNT(*) FROM balance_assertion_evidence_links WHERE evidence_file_id = ?) AS assertion_count`,
-      [row.evidence_file_id, row.evidence_file_id, row.evidence_file_id],
+         (SELECT COUNT(*) FROM balance_assertion_evidence_links WHERE evidence_file_id = ?) AS assertion_count,
+         (SELECT COUNT(*) FROM accounting_invoice_lines l JOIN accounting_invoices i ON i.invoice_id = l.invoice_id
+          WHERE i.owner_person_id = ? AND l.receipt_ref = ?) AS invoice_count`,
+      [row.evidence_file_id, row.evidence_file_id, row.evidence_file_id, ownerId(personId),
+        `accounting://evidence-files/${row.evidence_file_id}`],
     );
     const evidenceStillReferenced = Number(references[0]?.job_count ?? 0)
-      + Number(references[0]?.line_count ?? 0) + Number(references[0]?.assertion_count ?? 0) > 0;
+      + Number(references[0]?.line_count ?? 0) + Number(references[0]?.assertion_count ?? 0)
+      + Number(references[0]?.invoice_count ?? 0) > 0;
     if (!evidenceStillReferenced) {
       await connection.query(
         `DELETE FROM accounting_evidence_files

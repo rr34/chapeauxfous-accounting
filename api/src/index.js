@@ -6,8 +6,10 @@ import { requireAuth } from "./auth.js";
 import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
-import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
+import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { renderInvoicePdf } from "./invoice-pdf.js";
+import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
+  loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
 import { getUser, loginUser, registerUser } from "./users.js";
 import { deleteBalanceAssertion, listBalanceAssertions, saveBalanceAssertion } from "./balance-assertions.js";
 import {
@@ -133,6 +135,18 @@ app.get("/api/invoices", ...invoiceRoute((owner, req) => invoices.list(owner, {
   invoice_number: z.coerce.number().int().positive().optional().parse(req.query.invoice_number),
   text: z.string().trim().min(1).max(255).optional().parse(req.query.text),
 })));
+app.get("/api/invoice-receipts", ...invoiceRoute((owner, req) => listInvoiceReceipts(pool, owner,
+  z.coerce.number().int().positive().optional().parse(req.query.cursor))));
+app.post("/api/invoice-receipts", requireAuth,
+  express.raw({ type: invoiceReceiptMediaTypes, limit: invoiceReceiptMaximumBytes }),
+  ...invoiceRoute(async (owner, req) => {
+    let fileName;
+    try { fileName = decodeURIComponent(req.get("X-File-Name") ?? ""); }
+    catch { throw Object.assign(new Error("The receipt filename is invalid."), { status: 400, code: "INVALID_RECEIPT_FILENAME" }); }
+    const receipt = await uploadInvoiceReceipt({ pool, evidenceRoot, personId: owner, fileName,
+      mediaType: req.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase(), bytes: req.body });
+    return { receipt };
+  }, (res, result) => res.status(201).json(result)));
 app.post("/api/invoices", ...invoiceRoute(async (owner, req) => ({
   invoice: await invoices.saveDraft(owner, invoiceDraft.parse(req.body)),
 })));
@@ -148,7 +162,15 @@ app.get("/api/invoices/:id", ...invoiceRoute(async (owner, req) => {
 app.get("/api/invoices/:id/preview-pdf", ...invoiceRoute(async (owner, req) => {
   const id = invoiceId.parse(req.params.id);
   const [invoice, issuer] = await Promise.all([invoices.readSavedInvoice(owner, id), getUser(pool, owner)]);
-  const bytes = await renderInvoicePdf(invoice, issuer?.name ?? "Accounting");
+  const receipts = await loadInvoiceReceipts({ pool, evidenceRoot, personId: owner, lines: invoice.lines });
+  const lines = invoice.lines.map((line) => {
+    const receipt = receipts.get(line.receiptRef);
+    const receiptName = receipt ? `Receipt attached: ${receipt.displayName}`
+      : line.receiptRef ? "Agent receipt reference. Upload it to Accounting to include its pages." : null;
+    return { ...line, receiptName };
+  });
+  const preview = await renderInvoicePdf({ ...invoice, lines }, issuer?.name ?? "Accounting");
+  const bytes = await appendInvoiceReceipts(preview, receipts);
   return { bytes, invoiceNumber: invoice.invoiceNumber, download: req.query.download === "true" };
 }, (res, { bytes, invoiceNumber, download }) => {
   res.type("application/pdf").set({
@@ -168,6 +190,9 @@ app.patch("/api/invoices/:id/payer", ...invoiceRoute(async (owner, req) => {
 }));
 app.patch("/api/invoices/:id/accounts", ...invoiceRoute(async (owner, req) => ({
   invoice: await invoices.assignAccounts(owner, invoiceId.parse(req.params.id), invoiceAccountAssignments.parse(req.body)),
+})));
+app.patch("/api/invoices/:id/receipts", ...invoiceRoute(async (owner, req) => ({
+  invoice: await invoices.assignReceipts(owner, invoiceId.parse(req.params.id), req.body),
 })));
 app.post("/api/invoices/:id/prepare-send", ...invoiceRoute((owner, req) =>
   invoices.prepareSend(owner, invoiceId.parse(req.params.id))));
@@ -584,7 +609,7 @@ app.get("/api/data/summary", requireAuth, async (req, res, next) => {
 
 app.post("/api/data/user/delete-commit", requireAuth, async (req, res, next) => {
   try {
-    res.json(await commitUserDeletion({ pool, personId: req.auth.personId,
+    res.json(await commitUserDeletion({ pool, evidenceRoot, personId: req.auth.personId,
       deletionPlanId: req.body?.deletionPlanId, previewDigest: req.body?.previewDigest,
       currentPassword: req.body?.currentPassword, confirmationText: req.body?.confirmationText }));
   } catch (error) { next(error); }
