@@ -68,7 +68,7 @@ async function openInvoicePdf(invoice: Invoice, token: string, download: boolean
     if (tab.document.body) tab.document.body.textContent = "Opening invoice PDF…";
   }
   try {
-    const pdf = await fetchInvoicePdf(invoice.id, token, download);
+    const { pdf, filename } = await fetchInvoicePdf(invoice.id, token, download);
     if (tab?.closed) return;
     const url = URL.createObjectURL(pdf);
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
@@ -77,7 +77,7 @@ async function openInvoicePdf(invoice: Invoice, token: string, download: boolean
     } else {
       const link = document.createElement("a");
       link.href = url;
-      link.download = `invoice-${invoice.invoiceNumber}.pdf`;
+      link.download = filename ?? `invoice-${invoice.invoiceNumber}.pdf`;
       document.body.append(link);
       link.click();
       link.remove();

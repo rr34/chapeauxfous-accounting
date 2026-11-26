@@ -1,5 +1,22 @@
 import { chromium } from "playwright-core";
 
+function filenamePart(value) {
+  return String(value ?? "").normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}<>:"/\\|?*]+/gu, " ")
+    .replace(/\s+/gu, " ").replace(/^[ .]+|[ .]+$/gu, "");
+}
+
+export function invoicePdfFilename({ invoiceNumber, pdfDate, payerName, description }) {
+  const details = [filenamePart(payerName), filenamePart(description)].filter(Boolean);
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(pdfDate ?? "") || !details.length) return `invoice-${invoiceNumber}.pdf`;
+  let basename = `invoice ${pdfDate} `;
+  for (const character of details.join(" ")) {
+    if (Buffer.byteLength(basename + character, "utf8") > 200) break;
+    basename += character;
+  }
+  return `${basename.replace(/[ .]+$/u, "")}.pdf`;
+}
+
 function escapedHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")

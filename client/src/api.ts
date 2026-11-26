@@ -89,7 +89,14 @@ export async function fetchInvoicePdf(invoiceId: string, token: string, download
   if (response.headers.get("Content-Type")?.split(";")[0] !== "application/pdf") {
     throw new Error("Accounting did not return a PDF.");
   }
-  return response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const extended = /(?:^|;)\s*filename\*=UTF-8''([^;]+)/iu.exec(disposition)?.[1];
+  let filename = /(?:^|;)\s*filename="([^"]+)"/iu.exec(disposition)?.[1];
+  if (extended) {
+    try { filename = decodeURIComponent(extended); }
+    catch { /* Keep the plain header filename if the extended value is malformed. */ }
+  }
+  return { pdf: await response.blob(), filename };
 }
 
 export async function uploadInvoiceReceipt<T>(file: File, token: string): Promise<T> {

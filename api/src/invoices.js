@@ -84,7 +84,7 @@ async function getRow(db, owner, id, forUpdate = false) {
   return row;
 }
 
-async function invoiceObject(db, row, { refreshFailed = false, includeLines = true } = {}) {
+async function invoiceObject(db, row, { refreshFailed = false, includeLines = true, includePdfDate = false } = {}) {
   const [lines] = includeLines ? await db.execute(
     "SELECT * FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [row.invoice_id],
   ) : [[]];
@@ -108,6 +108,7 @@ async function invoiceObject(db, row, { refreshFailed = false, includeLines = tr
     amountRemainingMinor: Number(row.amount_remaining_minor ?? row.amount_minor),
     stripeInvoiceId: row.stripe_invoice_id, hostedInvoiceUrl: row.stripe_hosted_url,
     stripePdfUrl: row.stripe_pdf_url, sentAt: row.sent_at, adoptedAt: row.adopted_at, refreshFailed,
+    ...(includePdfDate ? { pdfDate: (posting?.TransactionDate ?? row.sent_at ?? row.created_at)?.slice(0, 10) ?? null } : {}),
     ...(includeLines ? {
       postingTransactionId: posting ? Number(posting.transaction_id) : null,
       payments,
@@ -760,7 +761,7 @@ export function createInvoiceService(pool, {
   }
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
-    invoiceObject(db, await getRow(db, owner, id)));
+    invoiceObject(db, await getRow(db, owner, id), { includePdfDate: true }));
   return { saveDraft, issue, paymentCredits, applyPayment, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice,
     list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

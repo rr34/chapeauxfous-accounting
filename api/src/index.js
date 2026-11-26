@@ -7,7 +7,7 @@ import { createApiToken, listApiTokens, revokeApiToken } from "./api-tokens.js";
 import { mountAccountingMcp } from "./mcp.js";
 import { z } from "zod";
 import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
-import { renderInvoicePdf } from "./invoice-pdf.js";
+import { invoicePdfFilename, renderInvoicePdf } from "./invoice-pdf.js";
 import { invoicePaymentInput } from "./invoice-payments.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
@@ -172,10 +172,13 @@ app.get("/api/invoices/:id/preview-pdf", ...invoiceRoute(async (owner, req) => {
   });
   const preview = await renderInvoicePdf({ ...invoice, lines }, issuer?.name ?? "Accounting");
   const bytes = await appendInvoiceReceipts(preview, receipts);
-  return { bytes, invoiceNumber: invoice.invoiceNumber, download: req.query.download === "true" };
-}, (res, { bytes, invoiceNumber, download }) => {
+  return { bytes, invoiceNumber: invoice.invoiceNumber, filename: invoicePdfFilename(invoice), download: req.query.download === "true" };
+}, (res, { bytes, invoiceNumber, filename, download }) => {
+  const encoded = encodeURIComponent(filename).replace(/['()*]/gu,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
   res.type("application/pdf").set({
-    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="invoice-${invoiceNumber}.pdf"`,
+    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="invoice-${invoiceNumber}.pdf"; filename*=UTF-8''${encoded}`,
+    "Access-Control-Expose-Headers": "Content-Disposition",
     "X-Content-Type-Options": "nosniff",
   }).send(bytes);
 }));
