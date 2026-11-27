@@ -89,37 +89,37 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
     eyebrow={creating ? "Payments" : `Invoice #${invoiceNumber}`} busy={busy} onClose={onClose}>
     <form className="invoice-editor-form" onSubmit={onSave}>
       <fieldset disabled={editingLocked}>
-        <div className="invoice-create-grid">
-          <label>Payer name {editable && <small>Optional until sending</small>}<input value={draft.payer} maxLength={500} readOnly={!payerEditable}
+        <div className="invoice-header-row invoice-header-payer">
+          <label>Payer name<input value={draft.payer} maxLength={500} readOnly={!payerEditable}
             onChange={(event) => onChange({ ...draft, payer: event.target.value })} /></label>
-          <label>Payer email {editable && <small>Optional until sending</small>}<input type="email" value={draft.email} maxLength={320} readOnly={!payerEditable}
+          <label>Payer email<input type="email" value={draft.email} maxLength={320} readOnly={!payerEditable}
             onChange={(event) => onChange({ ...draft, email: event.target.value })} /></label>
-          <label>Payment due date {editable && <small>Optional · when the customer should pay</small>}<input type="date" value={draft.due} readOnly={!editable}
+        </div>
+        <div className="invoice-header-row invoice-header-payment">
+          <label>Due date<input type="date" value={draft.due} readOnly={!editable}
             onChange={(event) => onChange({ ...draft, due: event.target.value })} /></label>
+          <div className="invoice-header-field"><span>Status</span><strong>{paymentStatus || "Draft"}</strong></div>
+          <label>Payment methods<select value={draft.methods} disabled={!editable}
+            onChange={(event) => onChange({ ...draft, methods: event.target.value as PaymentMethods })}>
+            <option value="ach_only">Bank account only</option>
+            <option value="card_and_ach">Credit card and bank account</option>
+            <option value="card_only">Credit card only</option>
+          </select></label>
+          <div className="invoice-header-field"><span>Total</span><strong>{editable ? total : savedTotal ?? total}</strong></div>
+        </div>
+        <div className="invoice-header-row invoice-header-account">
+          <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
+            onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
+            <option value="" disabled={!creating}>Default Accounts Receivable</option>
+            {selectable.filter((account) => account.type === "asset" && !account.suspense)
+              .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+          </select></label>
           <label>Currency<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required readOnly={!creating}
             onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase(),
               receivableAccountId: undefined, lines: draft.lines.map((line) => ({ ...line, accountId: undefined })) })} /></label>
         </div>
-        <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
-          onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
-          <option value="" disabled={!creating}>Default Accounts Receivable</option>
-          {selectable.filter((account) => account.type === "asset" && !account.suspense)
-            .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
-        </select></label>
-        {!creating && <div className="invoice-editor-summary">
-          <div><small>Email</small><strong>{draft.email || "Not set"}</strong></div>
-          <div><small>Due</small><strong>{draft.due || "Not set"}</strong></div>
-          <div><small>Payment status</small><strong>{paymentStatus}</strong></div>
-          <div><small>Total</small><strong>{editable ? total : savedTotal}</strong></div>
-        </div>}
         <label>Invoice description {editable && <small>Optional</small>}<textarea value={draft.description} maxLength={1000} readOnly={!editable}
           onChange={(event) => onChange({ ...draft, description: event.target.value })} placeholder="What this invoice covers" /></label>
-        <label>Payment methods<select value={draft.methods} disabled={!editable}
-          onChange={(event) => onChange({ ...draft, methods: event.target.value as PaymentMethods })}>
-          <option value="ach_only">Bank account only (no credit cards)</option>
-          <option value="card_and_ach">Credit card and bank account</option>
-          <option value="card_only">Credit card only</option>
-        </select></label>
         <div className="invoice-line-heading"><h3>Invoice lines</h3>
           <div className="invoice-actions">
             {receiptsEditable && hasMoreReceipts && <button className="secondary" type="button" onClick={onMoreReceipts}>Load more receipts</button>}

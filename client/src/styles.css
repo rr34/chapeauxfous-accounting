@@ -161,8 +161,14 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .invoice-editor-form label { margin: 0; }
 .invoice-dialog textarea { width: 100%; min-height: 74px; resize: vertical; font: inherit; border: 1px solid #ccd4cb; border-radius: 7px; padding: .65rem; }
 .invoice-create-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
-.invoice-editor-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
-.invoice-editor-summary > div { display: grid; overflow-wrap: anywhere; border: 1px solid #dce2da; border-radius: 8px; padding: .55rem; }
+.invoice-header-row { display: grid; gap: .6rem; align-items: start; }
+.invoice-header-payer { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.invoice-header-payment { grid-template-columns: minmax(8.5rem, 1fr) minmax(0, .8fr) minmax(0, 1.65fr) minmax(0, .85fr); }
+.invoice-header-account { grid-template-columns: minmax(0, 1fr) 6rem; }
+.invoice-header-row label, .invoice-header-row input, .invoice-header-row select { min-width: 0; }
+.invoice-header-row input, .invoice-header-row select { min-height: 2.25rem; padding: .38rem .5rem; }
+.invoice-header-field { display: grid; gap: .35rem; min-width: 0; color: #415047; font-size: .82rem; font-weight: 700; }
+.invoice-header-field strong { display: flex; align-items: center; min-height: 2.25rem; padding: .38rem .5rem; overflow-wrap: anywhere; border: 1px solid #dce2da; border-radius: 7px; background: #f5f8f3; color: #17231c; }
 .invoice-line-list { gap: 0; border: 2px solid #48584d; border-radius: 6px; }
 .invoice-line-card { display: grid; grid-template-columns: 2.2rem minmax(0, 1fr); gap: .3rem .35rem; background: #f5f8f3; padding: .35rem; }
 .invoice-line-card + .invoice-line-card { border-top: 2px solid #48584d; }
@@ -185,7 +191,7 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 @media (max-width: 620px) {
   .invoice-create-grid { grid-template-columns: 1fr; }
   .invoice-line-card { grid-template-columns: 1.65rem minmax(0, 1fr); }
-  .invoice-editor-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .invoice-header-payment { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .invoice-list { margin: 0; padding: 0; list-style: none; }
 .invoice-list li { display: flex; gap: .7rem; align-items: center; border-bottom: 1px solid #dce2da; padding: .45rem 0; }
