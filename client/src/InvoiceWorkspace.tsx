@@ -281,7 +281,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
       existingLineCount={draft.invoice ? draft.invoice.lines?.length ?? 0 : null}
       invoiceNumber={draft.invoice?.invoiceNumber}
       accounts={accounts} mode={editingAccounts ? "accounts" : editorMode(draft.invoice)}
-      receivableAccountLocked={draft.invoice?.postingTransactionId != null}
+      posted={draft.invoice?.postingTransactionId != null}
       receipts={receipts.objects} hasMoreReceipts={receipts.nextCursor != null}
       onMoreReceipts={() => void run(async () => {
         const next = await api<ReceiptPage>(`/invoice-receipts?cursor=${encodeURIComponent(receipts.nextCursor ?? "")}`, {}, token);
@@ -319,7 +319,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
           <button className="secondary" type="button" disabled={busy || dirty} onClick={() => {
             setIssueDate(localDate());
             setError("");
-          }}>Issue invoice</button>}
+          }}>Post invoice</button>}
         {selected.status === "open" && selected.amountRemainingMinor > 0 && postingTransactionId != null
           && !selected.stripeInvoiceId && !applyingPayment &&
           <button className="primary" type="button" disabled={disabled || dirty}
@@ -389,8 +389,8 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
             <button className="secondary" type="button" disabled={busy} onClick={() => setConfirm(null)}>Not yet</button>
           </div>
         </div>
-        : issueDate !== null && selected && <div className="invoice-confirmation" role="group" aria-label="Issue invoice">
-        <p>Post {money(selected.amountMinor, selected.currency)} to Accounts Receivable and issue invoice #{selected.invoiceNumber} without sending it through Stripe.</p>
+        : issueDate !== null && selected && <div className="invoice-confirmation" role="group" aria-label="Post invoice">
+        <p>Post {money(selected.amountMinor, selected.currency)} to Accounts Receivable for invoice #{selected.invoiceNumber}. This action records the invoice in the ledger without sending it to the customer.</p>
         <label>Posting date<input type="date" value={issueDate} disabled={busy}
           onChange={(event) => setIssueDate(event.target.value)} /></label>
         <div className="invoice-actions">
@@ -398,8 +398,8 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
             const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${selected.id}/issue`,
               json({ revision: selected.revision, issue_date: issueDate }), token);
             setIssueDate(null);
-            await reloadAfterChange(invoice, "Invoice issued and posted to the ledger.");
-          })}>Post and issue</button>
+            await reloadAfterChange(invoice, "Invoice posted to the ledger.");
+          })}>Post invoice</button>
           <button className="secondary" type="button" disabled={busy} onClick={() => setIssueDate(null)}>Cancel</button>
         </div>
       </div>} />}

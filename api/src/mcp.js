@@ -790,7 +790,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }));
   invoiceTool("assign_invoice_accounts", {
     title: "Assign invoice accounts",
-    description: "Read the invoice and target accounts first. Supply the revision and only the account assignments to change. Before posting, the receivable and billing accounts can be assigned. For a posted invoice, reclassify an unreconciled billing line to an active account in the same currency. Its A/R account stays fixed.",
+    description: "Read the invoice and target accounts first. Supply the revision and only the account assignments to change. For a posted invoice, reclassify unreconciled billing lines to active accounts in the same currency. Changing A/R moves the posted charge and each fully allocated, unreconciled A/R payment credit owned exclusively by this invoice. Reconciled or shared postings block the change.",
     inputSchema: { invoice_id: invoiceId, ...invoiceAccountAssignments.shape },
     outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, ...input }) => ({ invoice: await invoices.assignAccounts(personId, invoice_id, input) }));

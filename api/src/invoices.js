@@ -200,6 +200,43 @@ async function reclassifyInvoicePosting(db, owner, posting, assignments) {
     [transactionId, owner]);
 }
 
+async function reclassifyInvoiceReceivable(db, row, posting, accountId, scale) {
+  const [charges] = await db.execute(`SELECT line_item_id, amount_units, reconciliation_state
+    FROM line_items WHERE transaction_id = ? AND account_id = ? FOR UPDATE`,
+  [posting.transaction_id, row.receivable_account_id]);
+  const [charge] = charges;
+  if (charges.length !== 1 || BigInt(charge.amount_units) !== invoiceMinorToLedgerUnits(row.amount_minor, row.currency, scale)) {
+    throw fail("The posted receivable does not match the invoice total.", "INVOICE_POSTING_LINE_MISMATCH");
+  }
+  const [credits] = await db.execute(`SELECT li.line_item_id, li.transaction_id, li.account_id,
+      li.amount_units, li.reconciliation_state, t.TransactionState,
+      EXISTS (SELECT 1 FROM line_items deposit WHERE deposit.transaction_id = li.transaction_id
+        AND deposit.account_id = ? AND deposit.amount_units > 0) AS target_is_receiving_account
+    FROM line_items li JOIN transactions t USING (transaction_id)
+    WHERE t.owner_person_id = ? AND EXISTS (
+      SELECT 1 FROM accounting_invoice_payments p WHERE p.invoice_id = ? AND p.line_item_id = li.line_item_id)
+    ORDER BY li.line_item_id FOR UPDATE`, [accountId, row.owner_person_id, row.invoice_id]);
+  const moves = new Map([[posting.transaction_id, [{ line: charge, accountId }]]]);
+  for (const credit of credits) {
+    const [allocations] = await db.execute(`SELECT invoice_id, amount_minor FROM accounting_invoice_payments
+      WHERE line_item_id = ? FOR UPDATE`, [credit.line_item_id]);
+    const allocated = allocations.reduce((sum, payment) => sum + BigInt(payment.amount_minor), 0n);
+    if (credit.TransactionState !== "posted" || Number(credit.account_id) !== Number(row.receivable_account_id)
+      || allocations.some((payment) => payment.invoice_id !== row.invoice_id)
+      || invoiceMinorToLedgerUnits(allocated, row.currency, scale) !== -BigInt(credit.amount_units)) {
+      throw fail("This invoice uses a shared or partly allocated payment credit. Reassign the payment before changing A/R.",
+        "INVOICE_RECEIVABLE_PAYMENT_CONFLICT");
+    }
+    if (Number(credit.target_is_receiving_account)) {
+      throw fail("Choose an A/R account different from the account that received the payment.", "INVOICE_RECEIVABLE_PAYMENT_CONFLICT");
+    }
+    const assignments = moves.get(credit.transaction_id) ?? [];
+    assignments.push({ line: credit, accountId });
+    moves.set(credit.transaction_id, assignments);
+  }
+  return moves;
+}
+
 async function withInvoiceLock(pool, id, work) {
   const db = await pool.getConnection();
   const key = `accounting-invoice:${id}`;
@@ -395,9 +432,8 @@ export function createInvoiceService(pool, {
       if (sendPending(row) && !posting) {
         throw fail("Account assignments are locked while the invoice is being issued through Stripe.", "INVOICE_POSTING_ACCOUNTS_LOCKED");
       }
-      if (posting && data.receivable_account_id != null && data.receivable_account_id !== Number(row.receivable_account_id)) {
-        throw fail("The receivable account is fixed once the invoice is posted.", "INVOICE_RECEIVABLE_ACCOUNT_LOCKED");
-      }
+      const targetReceivable = data.receivable_account_id ?? Number(row.receivable_account_id);
+      const receivableChanged = targetReceivable !== Number(row.receivable_account_id);
       const lines = await readInvoiceLines(db, row, transaction, true);
       const changes = new Map((data.lines ?? []).map((line) => [line.invoice_line_id, line.account_id]));
       if (changes.size !== (data.lines?.length ?? 0) || [...changes.keys()].some((key) => !lines.some((line) => line.invoice_line_id === key))) {
@@ -405,13 +441,24 @@ export function createInvoiceService(pool, {
       }
       const targetLines = posting ? lines.filter((line) => changes.has(line.invoice_line_id)
         && changes.get(line.invoice_line_id) !== Number(line.account_id)) : lines;
-      if (posting && targetLines.length === 0) return invoiceObject(db, row);
+      if (posting && !receivableChanged && targetLines.length === 0) return invoiceObject(db, row);
+      if (receivableChanged && lines.some((line) => (changes.get(line.invoice_line_id) ?? Number(line.account_id)) === targetReceivable)) {
+        throw fail("The A/R account must differ from every invoice billing account.", "INVOICE_LINE_ACCOUNT_REQUIRED", 400);
+      }
       const accounts = await resolveInvoiceAccounts(db, owner, row.currency,
-        data.receivable_account_id ?? row.receivable_account_id,
+        targetReceivable,
         targetLines.map((line) => changes.get(line.invoice_line_id) ?? line.account_id));
       const assignments = targetLines.flatMap((line, index) => changes.has(line.invoice_line_id)
         ? [{ line, accountId: accounts.lineIds[index] }] : []);
-      if (posting) await reclassifyInvoicePosting(db, owner, posting, assignments);
+      if (posting) {
+        const moves = receivableChanged
+          ? await reclassifyInvoiceReceivable(db, row, posting, accounts.receivableId, accounts.scale)
+          : new Map([[posting.transaction_id, []]]);
+        moves.get(posting.transaction_id).push(...assignments);
+        for (const [transactionId, linesToMove] of moves) {
+          await reclassifyInvoicePosting(db, owner, { transaction_id: transactionId }, linesToMove);
+        }
+      }
       await db.execute("UPDATE accounting_invoices SET receivable_account_id = ?, revision = ? WHERE owner_person_id = ? AND invoice_id = ?",
         [accounts.receivableId, randomUUID(), owner, id]);
       if (!posting && lines.length) await saveInvoiceLedgerDraft(db, { ...row, receivable_account_id: accounts.receivableId },

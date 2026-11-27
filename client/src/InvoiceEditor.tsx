@@ -43,11 +43,11 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
   </dialog>;
 }
 
-export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, receivableAccountLocked, paymentStatus, savedTotal, busy, error,
+export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber, mode, posted, paymentStatus, savedTotal, busy, error,
   accounts, receipts, hasMoreReceipts, onMoreReceipts, onReceiptChange, onUploadReceipt,
   dirty, actions, details, confirmation, onChange, onClose, onSave }: {
   draft: InvoiceDraftFields; existingLineCount: number | null; mode: "draft" | "payer" | "accounts" | "read";
-  receivableAccountLocked: boolean;
+  posted: boolean;
   accounts: Account[];
   receipts: InvoiceReceiptOption[]; hasMoreReceipts: boolean; onMoreReceipts: () => void;
   onReceiptChange: (lineId: string, receiptRef: string | null) => void;
@@ -111,11 +111,11 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
         <div className="invoice-header-row invoice-header-account">
           <label title={draft.receivableAccountId == null
             ? "Default Accounts Receivable" : accountNames.get(draft.receivableAccountId)}>
-            Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
+            Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable}
             onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
             <option value="" disabled={!creating}>Default Accounts Receivable</option>
             {selectable.filter((account) => account.type === "asset" && !account.suspense)
-              .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+              .map((account) => <option key={account.id} value={account.id}>{accountNames.get(account.id) ?? account.name}</option>)}
           </select></label>
           <label>Currency<input value={draft.currency} placeholder="USD" maxLength={3} pattern="[A-Z]{3}" required readOnly={!creating}
             onChange={(event) => onChange({ ...draft, currency: event.target.value.toUpperCase(),
@@ -181,7 +181,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
       </fieldset>
       {creating && <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>}
       {mode === "payer" && <p className="muted">You can correct the recipient on this locally paid invoice.</p>}
-      {mode === "accounts" && receivableAccountLocked && <p className="muted">Saving changes updates the original ledger posting.</p>}
+      {mode === "accounts" && posted && <p className="muted">Saving updates the ledger posting and moves any eligible linked payment credits with the A/R account.</p>}
       {details}
       {confirmation}
       {error && <p className="error" role="alert">{error}</p>}
