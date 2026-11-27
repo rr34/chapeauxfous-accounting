@@ -2329,7 +2329,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     for (const entry of entries) lastEntries.set(entry.date, entry.lineItemId);
     return lastEntries;
   }, [entries]);
-  const registerRows = useMemo<AccountRegisterRow[]>(() => {
+  const { registerRows, postedTransactionCount } = useMemo(() => {
     const groupedEntries = new Map<number, Omit<Extract<AccountRegisterRow, { kind: "entry" }>, "projectedBalanceUnits">>();
     entries.forEach((entry, order) => {
       const previous = groupedEntries.get(entry.transactionId);
@@ -2364,8 +2364,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       projectedBalance += amount * (debitIncreasesAccount(account.type) ? 1n : -1n);
       return { ...row, projectedBalanceUnits: projectedBalance.toString() };
     }) as AccountRegisterRow[];
-    return withBalances.sort((left, right) =>
-      compareRegisterRows(left, right, registerSort, account, fullAccountNames));
+    return {
+      registerRows: withBalances.sort((left, right) =>
+        compareRegisterRows(left, right, registerSort, account, fullAccountNames)),
+      postedTransactionCount: groupedEntries.size,
+    };
   }, [account, accountAssertions, entries, fullAccountNames, importReviews, registerSort]);
 
   const suspenseReviewRows = useMemo<Array<Extract<AccountRegisterRow, { kind: "entry" }>>>(() =>
@@ -3019,6 +3022,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           · {account.currencyCode}</span>
         <button type="button" className="register-account-edit-button" aria-label={`Edit account ${account.name}`}
           title="Edit account" onClick={() => setShowAccountEditor(true)}>✎</button>
+        {!loading && !error && <span className="register-transaction-count" title="Posted transactions in this account">
+          {postedTransactionCount.toLocaleString()} {postedTransactionCount === 1 ? "transaction" : "transactions"}</span>}
         <div className="register-view-controls register-heading-view-controls" role="group" aria-label="Register view">
           <button className={view === "basic" ? "active" : ""} aria-pressed={view === "basic"}
             onClick={() => changeRegisterView("basic")}>Basic Ledger</button>
