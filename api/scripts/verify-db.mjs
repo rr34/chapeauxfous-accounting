@@ -53,7 +53,7 @@ try {
         OR c.currency_type <> 'iso_4217'
         OR (t.transaction_id IS NOT NULL AND (t.owner_person_id <> i.owner_person_id
           OR t.valuation_currency_id <> ar.account_currency_id OR t.TransactionState = 'voided'))
-        OR (l.invoice_line_id IS NOT NULL AND (a.owner_person_id <> i.owner_person_id
+        OR (l.line_item_id IS NOT NULL AND (a.owner_person_id <> i.owner_person_id
           OR a.account_currency_id <> ar.account_currency_id OR a.account_id = ar.account_id
           OR a.is_placeholder = 1 OR a.archived_at IS NOT NULL)) LIMIT 1`);
     if (invalid.length) throw new Error("Invoice account assignments failed owner, currency, or account-role verification.");
