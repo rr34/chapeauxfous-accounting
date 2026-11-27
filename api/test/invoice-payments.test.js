@@ -12,7 +12,7 @@ test("historical invoices show ledger payment links without an app-issued postin
   const id = randomUUID();
   const paymentId = randomUUID();
   const row = { invoice_id: id, invoice_number: 27, owner_person_id: 7, invoice_status: "paid",
-    currency: "USD", amount_minor: "49800", amount_paid_minor: "49800", amount_remaining_minor: "0",
+    currency: "USD", ledger_transaction_id: 90, amount_minor: "49800", amount_paid_minor: "49800", amount_remaining_minor: "0",
     stripe_invoice_id: null };
   const invoices = createInvoiceService({
     async execute(sql, args) {
@@ -20,7 +20,8 @@ test("historical invoices show ledger payment links without an app-issued postin
         assert.deepEqual(args, [7, id]);
         return [[row]];
       }
-      if (sql.includes("FROM accounting_invoice_lines") || sql.includes("FROM transactions")) return [[]];
+      if (sql.includes("FROM transactions")) return [[{ transaction_id: 90, TransactionState: "posted" }]];
+      if (sql.includes("FROM line_items li") && sql.includes("invoice_receipt_ref")) return [[]];
       assert.match(sql, /FROM accounting_invoice_payments/);
       assert.deepEqual(args, [id]);
       return [[{ payment_id: paymentId, transaction_id: "16573", amount_minor: "49800",
@@ -28,7 +29,7 @@ test("historical invoices show ledger payment links without an app-issued postin
     },
   });
   const { objects: [invoice] } = await invoices.list(7, { invoice_id: id });
-  assert.equal(invoice.postingTransactionId, null);
+  assert.equal(invoice.postingTransactionId, 90);
   assert.deepEqual(invoice.payments, [
     { id: paymentId, transactionId: 16573, amountMinor: 49800, date: "2025-09-09" },
   ]);
@@ -44,7 +45,7 @@ test("new and existing receipts settle a posted invoice in partial amounts", asy
   });
   let state = {
     invoice: { invoice_id: id, owner_person_id: owner, invoice_number: 46, revision: randomUUID(), currency: "USD",
-      invoice_status: "open", receivable_account_id: 11, amount_minor: "60000", amount_paid_minor: "0",
+      invoice_status: "open", receivable_account_id: 11, ledger_transaction_id: 40, amount_minor: "60000", amount_paid_minor: "0",
       amount_remaining_minor: "60000", payer_name: "Customer", stripe_invoice_id: null },
     ledger: [ledger(100, 50, 12, "20000"), ledger(101, 50, 11, "-20000"),
       ledger(200, 60, 12, "45000"), ledger(201, 60, 13, "-45000", 1)],
@@ -75,8 +76,8 @@ test("new and existing receipts settle a posted invoice in partial amounts", asy
       if (sql.startsWith("SELECT * FROM accounting_invoices")) {
         return [args[0] === owner && args[1] === id ? [invoice] : []];
       }
-      if (sql.includes("FROM accounting_invoice_lines")) return [[]];
-      if (sql.includes("source_system = ? AND source_id = ?")) return [[{ transaction_id: 40 }]];
+      if (sql.includes("FROM line_items li") && sql.includes("invoice_receipt_ref")) return [[]];
+      if (sql.includes("FROM transactions")) return [[{ transaction_id: 40, TransactionState: "posted" }]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [[{ account_id: 11, account_currency_id: 1, scale: 2 }]];
       if (sql.includes("SELECT account_id FROM accounts")) {
         assert.deepEqual(args, [12, owner, 1, 11]);

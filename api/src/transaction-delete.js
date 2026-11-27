@@ -87,7 +87,8 @@ async function ledgerSnapshot(connection, personId, { lock = false } = {}) {
   const [transactions] = await connection.query(
     `SELECT transaction_id, TransactionDate, description, valuation_currency_id,
             TransactionState, reversal_of_transaction_id, source_system, source_id,
-            source_fingerprint
+            source_fingerprint,
+            EXISTS (SELECT 1 FROM accounting_invoices i WHERE i.ledger_transaction_id = transactions.transaction_id) AS has_invoice
        FROM transactions WHERE owner_person_id = ? ORDER BY transaction_id${suffix}`,
     [personId],
   );
@@ -246,8 +247,8 @@ export async function previewTransactionDeletion({ pool, personId, scope, transa
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "One or more selected transactions do not exist or are not owner-scoped.",
         { missingTransactionIds: ids.filter((id) => !found.has(id)) });
     }
-    if (selected.transactions.some((row) => row.source_system === invoicePostingSource)) {
-      throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes an issued invoice posting.");
+    if (selected.transactions.some((row) => row.source_system === invoicePostingSource || Number(row.has_invoice))) {
+      throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes an invoice ledger transaction.");
     }
     if (selected.lines.some((line) => Boolean(line.has_invoice_payment))) {
       throw planError("TRANSACTION_DELETE_PLAN_STATE_CONFLICT", "The selection includes a receipt applied to an invoice.");
@@ -422,9 +423,9 @@ export async function commitTransactionDeletion({ pool, personId, deletionPlanId
       await invalidate(connection, planId, personId, "DATABASE_STATE_CHANGED");
       return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "A planned transaction changed after preview.") };
     }
-    if (selected.transactions.some((item) => item.source_system === invoicePostingSource)) {
+    if (selected.transactions.some((item) => item.source_system === invoicePostingSource || Number(item.has_invoice))) {
       await invalidate(connection, planId, personId, "INVOICE_POSTING");
-      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The selection includes an issued invoice posting.") };
+      return { failure: planError("TRANSACTION_DELETE_PLAN_INVALIDATED", "The selection includes an invoice ledger transaction.") };
     }
     if (selected.lines.some((line) => Boolean(line.has_invoice_payment))) {
       await invalidate(connection, planId, personId, "INVOICE_PAYMENT");

@@ -7,6 +7,24 @@
 --   <schema and data SQL>
 --   -- end migration 0006
 
+-- migration 0033: ledger-backed-invoice-lines
+-- Stop Accounting writers. The migration runner moves and verifies invoice lines
+-- before dropping the old table. Recovery after a drop requires a verified backup.
+ALTER TABLE accounting_invoices
+  ADD COLUMN IF NOT EXISTS ledger_transaction_id BIGINT NULL
+    COMMENT 'Ledger transaction containing the invoice charge and billing lines, including unposted drafts.',
+  ADD UNIQUE KEY IF NOT EXISTS accounting_invoice_ledger_transaction (ledger_transaction_id),
+  ADD CONSTRAINT accounting_invoice_ledger_fk FOREIGN KEY IF NOT EXISTS accounting_invoice_ledger_fk
+    (ledger_transaction_id) REFERENCES transactions (transaction_id),
+  COMMENT='Customer invoice metadata and collection state with billing lines in the ledger.';
+
+ALTER TABLE line_items
+  ADD COLUMN IF NOT EXISTS invoice_receipt_ref VARCHAR(512) NULL
+    COMMENT 'Optional supporting evidence reference for an invoice billing line.';
+
+DROP TABLE IF EXISTS accounting_invoice_lines;
+-- end migration 0033
+
 -- migration 0032: invoice-payment-allocations
 CREATE TABLE IF NOT EXISTS accounting_invoice_payments (
   payment_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY COMMENT 'Stable request ID for one payment allocation.',

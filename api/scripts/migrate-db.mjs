@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pool, databaseName } from "../src/db.js";
 import { pendingMigrations, readMigrationLedger, splitMariaDbStatements } from "./migrations.mjs";
+import { migrateInvoiceLines } from "./migrate-invoice-lines.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ledgerFilename = path.resolve(here, "../../db/migrations.sql");
@@ -74,7 +75,12 @@ async function main() {
     for (const migration of pending) {
       if (migration.version === 30) await assertInvoiceAccountBackfill(connection);
       console.log(`Applying ${migration.label}...`);
-      for (const statement of splitMariaDbStatements(migration.sql, migration.label)) await connection.query(statement);
+      for (const statement of splitMariaDbStatements(migration.sql, migration.label)) {
+        if (migration.version === 33 && statement === "DROP TABLE IF EXISTS accounting_invoice_lines;") {
+          await migrateInvoiceLines(connection);
+        }
+        await connection.query(statement);
+      }
       const [result] = await connection.query(
         `UPDATE ${metadataTable}
             SET schema_version = ?, last_migration = ?, updated_at = CURRENT_TIMESTAMP(6)

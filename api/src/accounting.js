@@ -427,11 +427,7 @@ export async function updateAccount({ personId, accountId, name, description, pl
         "SELECT invoice_id FROM accounting_invoices WHERE receivable_account_id = ? LIMIT 1",
         [resolvedAccountId],
       );
-      const [invoiceLines] = currencyChanged || becomingPlaceholder ? await connection.query(
-        "SELECT invoice_line_id FROM accounting_invoice_lines WHERE account_id = ? LIMIT 1",
-        [resolvedAccountId],
-      ) : [[]];
-      if (invoices.length || invoiceLines.length) {
+      if (invoices.length) {
         throw applicationError("Reassign this account's invoice links before changing its posting role.", 409, "ACCOUNT_HAS_INVOICES");
       }
     }
@@ -504,8 +500,8 @@ async function requireDeletableAccount(connection, personId, resolvedAccountId, 
     throw applicationError("Delete this account's balance assertions before deleting the account.", 409, "ACCOUNT_HAS_BALANCE_ASSERTIONS");
   }
   const [invoices] = await connection.query(
-    "SELECT 1 FROM accounting_invoices WHERE receivable_account_id = ? UNION ALL SELECT 1 FROM accounting_invoice_lines WHERE account_id = ? LIMIT 1",
-    [resolvedAccountId, resolvedAccountId],
+    "SELECT 1 FROM accounting_invoices WHERE receivable_account_id = ? LIMIT 1",
+    [resolvedAccountId],
   );
   if (invoices.length) throw applicationError("Reassign the linked invoices before deleting this account.", 409, "ACCOUNT_HAS_INVOICES");
   return { accountId: resolvedAccountId, name: account.AccountName };
@@ -762,15 +758,16 @@ export async function updateTransaction({ personId, transactionId, description, 
 
   return runInTransaction(async (connection) => {
     const [transactionRows] = await connection.query(
-      `SELECT transaction_id, TransactionState, TransactionDate, TransactionAtUtc, valuation_currency_id, source_system
+      `SELECT transaction_id, TransactionState, TransactionDate, TransactionAtUtc, valuation_currency_id, source_system,
+              EXISTS (SELECT 1 FROM accounting_invoices i WHERE i.ledger_transaction_id = transactions.transaction_id) AS has_invoice
          FROM transactions
         WHERE transaction_id = ? AND owner_person_id = ?
         FOR UPDATE`,
       [resolvedTransactionId, personId],
     );
     if (!transactionRows.length) throw applicationError("Transaction not found.", 404, "TRANSACTION_NOT_FOUND");
-    if (transactionRows[0].source_system === invoicePostingSource) {
-      throw applicationError("This transaction records an issued invoice.", 409, "INVOICE_POSTING_LOCKED");
+    if (transactionRows[0].source_system === invoicePostingSource || Number(transactionRows[0].has_invoice)) {
+      throw applicationError("Edit this transaction through its invoice.", 409, "INVOICE_POSTING_LOCKED");
     }
     await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
 

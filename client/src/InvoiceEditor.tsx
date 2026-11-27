@@ -127,38 +127,42 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           </div></div>
         {receiptsEditable && !editable && draft.lines.length > 0 && <small>Receipt changes save automatically.</small>}
         <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
-          <div className="invoice-line-heading"><span>Line {index + 1}</span><div className="invoice-actions">
+          <span className="invoice-line-number">{index + 1}.</span>
+          <div className="invoice-line-main">
+            <textarea aria-label={`Description for line ${index + 1}`} rows={1} value={line.description}
+              maxLength={1000} readOnly={!editable}
+              onChange={(event) => setLine(line.key, { description: event.target.value })} />
+            <input className="invoice-line-amount" aria-label={`Amount for line ${index + 1} (${draft.currency || "currency"})`}
+              inputMode="decimal" value={line.amount} placeholder="0.00" readOnly={!editable}
+              onChange={(event) => setLine(line.key, { amount: event.target.value })} />
             {editable && index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
-              onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>Remove</button>}
-          </div></div>
-          <label>Description<textarea value={line.description} maxLength={1000} placeholder={`Manual line ${index + 1}`} readOnly={!editable}
-            onChange={(event) => setLine(line.key, { description: event.target.value })} /></label>
-          <label>Amount ({draft.currency || "currency"}) {editable && <small>Use 0.00 for no charge</small>}<input inputMode="decimal"
-            value={line.amount} placeholder="0.00" readOnly={!editable} onChange={(event) => setLine(line.key, { amount: event.target.value })} /></label>
-          <div className="invoice-line-references invoice-line-account">
-            <label htmlFor={`line-account-${line.key}`}>Line account</label>
+              aria-label={`Remove line ${index + 1}`} title="Remove line"
+              onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>×</button>}
+          </div>
+          <div className="invoice-line-references">
             <AccountCombobox id={`line-account-${line.key}`} label={`Line account for line ${index + 1}`}
+              placeholder="Account"
               value={line.accountId == null ? "" : String(line.accountId)} choices={lineAccountChoices}
               selectedLabel={line.accountId == null ? defaultLineAccountLabel : accountNames.get(line.accountId)}
               disabled={!accountsEditable || editingLocked} clearOnType={false}
               onChange={(accountId) => setLine(line.key, { accountId: accountId ? Number(accountId) : undefined })} />
-          </div>
-          {(receiptsEditable || line.receiptRef) && <div className="invoice-create-grid invoice-line-references">
-            <label>Receipt<select value={line.receiptRef ?? ""} disabled={!receiptsEditable}
+            {(receiptsEditable || line.receiptRef) && <select aria-label={`Receipt for line ${index + 1}`}
+              value={line.receiptRef ?? ""} disabled={!receiptsEditable}
               onChange={(event) => onReceiptChange(line.key, event.target.value || null)}>
               <option value="">No receipt</option>
               {line.receiptRef && !receipts.some((file) => file.sourceRef === line.receiptRef) &&
                 <option value={line.receiptRef}>{line.receiptRef.startsWith("agent-slayer:")
                   ? "Agent receipt · Upload in Accounting to include it" : `Receipt #${line.receiptRef.split("/").at(-1)}`}</option>}
               {receipts.map((file) => <option key={file.sourceRef} value={file.sourceRef}>{file.displayName}</option>)}
-            </select></label>
-            {receiptsEditable && <label>Upload receipt<input type="file" accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
+            </select>}
+            {receiptsEditable && <label className="secondary invoice-line-upload">Upload<input type="file"
+              aria-label={`Upload receipt for line ${index + 1}`} accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
               onChange={(event) => {
                 const file = event.currentTarget.files?.[0];
                 event.currentTarget.value = "";
                 if (file) onUploadReceipt(line.key, file);
               }} /></label>}
-          </div>}
+          </div>
         </article>)}</div>
       </fieldset>
       {creating && <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>}

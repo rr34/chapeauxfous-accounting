@@ -205,7 +205,8 @@ async function replaceQuestionTag(connection, personId, lineItemId, key, value) 
 async function requireOwnedPostedLine(connection, personId, lineItemId) {
   const [rows] = await connection.query(
     `SELECT li.line_item_id, li.transaction_id, li.account_id, li.reconciliation_state, a.account_currency_id,
-            t.TransactionState
+            t.TransactionState,
+            EXISTS (SELECT 1 FROM accounting_invoices i WHERE i.ledger_transaction_id = t.transaction_id) AS has_invoice
        FROM line_items li
        JOIN transactions t ON t.transaction_id = li.transaction_id
        JOIN accounts a ON a.account_id = li.account_id
@@ -216,6 +217,9 @@ async function requireOwnedPostedLine(connection, personId, lineItemId) {
   if (!rows.length) throw questionError("Line item not found.", "LINE_ITEM_NOT_FOUND", undefined, 404);
   if (rows[0].TransactionState !== "posted") {
     throw questionError("Accounting questions can only track posted ledger lines.", "QUESTION_LINE_NOT_POSTED");
+  }
+  if (Number(rows[0].has_invoice)) {
+    throw questionError("Reclassify invoice billing lines through the invoice.", "INVOICE_POSTING_LOCKED", undefined, 409);
   }
   return rows[0];
 }

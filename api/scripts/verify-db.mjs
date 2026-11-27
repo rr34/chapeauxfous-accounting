@@ -45,11 +45,14 @@ try {
     const [invalid] = await pool.query(`SELECT i.invoice_id FROM accounting_invoices i
       JOIN accounts ar ON ar.account_id = i.receivable_account_id
       JOIN currencies c ON c.currency_id = ar.account_currency_id
-      LEFT JOIN accounting_invoice_lines l ON l.invoice_id = i.invoice_id
+      LEFT JOIN transactions t ON t.transaction_id = i.ledger_transaction_id
+      LEFT JOIN line_items l ON l.transaction_id = t.transaction_id AND l.account_id <> i.receivable_account_id
       LEFT JOIN accounts a ON a.account_id = l.account_id
       WHERE ar.owner_person_id <> i.owner_person_id OR ar.AccountType <> 'asset' OR ar.is_suspense = 1
         OR ar.is_placeholder = 1 OR ar.archived_at IS NOT NULL OR c.CurrencyAbbreviation <> i.currency
         OR c.currency_type <> 'iso_4217'
+        OR (t.transaction_id IS NOT NULL AND (t.owner_person_id <> i.owner_person_id
+          OR t.valuation_currency_id <> ar.account_currency_id OR t.TransactionState = 'voided'))
         OR (l.invoice_line_id IS NOT NULL AND (a.owner_person_id <> i.owner_person_id
           OR a.account_currency_id <> ar.account_currency_id OR a.account_id = ar.account_id
           OR a.is_placeholder = 1 OR a.archived_at IS NOT NULL)) LIMIT 1`);

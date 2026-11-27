@@ -773,7 +773,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, (input) => invoices.list(personId, input));
   invoiceTool("create_invoice", {
     title: "Create invoice draft",
-    description: "Save a local draft with one or more lines. Supply an active same-currency receivable asset account and a different active account per line, or omit IDs to use the unique Accounts Receivable asset and designated suspense defaults. Payer, due date and prices may be incomplete. Creating a draft never sends it or posts transactions.",
+    description: "Save a draft ledger transaction with one or more invoice billing lines. Supply an active same-currency receivable asset account and a different active account per line, or omit IDs to use the unique Accounts Receivable asset and designated suspense defaults. Payer, due date and prices may be incomplete. Drafts do not affect posted balances or send invoices.",
     inputSchema: invoiceDraft.shape, outputSchema: invoiceResult, annotations: writesData,
     _meta: invoiceMeta(false, false, invoiceAccountPaths),
   }, async (input) => ({ invoice: await invoices.saveDraft(personId, input) }));
@@ -787,13 +787,13 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }));
   invoiceTool("assign_invoice_accounts", {
     title: "Assign invoice accounts",
-    description: "Read the invoice and target accounts first. Supply the revision and only the account assignments to change. Before posting, the receivable and line accounts can be assigned. On posted invoices, moving an unreconciled invoice line to an active account of the same currency updates that line and its existing ledger posting together. Its A/R account stays fixed.",
+    description: "Read the invoice and target accounts first. Supply the revision and only the account assignments to change. Before posting, the receivable and billing accounts can be assigned. For a posted invoice, reclassify an unreconciled billing line to an active account in the same currency. Its A/R account stays fixed.",
     inputSchema: { invoice_id: invoiceId, ...invoiceAccountAssignments.shape },
     outputSchema: invoiceResult, annotations: writesData, _meta: invoiceMeta(true, false, invoiceAccountPaths),
   }, async ({ invoice_id, ...input }) => ({ invoice: await invoices.assignAccounts(personId, invoice_id, input) }));
   invoiceTool("issue_invoice", {
     title: "Issue invoice",
-    description: "Use when the user asks to issue a saved invoice without sending through Stripe. Read the exact invoice and use its revision and the requested accounting date. Posts one balanced A/R transaction from the saved account assignments, opens the invoice, and returns its postingTransactionId.",
+    description: "Use when the user asks to issue a saved invoice without sending through Stripe. Read the exact invoice and use its revision and the requested accounting date. Posts the invoice's existing balanced A/R draft transaction, opens the invoice, and returns its postingTransactionId.",
     inputSchema: { invoice_id: invoiceId, ...invoiceIssue.shape },
     outputSchema: { ...invoiceResult, effectReceipt: effectReceiptSchema },
     annotations: { ...writesData, idempotentHint: true }, _meta: invoiceMeta(true),

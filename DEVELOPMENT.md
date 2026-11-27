@@ -497,6 +497,11 @@ only exact owner-scoped workflow reads may expose bounded validated results.
 3. Stop API writers.
 4. Apply every pending tracked migration:
 
+   Migration 0033 uses the original GnuCash SQLite file to link historical
+   invoices with already-allocated GnuCash receipts to their existing ledger
+   charges. Put the file at `gnucash-file.sqlite` in the repository root or set
+   `ACCOUNTING_GNUCASH_INVOICE_SOURCE` to its path. The runner opens it read-only.
+
    ```bash
    ACCOUNTING_MIGRATION_BACKUP_CONFIRMED=1 npm run schema:migrate
    ```

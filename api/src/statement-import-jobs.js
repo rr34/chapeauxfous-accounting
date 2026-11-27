@@ -621,8 +621,8 @@ export async function deleteStatementImportJob({ pool, personId, statementImport
          (SELECT COUNT(*) FROM accounting_statement_import_jobs WHERE evidence_file_id = ?) AS job_count,
          (SELECT COUNT(*) FROM line_item_evidence_links WHERE evidence_file_id = ?) AS line_count,
          (SELECT COUNT(*) FROM balance_assertion_evidence_links WHERE evidence_file_id = ?) AS assertion_count,
-         (SELECT COUNT(*) FROM accounting_invoice_lines l JOIN accounting_invoices i ON i.invoice_id = l.invoice_id
-          WHERE i.owner_person_id = ? AND l.receipt_ref = ?) AS invoice_count`,
+         (SELECT COUNT(*) FROM line_items l JOIN accounting_invoices i ON i.ledger_transaction_id = l.transaction_id
+          WHERE i.owner_person_id = ? AND l.invoice_receipt_ref = ?) AS invoice_count`,
       [row.evidence_file_id, row.evidence_file_id, row.evidence_file_id, ownerId(personId),
         `accounting://evidence-files/${row.evidence_file_id}`],
     );

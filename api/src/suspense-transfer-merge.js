@@ -53,6 +53,7 @@ export async function mergeSuspenseTransferPair({
               li.reconciliation_state, a.account_currency_id, a.is_suspense,
               t.TransactionDate, t.description, t.valuation_currency_id, t.TransactionState,
               t.reversal_of_transaction_id, t.source_system, t.source_id, t.source_fingerprint,
+              EXISTS (SELECT 1 FROM accounting_invoices i WHERE i.ledger_transaction_id = t.transaction_id) AS has_invoice,
               EXISTS (
                 SELECT 1 FROM lineitems_tags_join tagged
                 JOIN tags tag ON tag.tag_id = tagged.tag_id
@@ -95,6 +96,8 @@ export async function mergeSuspenseTransferPair({
     const transactionIds = selected.map((line) => Number(line.transaction_id));
     if (!transactionIds.includes(retainedId)) throw mergeError(
       "The retained transaction must be one of the selected pair.", "INVALID_SUSPENSE_TRANSFER_RETAINED_TRANSACTION");
+    if (selected.some((line) => Number(line.has_invoice))) throw mergeError(
+      "An invoice posting cannot be merged as a transfer.", "INVOICE_POSTING_LOCKED", undefined, 409);
     if (selected.some((line) => Number(line.valuation_currency_id) !== Number(selected[0].valuation_currency_id)
       || line.reversal_of_transaction_id != null)) throw mergeError(
       "The exact transfer merge supports ordinary same-valuation transactions, not reversals.",

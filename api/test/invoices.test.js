@@ -28,9 +28,10 @@ test("drafts can change recipient and append a line, while local paid invoices o
   const row = {
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Old name", payer_email: "old@example.com",
     currency: "USD", amount_minor: 2500, amount_paid_minor: 0, amount_remaining_minor: 2500,
-    payment_methods: "ach_only", invoice_number: 16, invoice_status: "draft", stripe_invoice_id: null, receivable_account_id: 11,
+    payment_methods: "ach_only", invoice_number: 16, invoice_status: "draft", stripe_invoice_id: null, receivable_account_id: 11, ledger_transaction_id: 42,
   };
-  let lines = [{ invoice_line_id: id, position: 1, description: "Work", amount_minor: 2500, account_id: 12 }];
+  const lines = [{ line_item_id: 1, source_id: null, account_id: 11, amount_units: "2500" },
+    { line_item_id: 2, source_id: id, description: "Work", amount_units: "-2500", account_id: 12, receipt_ref: null }];
   const db = {
     getConnection: async () => db,
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
@@ -39,16 +40,25 @@ test("drafts can change recipient and append a line, while local paid invoices o
         assert.deepEqual(values, [7, id]);
         return [[{ ...row }]];
       }
-      if (sql.includes("SELECT") && sql.includes("FROM accounting_invoice_lines")) return [lines];
       if (sql.includes("FROM accounting_invoice_payments")) return [[]];
-      if (sql.includes("FROM transactions")) return [[]];
+      if (sql.includes("FROM transactions")) return [[{ transaction_id: 42, TransactionState: "draft" }]];
+      if (sql.includes("FROM line_items")) return [lines.filter((line) => line.account_id !== values[1])
+        .map((line) => ({ ...line, scale: 2 }))];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
-      if (sql.startsWith("DELETE FROM accounting_invoice_lines")) { lines = []; return; }
+      if (sql.startsWith("UPDATE line_items")) {
+        const line = sql.includes("source_id IS NULL") ? lines[0] : lines.find((item) => item.line_item_id === values.at(-1));
+        [line.account_id, line.amount_units, , line.description, line.receipt_ref] = values;
+        line.receipt_ref = sql.includes("source_id IS NULL") ? null : line.receipt_ref;
+        return [{ affectedRows: 1 }];
+      }
+      if (sql.startsWith("INSERT INTO line_items")) {
+        const [, account_id, amount_units, , description, source_id, receipt_ref] = values;
+        lines.push({ line_item_id: lines.length + 1, account_id, amount_units, description, source_id, receipt_ref });
+        return [[]];
+      }
+      if (sql.startsWith("UPDATE transactions")) return [[]];
       if (sql.startsWith("UPDATE accounting_invoices SET receivable_account_id")) {
         [row.receivable_account_id, row.revision] = values; return;
-      }
-      if (sql.startsWith("UPDATE accounting_invoice_lines SET account_id")) {
-        lines.find((line) => line.invoice_line_id === values[2]).account_id = values[0]; return;
       }
       if (sql.includes("amount_remaining_minor = NULL")) {
         row.amount_remaining_minor = null;
@@ -60,10 +70,13 @@ test("drafts can change recipient and append a line, while local paid invoices o
       }
       [row.payer_name, row.payer_email] = values;
     },
-    async query(sql, [values]) {
-      assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor, , account_id]) =>
-        ({ invoice_line_id, position, description, amount_minor, account_id }));
+    async query(sql) {
+      if (sql.includes("FROM transactions")) return [[{ valuation_currency_id: 1 }]];
+      if (sql.includes("FROM line_items")) return [lines.map((line) => ({
+        ...line, account_owner_person_id: 7, account_currency_id: 1, is_placeholder: 0,
+      }))];
+      assert.match(sql, /FROM xrates/);
+      return [[]];
     },
   };
   const invoices = createInvoiceService(db, { env });
@@ -110,14 +123,14 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
   const row = {
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Alice", payer_email: null,
     currency: "USD", amount_minor: "2500", amount_paid_minor: "0", payment_methods: "ach_only",
-    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11,
+    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11, ledger_transaction_id: 42,
   };
-  const lines = [
-    { invoice_line_id: revision, description: "Labor", amount_minor: "2100", account_id: 13 },
-    { invoice_line_id: id, description: "Parts", amount_minor: "400", account_id: 12 },
-  ];
-  let posting;
-  let ledgerLines = [];
+  let posting = { transaction_id: 42, TransactionState: "draft" };
+  let ledgerLines = [[11, "25000"], [13, "-21000"], [12, "-4000"]].map(([account_id, amount_units], index) => ({
+    line_item_id: index + 1, account_id, amount_units, value_units: amount_units, account_owner_person_id: 7,
+    account_currency_id: 1, is_placeholder: 0, source_id: [null, revision, id][index],
+    memo: [null, "Labor", "Parts"][index], reconciliation_state: index === 2 ? "reconciled" : "unreconciled",
+  }));
   let before;
   let failPosting = true;
   let transactionOpen = false;
@@ -138,15 +151,15 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
         return [[{ ...row }]];
       }
       if (sql.includes("FROM transactions")) {
-        assert.deepEqual(args, [7, "accounting_invoice", id]);
+        assert.deepEqual(args, [7, 42]);
         return [[posting].filter(Boolean)];
       }
-      if (sql.includes("FROM accounting_invoice_lines")) return [lines];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts.map((account) => ({ ...account, scale: 3 }))];
-      if (sql.includes("FROM line_items")) {
-        assert.match(sql, /FOR UPDATE/);
-        assert.equal(args[0], 42);
-        return [ledgerLines.filter((line) => args.slice(1).includes(line.source_id))];
+      if (sql.includes("FROM line_items li")) {
+        assert.deepEqual(args, [42, 11]);
+        return [ledgerLines.filter((line) => line.account_id !== args[1]).map((line) => ({
+          ...line, description: line.memo, scale: 3, receipt_ref: line.receipt_ref ?? null,
+        }))];
       }
       if (sql.startsWith("UPDATE line_items")) {
         assert.equal(transactionOpen, true);
@@ -155,15 +168,18 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
         return [[]];
       }
       if (sql.startsWith("UPDATE transactions")) {
+        if (sql.includes("TransactionState = 'posted'")) {
+          assert.deepEqual(args, ["2026-11-26", 42, 7]);
+          writes++;
+          posting = { ...posting, TransactionState: "posted", TransactionDate: args[0] };
+          if (failPosting) throw new Error("Ledger write failed");
+          return [[]];
+        }
         assert.deepEqual(args, [42, 7]);
         return [[]];
       }
       if (sql.includes("SET receivable_account_id")) {
         [row.receivable_account_id, row.revision] = args;
-        return [[]];
-      }
-      if (sql.startsWith("UPDATE accounting_invoice_lines")) {
-        lines.find((line) => line.invoice_line_id === args[2]).account_id = args[0];
         return [[]];
       }
       assert.match(sql, /SET invoice_status = 'open'/);
@@ -185,26 +201,11 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
       return [[]];
     },
   };
-  const invoices = createInvoiceService(db, { env, postTransaction: (input, runInTransaction) => runInTransaction(async (connection) => {
-    assert.equal(connection, db);
-    assert.equal(transactionOpen, true);
-    assert.equal(input.sourceId, id);
-    assert.equal(input.sourceSystem, "accounting_invoice");
-    assert.equal(input.transactionDate, "2026-11-26");
-    assert.deepEqual(input.lineItems.map((line) => [line.accountId, line.amountUnits]), [[11, "25000"], [13, "-21000"], [12, "-4000"]]);
-    posting = { transaction_id: 42, TransactionDate: input.transactionDate };
-    ledgerLines = input.lineItems.map((line, index) => ({
-      line_item_id: index + 1, source_id: line.sourceId, account_id: line.accountId, amount_units: line.amountUnits,
-      value_units: line.amountUnits, account_owner_person_id: 7, account_currency_id: 1,
-      is_placeholder: 0, reconciliation_state: index === 2 ? "reconciled" : "unreconciled",
-    }));
-    writes++;
-    if (failPosting) throw new Error("Ledger write failed");
-  }) });
+  const invoices = createInvoiceService(db, { env });
   const input = { revision, issue_date: "2026-11-26" };
   await assert.rejects(invoices.issue(7, id, input), /Ledger write failed/);
   assert.equal(row.invoice_status, "draft");
-  assert.equal(posting, undefined);
+  assert.equal(posting.TransactionState, "draft");
   failPosting = false;
   const issued = await invoices.issue(7, id, input);
   assert.equal(issued.status, "open");
@@ -219,13 +220,17 @@ test("issuing a draft posts its assigned accounts once and rolls back a failed l
   await assert.rejects(invoices.assignAccounts(7, id, { revision: issued.revision, lines: [labor, parts] }),
     { code: "RECONCILED_LINE_IMMUTABLE" });
   assert.deepEqual(ledgerLines.map((line) => line.account_id), [11, 13, 12]);
-  assert.deepEqual(lines.map((line) => line.account_id), [13, 12]);
   const reassigned = await invoices.assignAccounts(7, id, { revision: issued.revision, lines: [labor] });
   assert.deepEqual(reassigned.lines.map((line) => line.accountId), [12, 12]);
   assert.equal(reassigned.postingTransactionId, 42);
   assert.equal(reassigned.amountRemainingMinor, 2500);
   assert.deepEqual(ledgerLines.map((line) => [line.line_item_id, line.account_id, line.amount_units]),
     [[1, 11, "25000"], [2, 12, "-21000"], [3, 12, "-4000"]]);
+  ledgerLines[1].receipt_ref = "agent-slayer://files/8";
+  const { objects: [reread] } = await invoices.list(7, { invoice_id: id });
+  assert.deepEqual(reread.lines.map(({ description, amountMinor, accountId, receiptRef }) =>
+    [description, amountMinor, accountId, receiptRef]),
+  [["Labor", 2100, 12, "agent-slayer://files/8"], ["Parts", 400, 12, null]]);
 });
 
 test("Stripe setup returns to the initiating Accounting owner and browser", async () => {
@@ -267,16 +272,25 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
     invoice_id: id, owner_person_id: 7, revision, payer_name: "Alice", payer_email: "alice@example.com",
     currency: "USD", amount_minor: "2500", amount_paid_minor: "0", due_on: "2099-01-15",
     payment_methods: "card_only", description: null, stripe_invoice_id: null, stripe_status: null,
-    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11,
+    invoice_number: 16, invoice_status: "draft", receivable_account_id: 11, ledger_transaction_id: 42,
     stripe_hosted_url: null, stripe_pdf_url: null, sent_at: null, adopted_at: null, send_started_at: null,
   };
   const calls = [];
-  let posting;
+  const posting = { transaction_id: 42, TransactionState: "draft" };
   let finalized = false;
   let failSend = true;
   const db = {
     getConnection: async () => db,
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
+    async query(sql) {
+      if (sql.includes("FROM transactions")) return [[{ ...posting, valuation_currency_id: 1 }]];
+      if (sql.includes("FROM line_items")) return [[
+        { amount_units: "2500", account_owner_person_id: 7, account_currency_id: 1 },
+        { amount_units: "-2500", account_owner_person_id: 7, account_currency_id: 1 },
+      ]];
+      assert.match(sql, /FROM xrates/);
+      return [[]];
+    },
     async execute(sql, args) {
       if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];
       if (sql.includes("RELEASE_LOCK")) return [[]];
@@ -284,10 +298,16 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.includes("FROM transactions")) return [[posting].filter(Boolean)];
-      if (sql.includes("FROM accounting_invoice_lines")) return [[{
-        invoice_line_id: id, position: 1, description: "Work", amount_minor: "2500", receipt_ref: null, account_id: 12,
+      if (sql.includes("FROM line_items li")) return [[{
+        source_id: id, description: "Work", amount_units: "-2500", scale: 2, receipt_ref: null, account_id: 12,
       }]];
-      if (sql.includes("SET stripe_account_id")) {
+      if (sql.startsWith("UPDATE transactions")) {
+        assert.deepEqual(args, ["2026-11-26", 42, 7]);
+        assert.equal(posting.TransactionState, "draft");
+        posting.TransactionDate = args[0];
+        posting.TransactionState = "posted";
+        calls.push("post");
+      } else if (sql.includes("SET stripe_account_id")) {
         row.send_started_at ??= "2099-01-01 00:00:00";
       }
       else if (sql.includes("SET stripe_invoice_id")) row.stripe_invoice_id = args[0];
@@ -326,22 +346,14 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
         return step("finalize", status)(...args);
       },
       sendInvoice: async (...args) => {
-        assert.equal(posting.transaction_id, 42);
+        assert.equal(posting.TransactionState, "posted");
         await step("send", status)(...args);
         if (failSend) throw new Error("Delivery was interrupted");
         return status;
       },
     },
   };
-  const invoices = createInvoiceService(db, { env, stripeFactory: () => stripe,
-    postTransaction: async (input, inTransaction) => inTransaction(async (connection) => {
-      assert.equal(connection, db);
-      assert.equal(input.transactionDate, "2026-11-26");
-      assert.deepEqual(input.lineItems.map((line) => line.amountUnits), ["2500", "-2500"]);
-      assert.equal(posting, undefined);
-      posting = { transaction_id: 42, TransactionDate: input.transactionDate };
-      calls.push("post");
-    }) });
+  const invoices = createInvoiceService(db, { env, stripeFactory: () => stripe });
   const server = createAccountingMcpServer({ personId: 7, pool: db, services: { invoices } });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
@@ -389,14 +401,25 @@ test("a confirmed invoice sends once, with an owner- and revision-bound handoff"
 
 test("adoption retains the original Stripe invoice and only reads Stripe", async () => {
   let row;
-  let lines;
+  const lines = [];
+  const transaction = { transaction_id: 42, TransactionState: "draft", valuation_currency_id: 1 };
   const db = {
     getConnection: async () => db,
     beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release() {},
-    async query(sql, [values]) {
-      assert.match(sql, /INSERT INTO accounting_invoice_lines/);
-      lines = values.map(([invoice_line_id, , position, description, amount_minor, receipt_ref, account_id]) =>
-        ({ invoice_line_id, position, description, amount_minor, receipt_ref, account_id }));
+    async query(sql, args) {
+      if (sql.includes("FROM currencies")) return [[{ currency_id: 1, CurrencyAbbreviation: "USD", scale: 2 }]];
+      if (sql.startsWith("INSERT INTO transactions")) return [{ insertId: 42 }];
+      if (sql.includes("FROM accounts")) return [[{ account_id: args[0], account_currency_id: 1, is_placeholder: 0 }]];
+      if (sql.startsWith("INSERT INTO line_items")) {
+        const [, amount_units, value_units, description, account_id, source_id] = args;
+        lines.push({ line_item_id: lines.length + 1, amount_units, value_units, description, account_id, source_id,
+          account_owner_person_id: 7, account_currency_id: 1, is_placeholder: 0, scale: 2, receipt_ref: null });
+        return [{ insertId: lines.length }];
+      }
+      if (sql.includes("FROM transactions")) return [[transaction]];
+      if (sql.includes("FROM line_items")) return [lines];
+      assert.match(sql, /FROM xrates/);
+      return [[]];
     },
     async execute(sql, args) {
       if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];
@@ -408,9 +431,9 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
       if (sql.startsWith("SELECT invoice_number")) return [[{ invoice_number: 16 }]];
       if (sql.includes("FROM accounts a JOIN currencies")) return [accounts];
       if (sql.includes("FROM accounting_stripe_accounts")) return [[{ stripe_account_id: accountId }]];
-      if (sql.includes("FROM transactions")) return [[]];
+      if (sql.includes("FROM transactions")) return [[transaction]];
       if (sql.startsWith("SELECT * FROM accounting_invoices")) return [[row]];
-      if (sql.includes("FROM accounting_invoice_lines")) return [lines];
+      if (sql.includes("FROM line_items")) return [lines.filter((line) => line.account_id !== args[1])];
       if (sql.startsWith("SELECT invoice_id")) return [row ? [row] : []];
       if (sql.startsWith("INSERT INTO accounting_invoices")) {
         if (row) throw Object.assign(new Error("duplicate"), { code: "ER_DUP_ENTRY" });
@@ -418,7 +441,9 @@ test("adoption retains the original Stripe invoice and only reads Stripe", async
           "due_on", "payment_methods", "amount_minor", "revision", "stripe_account_id", "stripe_customer_id",
           "stripe_invoice_id", "invoice_number", "invoice_status", "receivable_account_id"];
         row = { ...Object.fromEntries(fields.map((field, index) => [field, args[index]])),
-          adopted_at: "2099-01-01 00:00:00", sent_at: null };
+          adopted_at: "2099-01-01 00:00:00", created_at: "2099-01-01 00:00:00", sent_at: null };
+      } else if (sql.includes("SET ledger_transaction_id")) {
+        row.ledger_transaction_id = args[0];
       } else if (sql.includes("SET stripe_status")) {
         [row.stripe_status, row.amount_paid_minor, row.amount_remaining_minor, row.stripe_hosted_url, row.stripe_pdf_url] = args;
         if (args[6]) row.invoice_status = args[6];

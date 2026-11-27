@@ -28,6 +28,17 @@ export function invoiceMinorToLedgerUnits(amount, currency, ledgerScale) {
   return units;
 }
 
+export function ledgerUnitsToInvoiceMinor(units, currency, ledgerScale) {
+  const diff = minorScale(currency) - ledgerScale;
+  const scaled = BigInt(units) * 10n ** BigInt(Math.max(diff, 0));
+  const divisor = 10n ** BigInt(Math.max(-diff, 0));
+  const amount = Number(scaled / divisor);
+  if (scaled % divisor || !Number.isSafeInteger(amount)) {
+    throw error("The ledger amount cannot be represented in invoice minor units.", "INVOICE_AMOUNT_SCALE_INVALID", 400);
+  }
+  return amount;
+}
+
 function availableMinor(units, currency, ledgerScale) {
   const diff = minorScale(currency) - ledgerScale;
   return units * 10n ** BigInt(Math.max(diff, 0)) / (10n ** BigInt(Math.max(-diff, 0)));
@@ -50,6 +61,7 @@ const eligibleCredit = `
   JOIN accounts a ON a.account_id = li.account_id AND a.owner_person_id = t.owner_person_id
   WHERE t.owner_person_id = ? AND t.TransactionState = 'posted' AND t.valuation_currency_id = ?
     AND (t.source_system IS NULL OR t.source_system <> ?) AND a.account_currency_id = ?
+    AND NOT EXISTS (SELECT 1 FROM accounting_invoices issued WHERE issued.ledger_transaction_id = t.transaction_id)
     AND li.amount_units < 0 AND (li.value_units IS NULL OR li.value_units = li.amount_units)
     AND (a.account_id = ? OR (a.is_suspense = 1 AND li.reconciliation_state = 'unreconciled'))
     AND EXISTS (SELECT 1 FROM line_items deposit

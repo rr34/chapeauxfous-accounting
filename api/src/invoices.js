@@ -1,8 +1,9 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import Stripe from "stripe";
 import { z } from "zod";
-import { createTransaction, invoicePostingSource, validateTransaction } from "./accounting.js";
+import { createTransaction, validateTransaction } from "./accounting.js";
 import { withConnectionTransaction, withPoolTransaction } from "./db.js";
+import { invoiceTransaction, postInvoiceLedger, readInvoiceLines, saveInvoiceLedgerDraft } from "./invoice-ledger.js";
 import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
 import { findInvoicePaymentCredits, invoiceMinorToLedgerUnits, invoicePaymentInput, linkInvoicePayment,
   paymentReceivable, readInvoicePayments, recordInvoicePayment } from "./invoice-payments.js";
@@ -85,12 +86,11 @@ async function getRow(db, owner, id, forUpdate = false) {
 }
 
 async function invoiceObject(db, row, { refreshFailed = false, includeLines = true, includePdfDate = false } = {}) {
-  const [lines] = includeLines ? await db.execute(
-    "SELECT * FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [row.invoice_id],
-  ) : [[]];
   const id = row.invoice_id;
   const status = row.invoice_status;
-  const posting = includeLines && status !== "draft" ? await invoicePosting(db, row) : null;
+  const transaction = includeLines ? await invoiceTransaction(db, row) : null;
+  const posting = transaction?.TransactionState === "posted" ? transaction : null;
+  const lines = transaction ? await readInvoiceLines(db, row, transaction) : [];
   const payments = includeLines && !row.stripe_invoice_id && Number(row.amount_paid_minor) > 0
     ? await readInvoicePayments(db, id) : [];
   const invoiceNumber = Number(row.invoice_number);
@@ -150,17 +150,6 @@ async function nextInvoiceNumber(db, owner) {
   return next;
 }
 
-async function saveLines(db, id, lines) {
-  await db.query(
-    `INSERT INTO accounting_invoice_lines
-     (invoice_line_id, invoice_id, position, description, amount_minor, receipt_ref, account_id) VALUES ?`,
-    [lines.map((line, index) => [
-      line.id ?? randomUUID(), id, index + 1, line.description, line.amount_minor,
-      line.receipt_ref ?? null, line.account_id,
-    ])],
-  );
-}
-
 async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAccountIds) {
   const ids = [...new Set([receivableId, ...lineAccountIds].filter((id) => id != null))];
   const [accounts] = await db.execute(`SELECT a.account_id, a.AccountType AS type, a.AccountName AS name,
@@ -193,53 +182,22 @@ async function resolveInvoiceAccounts(db, owner, currency, receivableId, lineAcc
 }
 
 async function invoicePosting(db, row, lock = false) {
-  const [[posting]] = await db.execute(`SELECT transaction_id, TransactionDate FROM transactions
-    WHERE owner_person_id = ? AND source_system = ? AND source_id = ? AND TransactionState = 'posted'${lock ? " FOR UPDATE" : ""}`,
-  [row.owner_person_id, invoicePostingSource, row.invoice_id]);
-  return posting ?? null;
+  const transaction = await invoiceTransaction(db, row, lock);
+  return transaction?.TransactionState === "posted" ? transaction : null;
 }
 
 async function reclassifyInvoicePosting(db, owner, posting, assignments) {
   const transactionId = posting.transaction_id;
-  const sourceIds = assignments.map(({ line }) => line.invoice_line_id);
-  const [ledgerLines] = await db.execute(`SELECT line_item_id, source_id, account_id, reconciliation_state
-    FROM line_items WHERE transaction_id = ? AND source_id IN (${sourceIds.map(() => "?").join(",")})
-    ORDER BY line_item_id FOR UPDATE`, [transactionId, ...sourceIds]);
-  const bySource = new Map(ledgerLines.map((line) => [line.source_id, line]));
   for (const { line, accountId } of assignments) {
-    const ledgerLine = bySource.get(line.invoice_line_id);
-    if (!ledgerLine || Number(ledgerLine.account_id) !== Number(line.account_id)) {
-      throw fail("An invoice line no longer matches its ledger posting.", "INVOICE_POSTING_LINE_MISMATCH");
-    }
-    if (ledgerLine.reconciliation_state === "reconciled") {
+    if (line.reconciliation_state === "reconciled") {
       throw fail("A reconciled ledger line cannot move to another account.", "RECONCILED_LINE_IMMUTABLE");
     }
     await db.execute("UPDATE line_items SET account_id = ? WHERE line_item_id = ? AND transaction_id = ?",
-      [accountId, ledgerLine.line_item_id, transactionId]);
+      [accountId, line.line_item_id, transactionId]);
   }
   await validateTransaction(db, Number(transactionId), owner, { lock: true });
   await db.execute("UPDATE transactions SET UpdatedAt = CURRENT_TIMESTAMP() WHERE transaction_id = ? AND owner_person_id = ?",
     [transactionId, owner]);
-}
-
-async function invoicePostingInput(db, row) {
-  const [lines] = await db.execute(
-    "SELECT * FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [row.invoice_id],
-  );
-  const total = BigInt(row.amount_minor);
-  if (!lines.length || total <= 0n || lines.reduce((sum, line) => sum + BigInt(line.amount_minor), 0n) !== total) {
-    throw fail("Set a positive invoice total that equals the saved line amounts.", "INVOICE_POSTING_TOTAL_INVALID", 400);
-  }
-  const accounts = await resolveInvoiceAccounts(db, row.owner_person_id, row.currency, row.receivable_account_id,
-    lines.map((line) => line.account_id));
-  const units = (amount) => String(invoiceMinorToLedgerUnits(amount, row.currency, accounts.scale));
-  return {
-    personId: Number(row.owner_person_id), description: `Invoice #${row.invoice_number} · ${row.payer_name}`,
-    valuationCurrencyId: accounts.currencyId, sourceSystem: invoicePostingSource, sourceId: row.invoice_id,
-    lineItems: [{ accountId: accounts.receivableId, amountUnits: units(total), memo: row.description },
-      ...lines.map((line, index) => ({ accountId: accounts.lineIds[index], amountUnits: units(-BigInt(line.amount_minor)),
-        memo: line.description, sourceId: line.invoice_line_id }))],
-  };
 }
 
 async function withInvoiceLock(pool, id, work) {
@@ -294,8 +252,7 @@ export function createInvoiceService(pool, {
         if (remote.currency?.toUpperCase() !== row.currency || Number(remote.total) !== Number(row.amount_minor)) {
           throw fail("Stripe’s finalized currency or total differs from the saved invoice.", "INVOICE_STRIPE_POSTING_MISMATCH");
         }
-        await postTransaction({ ...await invoicePostingInput(db, row),
-          transactionDate: new Date(finalizedAt * 1000).toISOString().slice(0, 10) }, (work) => work(db));
+        await postInvoiceLedger(db, row, new Date(finalizedAt * 1000).toISOString().slice(0, 10));
       }
     }
     await db.execute(`UPDATE accounting_invoices SET stripe_status = ?, amount_paid_minor = ?,
@@ -331,7 +288,7 @@ export function createInvoiceService(pool, {
         throw fail("Only a saved draft can be issued.", "INVOICE_ALREADY_ISSUED");
       }
       if (!row.payer_name) throw fail("Set a payer name before issuing the invoice.", "INVOICE_INCOMPLETE", 400);
-      await postTransaction({ ...await invoicePostingInput(db, row), transactionDate: data.issue_date }, (work) => work(db));
+      await postInvoiceLedger(db, row, data.issue_date);
       await db.execute(`UPDATE accounting_invoices SET invoice_status = 'open', amount_remaining_minor = amount_minor, revision = ?
         WHERE owner_person_id = ? AND invoice_id = ?`, [randomUUID(), owner, id]);
       return invoiceObject(db, await getRow(db, owner, id));
@@ -393,12 +350,13 @@ export function createInvoiceService(pool, {
       if (total > 99999999) throw fail("The invoice total exceeds the supported limit.", "INVOICE_AMOUNT_LIMIT", 400);
       const values = [data.payer_name ?? null, data.payer_email ?? null, data.description ?? null,
         data.currency, data.due_on ?? null, data.payment_methods, total, randomUUID()];
+      let accounts;
+      let existing = [];
       if (revision == null) {
         const invoiceNumber = await nextInvoiceNumber(db, owner);
         await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
-        const accounts = await resolveInvoiceAccounts(db, owner, data.currency, data.receivable_account_id,
+        accounts = await resolveInvoiceAccounts(db, owner, data.currency, data.receivable_account_id,
           data.lines.map((line) => line.account_id));
-        data.lines.forEach((line, index) => { line.account_id = accounts.lineIds[index]; });
         await db.execute(`INSERT INTO accounting_invoices (payer_name, payer_email, description,
           currency, due_on, payment_methods, amount_minor, revision, owner_person_id, invoice_id, invoice_number, receivable_account_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [...values, owner, id, invoiceNumber, accounts.receivableId]);
@@ -409,28 +367,20 @@ export function createInvoiceService(pool, {
           throw fail("The draft changed or sending has started. Read the current invoice.", "INVOICE_REVISION_CONFLICT");
         }
         await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
-        const [existing] = await db.execute(
-          "SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position",
-          [id],
-        );
+        const transaction = await invoiceTransaction(db, row, true);
+        existing = await readInvoiceLines(db, row, transaction, true);
         if (data.lines.length < existing.length) {
           throw fail("Keep the existing lines in their original positions.", "INVOICE_LINE_REMOVAL_UNSUPPORTED", 400);
         }
         const sameCurrency = row.currency === data.currency;
-        const accounts = await resolveInvoiceAccounts(db, owner, data.currency,
+        accounts = await resolveInvoiceAccounts(db, owner, data.currency,
           data.receivable_account_id ?? (sameCurrency ? row.receivable_account_id : null),
           data.lines.map((line, index) => line.account_id ?? (sameCurrency ? existing[index]?.account_id : null)));
         await db.execute(`UPDATE accounting_invoices SET payer_name = ?, payer_email = ?, description = ?,
           currency = ?, due_on = ?, payment_methods = ?, amount_minor = ?, revision = ?, amount_remaining_minor = NULL,
           receivable_account_id = ? WHERE owner_person_id = ? AND invoice_id = ?`, [...values, accounts.receivableId, owner, id]);
-        await db.execute("DELETE FROM accounting_invoice_lines WHERE invoice_id = ?", [id]);
-        // Preserve positional identities for the existing lines, including edited amounts and text.
-        data.lines.forEach((line, index) => {
-          line.id = existing[index]?.invoice_line_id;
-          line.account_id = accounts.lineIds[index];
-        });
       }
-      await saveLines(db, id, data.lines);
+      await saveInvoiceLedgerDraft(db, await getRow(db, owner, id), accounts, data.lines, existing);
       return invoiceObject(db, await getRow(db, owner, id));
     });
   }
@@ -440,14 +390,15 @@ export function createInvoiceService(pool, {
     return withPoolTransaction(pool, async (db) => {
       const row = await getRow(db, owner, id, true);
       if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before assigning accounts.", "INVOICE_REVISION_CONFLICT");
-      const posting = row.invoice_status === "draft" ? null : await invoicePosting(db, row, true);
+      const transaction = await invoiceTransaction(db, row, true);
+      const posting = transaction?.TransactionState === "posted" ? transaction : null;
       if (sendPending(row) && !posting) {
         throw fail("Account assignments are locked while the invoice is being issued through Stripe.", "INVOICE_POSTING_ACCOUNTS_LOCKED");
       }
       if (posting && data.receivable_account_id != null && data.receivable_account_id !== Number(row.receivable_account_id)) {
         throw fail("The receivable account is fixed once the invoice is posted.", "INVOICE_RECEIVABLE_ACCOUNT_LOCKED");
       }
-      const [lines] = await db.execute("SELECT invoice_line_id, account_id FROM accounting_invoice_lines WHERE invoice_id = ? ORDER BY position", [id]);
+      const lines = await readInvoiceLines(db, row, transaction, true);
       const changes = new Map((data.lines ?? []).map((line) => [line.invoice_line_id, line.account_id]));
       if (changes.size !== (data.lines?.length ?? 0) || [...changes.keys()].some((key) => !lines.some((line) => line.invoice_line_id === key))) {
         throw fail("Use distinct line IDs from this invoice.", "INVOICE_ACCOUNT_LINES_INVALID", 400);
@@ -463,10 +414,8 @@ export function createInvoiceService(pool, {
       if (posting) await reclassifyInvoicePosting(db, owner, posting, assignments);
       await db.execute("UPDATE accounting_invoices SET receivable_account_id = ?, revision = ? WHERE owner_person_id = ? AND invoice_id = ?",
         [accounts.receivableId, randomUUID(), owner, id]);
-      for (const { line, accountId } of assignments) {
-        await db.execute("UPDATE accounting_invoice_lines SET account_id = ? WHERE invoice_id = ? AND invoice_line_id = ?",
-          [accountId, id, line.invoice_line_id]);
-      }
+      if (!posting && lines.length) await saveInvoiceLedgerDraft(db, { ...row, receivable_account_id: accounts.receivableId },
+        accounts, lines, lines);
       return invoiceObject(db, await getRow(db, owner, id));
     });
   }
@@ -476,16 +425,17 @@ export function createInvoiceService(pool, {
     return withPoolTransaction(pool, async (db) => {
       const row = await getRow(db, owner, id, true);
       if (row.revision !== data.revision) throw fail("The invoice changed. Reopen it before attaching receipts.", "INVOICE_REVISION_CONFLICT");
-      const [lines] = await db.execute("SELECT invoice_line_id FROM accounting_invoice_lines WHERE invoice_id = ?", [id]);
-      const ownIds = new Set(lines.map((line) => line.invoice_line_id));
+      const transaction = await invoiceTransaction(db, row, true);
+      const lines = await readInvoiceLines(db, row, transaction, true);
+      const ownIds = new Map(lines.map((line) => [line.invoice_line_id, line.line_item_id]));
       if (new Set(data.lines.map((line) => line.invoice_line_id)).size !== data.lines.length
         || data.lines.some((line) => !ownIds.has(line.invoice_line_id))) {
         throw fail("Use distinct line IDs from this invoice.", "INVOICE_RECEIPT_LINES_INVALID", 400);
       }
       await validateInvoiceReceiptRefs(db, owner, data.lines.map((line) => line.receipt_ref));
       for (const line of data.lines) {
-        await db.execute("UPDATE accounting_invoice_lines SET receipt_ref = ? WHERE invoice_id = ? AND invoice_line_id = ?",
-          [line.receipt_ref, id, line.invoice_line_id]);
+        await db.execute("UPDATE line_items SET invoice_receipt_ref = ? WHERE transaction_id = ? AND line_item_id = ?",
+          [line.receipt_ref, transaction.transaction_id, ownIds.get(line.invoice_line_id)]);
       }
       await db.execute("UPDATE accounting_invoices SET revision = ? WHERE owner_person_id = ? AND invoice_id = ?", [randomUUID(), owner, id]);
       return invoiceObject(db, await getRow(db, owner, id));
@@ -637,7 +587,13 @@ export function createInvoiceService(pool, {
         }
         if (!row.sent_at) {
           assertCanSend(row);
-          if (!await invoicePosting(db, row)) await invoicePostingInput(db, row);
+          if (!await invoicePosting(db, row)) {
+            const draft = await invoiceTransaction(db, row, true);
+            if (!draft || draft.TransactionState !== "draft") {
+              throw fail("The invoice has no draft ledger transaction.", "INVOICE_POSTING_TOTAL_INVALID", 400);
+            }
+            await validateTransaction(db, Number(draft.transaction_id), owner, { lock: true });
+          }
           await db.execute(`UPDATE accounting_invoices SET stripe_account_id = ?,
             send_started_at = COALESCE(send_started_at, UTC_TIMESTAMP(6))
             WHERE owner_person_id = ? AND invoice_id = ?`, [plan.accountId, owner, plan.id]);
@@ -714,6 +670,8 @@ export function createInvoiceService(pool, {
       if (lines.length === 500) throw fail("This invoice exceeds 500 lines.", "INVOICE_LINE_LIMIT");
       lines.push({ description: (line.description || "Stripe invoice line").slice(0, 1000), amount_minor: line.amount });
     }
+    const adjustment = remote.total - lines.reduce((total, line) => total + line.amount_minor, 0);
+    if (adjustment) lines.push({ description: "Stripe invoice total adjustment", amount_minor: adjustment });
     const id = randomUUID();
     let savedId;
     try {
@@ -734,7 +692,7 @@ export function createInvoiceService(pool, {
             ? remote.payment_settings.payment_method_types.includes("us_bank_account") ? "card_and_ach" : "card_only"
             : "ach_only",
           remote.total, randomUUID(), accountId, remote.customer, remoteId, invoiceNumber, remote.status, accounts.receivableId]);
-        if (lines.length) await saveLines(db, id, lines);
+        if (lines.length) await saveInvoiceLedgerDraft(db, await getRow(db, owner, id), accounts, lines);
         await sync(db, owner, id, remote);
         return id;
       });

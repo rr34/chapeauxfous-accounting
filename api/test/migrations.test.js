@@ -17,7 +17,12 @@ test("SQL splitter ignores semicolons inside strings", () => {
 
 test("the repository migration ledger is valid and contiguous", () => {
   const migrations = readMigrationLedger(new URL("../../db/migrations.sql", import.meta.url));
-  assert.deepEqual(migrations.map((migration) => migration.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]);
+  assert.deepEqual(migrations.map((migration) => migration.version), Array.from({ length: 33 }, (_, index) => index + 1));
+  const invoiceLinesMigration = migrations.at(-1);
+  const invoiceStatements = splitMariaDbStatements(invoiceLinesMigration.sql, invoiceLinesMigration.label);
+  assert.match(invoiceStatements[0], /ledger_transaction_id BIGINT NULL/);
+  assert.match(invoiceStatements[1], /invoice_receipt_ref VARCHAR\(512\) NULL/);
+  assert.equal(invoiceStatements.at(-1), "DROP TABLE IF EXISTS accounting_invoice_lines;");
   const accountViewMigration = migrations.find((migration) => migration.version === 25);
   assert.match(accountViewMigration.sql, /ADD COLUMN `last_viewed_at` datetime\(6\) NULL DEFAULT NULL/);
   assert.match(accountViewMigration.sql, /COMMENT 'UTC instant when the owner most recently opened this account/);
