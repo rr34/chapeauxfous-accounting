@@ -21,7 +21,7 @@ export function invoiceCurrencyScale(currency: string) {
 export const blankInvoiceLine = (): EditableInvoiceLine => ({ key: crypto.randomUUID(), description: "", amount: "" });
 
 export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
-  title: string; eyebrow: string; busy: boolean; onClose: () => void; children: ReactNode;
+  title: string; eyebrow?: string; busy: boolean; onClose: () => void; children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -35,7 +35,7 @@ export function InvoiceDialog({ title, eyebrow, busy, onClose, children }: {
     onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <div className="invoice-dialog-content">
       <header className="invoice-dialog-heading">
-        <div><p className="eyebrow">{eyebrow}</p><h2 id={titleId}>{title}</h2></div>
+        <div>{eyebrow && <p className="eyebrow">{eyebrow}</p>}<h2 id={titleId}>{title}</h2></div>
         <button className="secondary" type="button" disabled={busy} onClick={onClose}>Close</button>
       </header>
       {children}
@@ -86,8 +86,9 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
     onChange({ ...draft, lines: draft.lines.map((line) => line.key === key ? { ...line, ...changes } : line) });
   const addLine = () => onChange({ ...draft, lines: [...draft.lines, blankInvoiceLine()] });
 
-  return <InvoiceDialog title={creating ? "Create invoice" : draft.payer || "Invoice draft"}
-    eyebrow={creating ? "Payments" : `Invoice #${invoiceNumber}`} busy={busy} onClose={onClose}>
+  const heading = invoiceNumber == null ? "Invoice" : `Invoice #${invoiceNumber}`;
+  return <InvoiceDialog title={creating ? "Create invoice" : draft.payer ? `${heading} · ${draft.payer}` : heading}
+    eyebrow={creating ? "Payments" : undefined} busy={busy} onClose={onClose}>
     <form className="invoice-editor-form" onSubmit={onSave}>
       <fieldset disabled={editingLocked}>
         <div className="invoice-header-row invoice-header-payer">

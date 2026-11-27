@@ -1125,16 +1125,18 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
               placeholder={line.autoBalance ? "New line or balancing line" : isSelectedAccountLine ? "Memo for this account line" : "Memo"} /></td>
             <td>{isThisAccount && registerMovementInput(line, index)}</td>
             <td>{!isThisAccount && registerMovementInput(line, index)}</td>
-            <td><AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
-              choices={accountChoices} placeholder={line.autoBalance ? "Unassigned — choose account" : undefined}
-              onChange={(accountId) => updateLine(index, { accountId })} />
+            <td><div className="split-account-field">
+              <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
+                choices={accountChoices} placeholder={line.autoBalance ? "Unassigned — choose account" : undefined}
+                onChange={(accountId) => updateLine(index, { accountId })} />
+              {!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
+                aria-label={`Remove line ${index + 1}`}
+                onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}
+            </div>
               {isSelectedAccountLine && initialAccount && <small>Opened from {fullNames.get(initialAccount.id) ?? initialAccount.name}</small>}
               {line.autoBalance && line.value && <small>Automatic balancing posting to {line.accountId
                 ? fullNames.get(Number(line.accountId)) ?? "the designated suspense account"
-                : "the designated suspense account"}.</small>}
-              {!line.autoBalance && !isSelectedAccountLine && <button type="button" className="quiet"
-              aria-label={`Remove line ${index + 1}`}
-              onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>}</td>
+                : "the designated suspense account"}.</small>}</td>
             <td /><td />
           </tr>
           {registerEditValueRow(line, index)}
@@ -1199,13 +1201,14 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
             onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" /></td>
           <td>{isThisAccount && registerMovementInput(line, index)}</td>
           <td>{!isThisAccount && registerMovementInput(line, index)}</td>
-          <td>{index === 0 && initialAccount
+          <td><div className="split-account-field">{index === 0 && initialAccount
             ? <span className="register-fixed-account">{fullNames.get(initialAccount.id) ?? initialAccount.name}</span>
             : <AccountCombobox label={`Account for line ${index + 1}`} value={line.accountId}
                 choices={accountChoices} onChange={(accountId) => updateLine(index, { accountId })} />}
             <button type="button" className="quiet" aria-label={`Remove line ${index + 1}`}
-            disabled={index === 0 || lines.length <= 1}
-            onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button></td>
+              disabled={index === 0 || lines.length <= 1}
+              onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>
+          </div></td>
           <td /><td />
         </tr>
         {showValuationDetails && <tr className="register-inline-value-row"><td /><td colSpan={6}>
@@ -1274,7 +1277,7 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
         <button type="button" className="secondary" aria-expanded={showValuationDetails}
           onClick={() => setShowValuationDetails((current) => !current)}>
           {showValuationDetails ? "Hide values & rates" : "Show values & rates"}</button></div>
-      <div className="line-editor transaction-split-group"><div className="line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span><span /></div>
+      <div className="line-editor transaction-split-group standard-transaction-splits"><div className="line-head"><span>Memo</span><span>Account</span><span>Debit</span><span>Credit</span></div>
         {lines.map((line, index) => {
           const account = accountMap.get(Number(line.accountId));
           const isNative = Boolean(account && account.currencyId === resolvedValuationCurrencyId);
@@ -1290,14 +1293,15 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
             valueCurrencyCode, amountCurrencyCode);
           return <div className={`transaction-split ${line.autoBalance ? "auto-balanced" : ""}`} key={index}><div className="line-grid">
             <input value={line.memo} onChange={(event) => updateLine(index, { memo: event.target.value })} placeholder="Memo" />
-            <AccountCombobox label={`Account for split ${index + 1}`} value={line.accountId}
+            <div className="split-account-field"><AccountCombobox label={`Account for split ${index + 1}`} value={line.accountId}
               choices={accountChoices} onChange={(accountId) => updateLine(index, { accountId })} />
+              <button type="button" className="quiet" aria-label={`Remove split ${index + 1}`} disabled={lines.length <= 1}
+                onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>
+            </div>
             <input inputMode="decimal" aria-label={`Debit for line ${index + 1}`} value={amountForSide(line.amount, "debit")}
               onChange={(event) => updateLineAmount(index, "debit", event.target.value)} />
             <input inputMode="decimal" aria-label={`Credit for line ${index + 1}`} value={amountForSide(line.amount, "credit")}
               onChange={(event) => updateLineAmount(index, "credit", event.target.value)} />
-            <button type="button" className="quiet" aria-label={`Remove split ${index + 1}`} disabled={lines.length <= 1}
-              onClick={() => setLines((current) => rebalanceLines(current.filter((_, lineIndex) => lineIndex !== index)))}>×</button>
           </div>
           {showValuationDetails && <div className="line-value-rate"><label>Value in {valuationCurrency?.code ?? "value currency"}
             <input inputMode="decimal" disabled={isNative} value={line.value}
@@ -2225,6 +2229,15 @@ function statementSummaryDateAmount(date: string | null, amountUnits: string | n
   return `${formattedDate} — ${formattedAmount}`;
 }
 
+type PostingAccountReview = {
+  reviewDigest: string;
+  selectedCount: number;
+  transactionCount: number;
+  splitCount: number;
+  blockers: { reconciled: number; invoices: number; questions: number; statements: number };
+  blockedTransactionIds: number[];
+};
+
 function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token,
   openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged, paymentPicker, onOpenInvoiceLinks }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
@@ -2245,6 +2258,15 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [selectingTransactionId, setSelectingTransactionId] = useState<number | null>(null);
   const [selectionError, setSelectionError] = useState("");
   const selectionRequest = useRef(0);
+  const bulkRequest = useRef(0);
+  const [bulkEditing, setBulkEditing] = useState(false);
+  const [bulkSelected, setBulkSelected] = useState<Set<number>>(() => new Set());
+  const [bulkSource, setBulkSource] = useState("");
+  const [bulkTarget, setBulkTarget] = useState("");
+  const [bulkReview, setBulkReview] = useState<PostingAccountReview | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState("");
+  const [bulkNotice, setBulkNotice] = useState("");
   const [knownBalanceFormMode, setKnownBalanceFormMode] = useState<"add-row" | "edit-row" | "manual" | null>(null);
   const [knownBalanceAnchorDate, setKnownBalanceAnchorDate] = useState<string | null>(null);
   const [knownBalanceDate, setKnownBalanceDate] = useState(today());
@@ -2271,6 +2293,21 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   const [purchaseEvidenceCopiedJobId, setPurchaseEvidenceCopiedJobId] = useState<string | null>(null);
   const accountById = useMemo(() => new Map(accounts.map((candidate) => [candidate.id, candidate])), [accounts]);
   const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const bulkAccounts = useMemo(() => {
+    if (!bulkEditing) return { sources: [], targets: [], matching: [] };
+    const used = new Set(entries.flatMap((entry) => entry.splits.map((split) => split.accountId)));
+    const source = accountById.get(Number(bulkSource));
+    const choices = accounts.filter((candidate) => !candidate.placeholder)
+      .sort((left, right) => registerSortCollator.compare(fullAccountNames.get(left.id) ?? left.name,
+        fullAccountNames.get(right.id) ?? right.name));
+    const choice = (candidate: Account) => ({ value: String(candidate.id),
+      label: fullAccountNames.get(candidate.id) ?? candidate.name, currencyCode: candidate.currencyCode });
+    const matching = source ? [...new Set(entries.filter((entry) =>
+      entry.splits.some((split) => split.accountId === source.id)).map((entry) => entry.transactionId))] : [];
+    return { sources: choices.filter((candidate) => used.has(candidate.id)).map(choice),
+      targets: choices.filter((candidate) => source && !candidate.archivedAt && candidate.id !== source.id
+        && candidate.currencyId === source.currencyId).map(choice), matching };
+  }, [accountById, accounts, bulkEditing, bulkSource, entries, fullAccountNames]);
   const accountByFullName = useMemo(() => new Map(accounts.map((candidate) =>
     [fullAccountNames.get(candidate.id) ?? candidate.name, candidate])), [accounts, fullAccountNames]);
   const suspenseTargetChoices = useMemo(() => accounts.filter((candidate) => !candidate.placeholder
@@ -2649,6 +2686,9 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
 
   useEffect(() => {
     selectionRequest.current += 1;
+    bulkRequest.current += 1;
+    setBulkEditing(false); setBulkSelected(new Set()); setBulkSource(""); setBulkTarget(""); setBulkReview(null);
+    setBulkBusy(false); setBulkError(""); setBulkNotice("");
     setSelectedTransaction(null); setSelectedLineItemId(null); setSelectingTransactionId(null); setSelectionError("");
     setKnownBalanceFormMode(null); setKnownBalanceAnchorDate(null); setKnownBalanceDate(today());
     setKnownBalance(""); setKnownBalanceError(""); setShowNewTransaction(false);
@@ -2721,13 +2761,13 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
   }
 
   useEffect(() => {
-    if (!openTransaction || loading) return;
+    if (!openTransaction || loading || bulkEditing) return;
     const entry = entries.find((candidate) => candidate.transactionId === openTransaction.transactionId
       && candidate.lineItemId === openTransaction.lineItemId);
     if (!entry) return;
     onOpenTransactionHandled();
     void activateTransaction(entry);
-  }, [openTransaction, loading, entries]);
+  }, [openTransaction, loading, entries, bulkEditing]);
 
   const newTransactionRows = showNewTransaction && <TransactionCard key={`new-${account.id}`}
     accounts={accounts} currencies={currencies} initialAccountId={account.id} layout="register" token={token}
@@ -2736,6 +2776,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     }} />;
 
   async function activateTransaction(entry: AccountLedgerEntry, openDateEditor = false, clickedLineId?: number) {
+    if (bulkEditing) return;
     function openInvoiceForLine(transaction: TransactionDetail) {
       if (paymentPicker) return false;
       const lineIds = clickedLineId == null
@@ -2775,6 +2816,52 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     selectionRequest.current += 1;
     setSelectedTransaction(null); setSelectedLineItemId(null); setSelectingTransactionId(null);
     setDateEditorOpen(false); setSelectionError("");
+  }
+
+  function resetBulkReview() {
+    setBulkReview(null);
+    setBulkError("");
+  }
+
+  function toggleBulkTransaction(transactionId: number) {
+    setBulkSelected((current) => {
+      const next = new Set(current);
+      if (next.has(transactionId)) next.delete(transactionId);
+      else next.add(transactionId);
+      return next;
+    });
+    resetBulkReview();
+  }
+
+  async function submitBulkReplacement(apply: boolean) {
+    if (bulkBusy || (apply && !bulkReview)) return;
+    const request = ++bulkRequest.current;
+    setBulkBusy(true);
+    setBulkError("");
+    try {
+      const result = await api<PostingAccountReview>("/transactions/replace-posting-account", {
+        method: "POST", body: JSON.stringify({ sourceAccountId: Number(bulkSource), targetAccountId: Number(bulkTarget),
+          transactionIds: [...bulkSelected], reviewDigest: apply ? bulkReview?.reviewDigest : undefined }),
+      }, token);
+      if (!apply) {
+        if (request === bulkRequest.current) setBulkReview(result);
+        return;
+      }
+      if (request === bulkRequest.current) {
+        setBulkEditing(false); setBulkSelected(new Set()); setBulkReview(null);
+        setBulkNotice(`Moved ${result.splitCount} ${result.splitCount === 1 ? "split" : "splits"} across ${result.transactionCount} ${result.transactionCount === 1 ? "transaction" : "transactions"}.`);
+      }
+      await onChanged().catch(() => {
+        if (request === bulkRequest.current) setBulkError("The splits moved, but the register could not refresh. Reload to see the updated balances.");
+      });
+    } catch (nextError) {
+      if (request === bulkRequest.current) {
+        setBulkReview(null);
+        setBulkError(errorMessage(nextError));
+      }
+    } finally {
+      if (request === bulkRequest.current) setBulkBusy(false);
+    }
   }
 
   async function finishTransactionCardSave(saved: TransactionCardSave,
@@ -2940,12 +3027,68 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             onClick={() => changeRegisterView("journal")}>Transaction Journal</button>
         </div></div></div>
       <div className="register-heading-actions">
+        {!paymentPicker && !suspenseReviewOpen && entries.length > 0 && !bulkEditing &&
+          <button type="button" className="secondary" disabled={bulkBusy || loading || Boolean(error)
+            || Boolean(selectedTransaction) || selectingTransactionId != null || showNewTransaction} onClick={() => {
+            setBulkNotice(""); resetBulkReview();
+            setBulkSource(""); setBulkTarget(""); setBulkEditing(true);
+          }}>Bulk edit</button>}
         <div className="register-current-balance">
           <div><span>Current balance</span>
             <strong>{unitsToDecimal(account.balanceUnits, account.scale)} {account.currencyCode}</strong></div>
           {importReviews.length > 0 && <small>Projected {unitsToDecimal(projectedImportBalanceUnits, account.scale)} {account.currencyCode}</small>}
         </div>
       </div></div>
+    {bulkEditing && <section className="register-bulk-edit" aria-label="Bulk edit transactions">
+      <div className="register-bulk-toolbar">
+        <strong>Replace posting account</strong>
+        <span>{bulkSelected.size} selected</span>
+        <button type="button" className="link-button" disabled={bulkBusy} onClick={() => {
+          setBulkEditing(false); setBulkSelected(new Set()); resetBulkReview();
+        }}>Cancel</button>
+      </div>
+      <div className="register-bulk-fields">
+        <div><span>From account</span><AccountCombobox label="Source posting account" value={bulkSource}
+          choices={bulkAccounts.sources} disabled={bulkBusy} onChange={(value) => {
+            setBulkSource(value); setBulkTarget(""); resetBulkReview();
+          }} /></div>
+        <div><span>To account</span><AccountCombobox label="Destination posting account" value={bulkTarget}
+          choices={bulkAccounts.targets} disabled={bulkBusy || !bulkSource} onChange={(value) => {
+            setBulkTarget(value); resetBulkReview();
+          }} /></div>
+      </div>
+      <div className="register-bulk-toolbar">
+        <button type="button" className="secondary" disabled={bulkBusy || !bulkAccounts.matching.length}
+          onClick={() => { setBulkSelected(new Set(bulkAccounts.matching)); resetBulkReview(); }}>
+          Select all matching in this register{bulkAccounts.matching.length ? ` (${bulkAccounts.matching.length})` : ""}</button>
+        <button type="button" className="link-button" disabled={bulkBusy || !bulkSelected.size}
+          onClick={() => { setBulkSelected(new Set()); resetBulkReview(); }}>Clear selection</button>
+        {!bulkReview && <button type="button" className="primary" disabled={bulkBusy || loading || Boolean(error)
+          || !bulkSource || !bulkTarget || !bulkSelected.size || bulkSelected.size > 10000}
+          onClick={() => void submitBulkReplacement(false)}>{bulkBusy ? "Reviewing…" : "Review changes"}</button>}
+      </div>
+      {bulkSelected.size > 10000 && <p role="alert">Select at most 10,000 transactions per batch.</p>}
+      {bulkReview && <div className="register-bulk-result" role="status">
+        <p>{bulkReview.splitCount === 0 ? "No selected transactions have a split in the source account."
+          : `${bulkReview.splitCount} ${bulkReview.splitCount === 1 ? "split" : "splits"} in ${bulkReview.transactionCount} of ${bulkReview.selectedCount} selected transactions match.`}</p>
+        {bulkReview.blockedTransactionIds.length > 0 ? <>
+          <p>Protected splits block this batch.</p>
+          <ul>{([
+            ["Reconciled", bulkReview.blockers.reconciled], ["Invoice-linked", bulkReview.blockers.invoices],
+            ["Accounting question", bulkReview.blockers.questions], ["Statement evidence", bulkReview.blockers.statements],
+          ] as const).filter(([, count]) => count > 0).map(([label, count]) => <li key={label}>{label} · {count}</li>)}</ul>
+          <button type="button" className="secondary" onClick={() => {
+            const blocked = new Set(bulkReview.blockedTransactionIds);
+            setBulkSelected((current) => new Set([...current].filter((id) => !blocked.has(id))));
+            resetBulkReview();
+          }}>Deselect {bulkReview.blockedTransactionIds.length} blocked {bulkReview.blockedTransactionIds.length === 1 ? "transaction" : "transactions"}</button>
+        </> : bulkReview.splitCount > 0 && <button type="button" className="primary"
+          disabled={bulkBusy || loading || Boolean(error)} onClick={() => void submitBulkReplacement(true)}>
+          {bulkBusy ? "Moving…" : `Move ${bulkReview.splitCount} ${bulkReview.splitCount === 1 ? "split" : "splits"}`}</button>}
+      </div>}
+    </section>}
+    {bulkNotice && <p className="register-reconciliation-message" role="status">{bulkNotice}</p>}
+    {bulkError && <p className="error" role="alert">{bulkError}</p>}
     {importReviews.map((review) => <div className="register-import-review" key={review.importPlanId}>
       <div><strong>{review.sourceSystem === "single_account_transaction_list"
         ? "Pending transaction-list import" : "Pending statement import"} · not posted</strong>
@@ -2984,7 +3127,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     {account.suspense && <section className={`suspense-group-review ${suspenseReviewOpen ? "open" : ""}`}>
       {!suspenseReviewOpen ? <><div><strong>Classify unresolved suspense lines in groups</strong>
         <small>Group this register by split account, then description. Select a group and remove any exceptions before assigning it.</small></div>
-        <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy)}
+        <button type="button" className="secondary" disabled={Boolean(suspenseReviewBusy) || bulkEditing}
           onClick={() => void toggleSuspenseReview()}>
           {suspenseReviewBusy === "load" ? "Loading questions…" : "Review groups"}</button></>
       : <><div className="suspense-group-review-heading"><div><strong>Likely transfers first, then split account → similar description prefix</strong>
@@ -3282,19 +3425,25 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           return <Fragment key={entry.lineItemId}>
             {suspenseGroupHeader}
             {newRowsAtTop && rowBalanceForm}
-            <tr className={`register-entry-row selectable ${expanded ? "expanded" : ""} ${view === "journal" ? "register-journal-header" : ""}`}
-              tabIndex={0}
+            <tr className={`register-entry-row ${bulkEditing ? "" : "selectable"} ${expanded ? "expanded" : ""} ${view === "journal" ? "register-journal-header" : ""}`}
+              tabIndex={bulkEditing ? undefined : 0}
               onClick={() => void activateTransaction(entry)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
+                if (!bulkEditing && (event.key === "Enter" || event.key === " ")) {
                   event.preventDefault(); void activateTransaction(entry);
                 }
               }}>
               <td><button type="button" className="register-date-edit"
                 aria-label={`Edit date for transaction ${entry.transactionId}`}
+                disabled={bulkEditing}
                 onClick={(event) => { event.stopPropagation(); void activateTransaction(entry, true); }}
                 onKeyDown={(event) => event.stopPropagation()}>{formatRegisterDate(entry.date)}</button></td>
               <td className="register-description"><div className="register-description-main">
+                {bulkEditing && <input type="checkbox"
+                  aria-label={`Select transaction ${entry.transactionId}: ${entry.description || "Untitled transaction"}`}
+                  checked={bulkSelected.has(entry.transactionId)} disabled={bulkBusy}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={() => toggleBulkTransaction(entry.transactionId)} />}
                 {suspenseReviewOpen && rowSuspenseGroup?.kind !== "transfer" && <input type="checkbox"
                   aria-label={`Select suspense line ${entry.lineItemId}: ${entry.memo || entry.description || "Untitled transaction"}`}
                   checked={selectedSuspenseLineIds.has(entry.lineItemId)} disabled={Boolean(suspenseReviewBusy)}
@@ -3335,10 +3484,11 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               .map((split) => {
                 const splitAccount = accountById.get(split.accountId);
                 const isThisAccount = split.accountId === account.id;
-                return <tr className="register-line-item-row selectable" key={split.lineItemId} tabIndex={0}
+                return <tr className={`register-line-item-row${bulkEditing ? "" : " selectable"}`}
+                  key={split.lineItemId} tabIndex={bulkEditing ? undefined : 0}
                   onClick={() => void activateTransaction(entry, false, split.lineItemId)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
+                    if (!bulkEditing && (event.key === "Enter" || event.key === " ")) {
                       event.preventDefault(); void activateTransaction(entry, false, split.lineItemId);
                     }
                   }}>
@@ -3359,7 +3509,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           </Fragment>;
         })}{!suspenseReviewOpen && !newRowsAtTop && newTransactionRows}</tbody>
       </table></div>}
-    {!showNewTransaction && !loading && !error && !account.placeholder && !account.archivedAt
+    {!bulkEditing && !showNewTransaction && !loading && !error && !account.placeholder && !account.archivedAt
       && <div className="register-actions"><button className="primary"
       onClick={() => setShowNewTransaction(true)}>＋ New transaction</button></div>}
   </section>
@@ -3407,10 +3557,13 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, dele
     return `DELETE ${parts.join(" AND ")}`;
   }
 
+  const singleTransaction = scope === "selected" && transactionIds.length === 1
+    && preview?.summary.transactionCount === 1 && !preview.summary.deleteAccounts && !preview.summary.deleteImportHistory;
+  const required = preview ? requiredConfirmation(preview) : "";
+  const canDelete = Boolean(preview) && (singleTransaction || confirmation === required);
+
   async function commit() {
-    if (!preview) return;
-    const required = requiredConfirmation(preview);
-    if (confirmation !== required) return;
+    if (!preview || busy || !canDelete) return;
     setBusy(true); setError("");
     try {
       await api("/data/transactions/delete-commit", { method: "POST", body: JSON.stringify({
@@ -3421,7 +3574,6 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, dele
     finally { setBusy(false); }
   }
 
-  const required = preview ? requiredConfirmation(preview) : "";
   return <TransactionEditorModal eyebrow="Danger zone"
     title={scope === "all" ? deleteAccounts && deleteImportHistory ? "Clear ledger, accounts, and imports"
       : deleteAccounts ? "Clear ledger and accounts"
@@ -3429,6 +3581,7 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, dele
       : "Delete transaction"} onClose={onClose}>
     {busy && !preview && <p className="muted">Preparing an exact deletion preview…</p>}
     {preview && <>
+      {singleTransaction ? <p>Delete transaction #{transactionIds[0]} and its ledger lines?</p> : <>
       <div className="deletion-summary">
         <div><span>Transactions</span><strong>{preview.summary.transactionCount}</strong></div>
         <div><span>Line items</span><strong>{preview.summary.lineItemCount}</strong></div>
@@ -3451,9 +3604,10 @@ function TransactionDeletionDialog({ scope, transactionIds, deleteAccounts, dele
       <label>Type <code>{required}</code> to confirm
         <input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
       </label>
-      <div className="destructive-actions"><button type="button" className="link-button" onClick={onClose}>Cancel</button>
-        <button type="button" className="danger-button" disabled={busy || confirmation !== required}
-          onClick={() => void commit()}>{busy ? "Deleting…" : "Permanently delete"}</button></div>
+      </>}
+      <div className="destructive-actions"><button type="button" className="link-button" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className="danger-button" disabled={busy || !canDelete}
+          onClick={() => void commit()}>{busy ? "Deleting…" : singleTransaction ? "Delete transaction" : "Permanently delete"}</button></div>
     </>}
     {error && <p className="error">{error}</p>}
   </TransactionEditorModal>;

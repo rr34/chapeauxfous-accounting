@@ -57,6 +57,10 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .register-date-edit { border: 0; border-radius: 4px; background: transparent; color: inherit; padding: .15rem .2rem; text-align: left; white-space: nowrap; }.register-date-edit:hover, .register-date-edit:focus-visible { background: #dfeadd; color: #244a2d; }.register-date-edit span { margin-left: .2rem; color: #748078; }
 .register-edit-transaction-row td { background: #e8f0e5; vertical-align: middle; }.register-edit-transaction-row input, .register-edit-transaction-row textarea { width: 100%; padding: .45rem .5rem; }.register-edit-transaction-row textarea { min-height: 3.5rem; resize: vertical; }.register-edit-transaction-row .amount-input { text-align: right; font-variant-numeric: tabular-nums; }
 .register-edit-transaction-row .register-main-memo { margin-top: .3rem; }
+.split-account-field { display: flex; align-items: center; gap: .3rem; min-width: 0; }
+.split-account-field > .account-combobox, .split-account-field > .register-fixed-account { flex: 1; min-width: 0; }
+.split-account-field > button { flex: none; }
+.standard-transaction-splits .line-head, .standard-transaction-splits .line-grid { grid-template-columns: 1.3fr 1.5fr .65fr .65fr; }
 .register-transaction-card-header td { border-top: 3px solid #69876c; }.register-transaction-card-line td { background: #f7faf6; }.register-transaction-card-line.register-context-line td:first-child { box-shadow: inset 4px 0 #69876c; }.register-transaction-card-line .account-combobox input { width: 100%; }.register-transaction-card-line.auto-balanced td { background: #eef6ec; }
 .register-values-toggle { border: 0; background: transparent; color: #315d3b; padding: .25rem 0; font-size: .72rem; font-weight: 750; }.register-values-toggle:hover, .register-values-toggle:focus-visible { text-decoration: underline; }
 .register-inline-value-controls label > small { display: block; margin-top: .2rem; color: #748078; font-size: .67rem; }
@@ -156,6 +160,7 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .invoice-dialog-content { display: grid; gap: 1rem; padding: 1rem 1.25rem; }
 .invoice-dialog-heading, .invoice-line-heading { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
 .invoice-dialog-heading h2, .invoice-line-heading h3 { margin: 0; }
+.invoice-dialog-heading > div { min-width: 0; overflow-wrap: anywhere; }
 .invoice-editor-form, .invoice-editor-form fieldset, .invoice-line-list { display: grid; gap: .75rem; min-width: 0; }
 .invoice-editor-form fieldset { padding: 0; margin: 0; border: 0; }
 .invoice-editor-form label { margin: 0; }
@@ -226,3 +231,11 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
   outline: 2px solid #69876c;
   outline-offset: -2px;
 }
+.register-bulk-edit { display: grid; gap: .65rem; margin-top: .8rem; padding: .75rem; background: #eef2ec; border-radius: 8px; }
+.register-bulk-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; }
+.register-bulk-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .65rem; }
+.register-bulk-toolbar > span, .register-bulk-fields > div > span { font-size: .8rem; color: #526158; }
+.register-bulk-fields > div > span { display: block; margin-bottom: .25rem; }
+.register-bulk-edit .primary, .register-bulk-edit .secondary, .register-heading-actions > .secondary { width: auto; }
+.register-bulk-result { padding-top: .65rem; border-top: 1px solid #ccd6ca; }
+.register-bulk-edit p { margin: 0 0 .5rem; }

@@ -11,6 +11,7 @@ import { invoicePdfFilename, renderInvoicePdf } from "./invoice-pdf.js";
 import { invoicePaymentInput } from "./invoice-payments.js";
 import { readLedgerInvoiceLinks } from "./invoice-ledger.js";
 import { searchTransactionsPage } from "./transaction-search.js";
+import { replacePostingAccount } from "./posting-account-replacement.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
 import { getUser, loginUser, registerUser } from "./users.js";
@@ -519,6 +520,14 @@ app.get("/api/transactions/:transactionId", requireAuth, async (req, res, next) 
 
 app.post("/api/transactions", requireAuth, async (req, res, next) => {
   try { res.status(201).json(await createTransaction({ personId: req.auth.personId, ...req.body })); } catch (error) { next(error); }
+});
+
+app.post("/api/transactions/replace-posting-account", requireAuth, async (req, res, next) => {
+  try {
+    const { sourceAccountId, targetAccountId, transactionIds, reviewDigest } = req.body ?? {};
+    res.json(await replacePostingAccount({ pool, personId: req.auth.personId,
+      sourceAccountId, targetAccountId, transactionIds, reviewDigest }));
+  } catch (error) { next(error); }
 });
 
 app.patch("/api/transactions/:transactionId", requireAuth, async (req, res, next) => {
