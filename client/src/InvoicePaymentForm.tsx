@@ -4,7 +4,10 @@ import { accountFullNames } from "./account-names";
 import { decimalToUnits, unitsToDecimal } from "./money";
 import type { Account } from "./types";
 
-export type InvoicePayment = { id: string; transactionId: number; amountMinor: number; date: string };
+export type InvoicePayment = {
+  id: string; transactionId: number; amountMinor: number; date: string;
+  description?: string | null; receivingAccountNames?: string[];
+};
 export type InvoicePaymentCredit = {
   lineItemId: number; transactionId: number; date: string; description: string | null;
   accountName: string; fromSuspense: boolean; availableMinor: number;

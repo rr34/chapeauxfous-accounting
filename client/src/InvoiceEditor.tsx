@@ -132,6 +132,12 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             <textarea aria-label={`Description for line ${index + 1}`} rows={1} value={line.description}
               maxLength={1000} readOnly={!editable}
               onChange={(event) => setLine(line.key, { description: event.target.value })} />
+            <AccountCombobox id={`line-account-${line.key}`} label={`Line account for line ${index + 1}`}
+              placeholder="Account"
+              value={line.accountId == null ? "" : String(line.accountId)} choices={lineAccountChoices}
+              selectedLabel={line.accountId == null ? defaultLineAccountLabel : accountNames.get(line.accountId)}
+              disabled={!accountsEditable || editingLocked} clearOnType={false}
+              onChange={(accountId) => setLine(line.key, { accountId: accountId ? Number(accountId) : undefined })} />
             <input className="invoice-line-amount" aria-label={`Amount for line ${index + 1} (${draft.currency || "currency"})`}
               inputMode="decimal" value={line.amount} placeholder="0.00" readOnly={!editable}
               onChange={(event) => setLine(line.key, { amount: event.target.value })} />
@@ -139,14 +145,8 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
               aria-label={`Remove line ${index + 1}`} title="Remove line"
               onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>×</button>}
           </div>
-          <div className="invoice-line-references">
-            <AccountCombobox id={`line-account-${line.key}`} label={`Line account for line ${index + 1}`}
-              placeholder="Account"
-              value={line.accountId == null ? "" : String(line.accountId)} choices={lineAccountChoices}
-              selectedLabel={line.accountId == null ? defaultLineAccountLabel : accountNames.get(line.accountId)}
-              disabled={!accountsEditable || editingLocked} clearOnType={false}
-              onChange={(accountId) => setLine(line.key, { accountId: accountId ? Number(accountId) : undefined })} />
-            {(receiptsEditable || line.receiptRef) && <select aria-label={`Receipt for line ${index + 1}`}
+          {(receiptsEditable || line.receiptRef) && <div className="invoice-line-references">
+            <select aria-label={`Receipt for line ${index + 1}`}
               value={line.receiptRef ?? ""} disabled={!receiptsEditable}
               onChange={(event) => onReceiptChange(line.key, event.target.value || null)}>
               <option value="">No receipt</option>
@@ -154,7 +154,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
                 <option value={line.receiptRef}>{line.receiptRef.startsWith("agent-slayer:")
                   ? "Agent receipt · Upload in Accounting to include it" : `Receipt #${line.receiptRef.split("/").at(-1)}`}</option>}
               {receipts.map((file) => <option key={file.sourceRef} value={file.sourceRef}>{file.displayName}</option>)}
-            </select>}
+            </select>
             {receiptsEditable && <label className="secondary invoice-line-upload">Upload<input type="file"
               aria-label={`Upload receipt for line ${index + 1}`} accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
               onChange={(event) => {
@@ -162,7 +162,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
                 event.currentTarget.value = "";
                 if (file) onUploadReceipt(line.key, file);
               }} /></label>}
-          </div>
+          </div>}
         </article>)}</div>
       </fieldset>
       {creating && <p className="muted">You only need one line to start. Payer, due date, and prices can be filled in later.</p>}

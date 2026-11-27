@@ -98,13 +98,34 @@ export async function findInvoicePaymentCredits(db, row, ar, text) {
 }
 
 export async function readInvoicePayments(db, invoiceId) {
-  const [rows] = await db.execute(`SELECT p.payment_id, p.amount_minor, li.transaction_id, t.TransactionDate
+  const [rows] = await db.execute(`SELECT p.payment_id, p.amount_minor, li.transaction_id, t.TransactionDate,
+      COALESCE(NULLIF(TRIM(li.memo), ''), NULLIF(TRIM(t.description), '')) AS description,
+      receiving.account_id AS receiving_account_id, receiving.AccountName AS receiving_account_name
     FROM accounting_invoice_payments p
     JOIN line_items li ON li.line_item_id = p.line_item_id
     JOIN transactions t ON t.transaction_id = li.transaction_id
-    WHERE p.invoice_id = ? ORDER BY t.TransactionDate, p.created_at, p.payment_id`, [invoiceId]);
-  return rows.map((row) => ({ id: row.payment_id, amountMinor: Number(row.amount_minor),
-    transactionId: Number(row.transaction_id), date: row.TransactionDate }));
+    LEFT JOIN line_items deposit ON deposit.transaction_id = t.transaction_id
+      AND deposit.amount_units > 0 AND deposit.account_id <> li.account_id
+    LEFT JOIN accounts receiving ON receiving.account_id = deposit.account_id
+      AND receiving.owner_person_id = t.owner_person_id AND receiving.AccountType = 'asset'
+      AND receiving.is_suspense = 0 AND receiving.is_placeholder = 0
+    WHERE p.invoice_id = ?
+    ORDER BY t.TransactionDate, p.created_at, p.payment_id, receiving.account_id`, [invoiceId]);
+  const payments = new Map();
+  for (const row of rows) {
+    if (!payments.has(row.payment_id)) {
+      payments.set(row.payment_id, {
+        id: row.payment_id, amountMinor: Number(row.amount_minor), transactionId: Number(row.transaction_id),
+        date: row.TransactionDate, description: row.description ?? null, receivingAccounts: new Map(),
+      });
+    }
+    if (row.receiving_account_id != null) {
+      payments.get(row.payment_id).receivingAccounts.set(row.receiving_account_id, row.receiving_account_name);
+    }
+  }
+  return [...payments.values()].map(({ receivingAccounts, ...payment }) => ({
+    ...payment, receivingAccountNames: [...receivingAccounts.values()],
+  }));
 }
 
 export async function recordInvoicePayment(db, row, ar, input, units, postTransaction) {

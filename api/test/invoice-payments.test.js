@@ -23,15 +23,23 @@ test("historical invoices show ledger payment links without an app-issued postin
       if (sql.includes("FROM transactions")) return [[{ transaction_id: 90, TransactionState: "posted" }]];
       if (sql.includes("FROM line_items li") && sql.includes("invoice_receipt_ref")) return [[]];
       assert.match(sql, /FROM accounting_invoice_payments/);
+      assert.match(sql, /COALESCE\(NULLIF\(TRIM\(li\.memo\)/);
+      assert.match(sql, /deposit\.amount_units > 0/);
       assert.deepEqual(args, [id]);
-      return [[{ payment_id: paymentId, transaction_id: "16573", amount_minor: "49800",
-        TransactionDate: "2025-09-09" }]];
+      const payment = { payment_id: paymentId, transaction_id: "16573", amount_minor: "49800",
+        TransactionDate: "2025-09-09", description: "Payment memo" };
+      return [[
+        { ...payment, receiving_account_id: 12, receiving_account_name: "Checking" },
+        { ...payment, receiving_account_id: 12, receiving_account_name: "Checking" },
+        { ...payment, receiving_account_id: 13, receiving_account_name: "Savings" },
+      ]];
     },
   });
   const { objects: [invoice] } = await invoices.list(7, { invoice_id: id });
   assert.equal(invoice.postingTransactionId, 90);
   assert.deepEqual(invoice.payments, [
-    { id: paymentId, transactionId: 16573, amountMinor: 49800, date: "2025-09-09" },
+    { id: paymentId, transactionId: 16573, amountMinor: 49800, date: "2025-09-09",
+      description: "Payment memo", receivingAccountNames: ["Checking", "Savings"] },
   ]);
 });
 

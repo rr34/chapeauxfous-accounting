@@ -338,17 +338,20 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
       details={<>
         {selected?.sendReviewRequired && <p className="error">Review the previous delivery attempt before editing or sending this invoice.</p>}
         {selected?.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
-        {selected && (selected.stripeInvoiceId || selected.postingTransactionId) &&
-          <p>{money(selected.amountRemainingMinor, selected.currency)} outstanding</p>}
         {selected?.payments && selected.payments.length > 0 && <div>
           <h3>Payments</h3>
-          <ul className="invoice-list">{selected.payments.map((payment) => <li key={payment.id}>
-            <button type="button" className="secondary" disabled={disabled || dirty}
+          <ul className="invoice-list invoice-payment-list">{selected.payments.map((payment) => <li key={payment.id}>
+            <button type="button" className="secondary invoice-payment-row" disabled={disabled || dirty}
               onClick={() => void run(() => onOpenPosting(payment.transactionId))}>
-              {payment.date} · {money(payment.amountMinor, selected.currency)}
+              <time dateTime={payment.date}>{payment.date}</time>
+              <span className="invoice-payment-description">{payment.description || "Payment"}</span>
+              <span className="invoice-payment-account">{payment.receivingAccountNames?.join(", ") || "Receiving account unavailable"}</span>
+              <strong className="invoice-payment-amount">{money(payment.amountMinor, selected.currency)}</strong>
             </button>
           </li>)}</ul>
         </div>}
+        {selected && (selected.stripeInvoiceId || selected.postingTransactionId || Boolean(selected.payments?.length)) &&
+          <p className="invoice-outstanding"><strong>{money(selected.amountRemainingMinor, selected.currency)}</strong> outstanding</p>}
       </>}
       confirmation={applyingPayment && selected ? <InvoicePaymentForm currency={selected.currency}
         scale={scale(selected.currency)} remaining={selected.amountRemainingMinor} revision={selected.revision}

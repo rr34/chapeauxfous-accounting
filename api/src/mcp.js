@@ -717,7 +717,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   });
   const invoiceAccountPaths = ["/receivable_account_id", "/lines/*/account_id"];
   const paymentOutput = z.object({
-    id: z.uuid(), amountMinor: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
+    id: z.guid(), amountMinor: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
+    description: z.string().nullable(), receivingAccountNames: z.array(z.string()),
   });
   const paymentCreditOutput = z.object({
     lineItemId: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
@@ -748,7 +749,7 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   }, (input) => safeToolResult(() => operation(input)));
   invoiceTool("list_invoices", {
     title: "List invoices",
-    description: "List compact saved invoices newest number first. Use invoice_number by itself to read one exact customer-facing invoice number, including its lines and current Stripe state. The text filter supports payer, email, description, and Stripe ID. Use invoice_id for an existing Accounting object binding. Refer to invoices by invoiceNumber when speaking to the user. If refreshFailed is true, Stripe status and amounts are the last saved values.",
+    description: "List compact saved invoices newest number first. Use invoice_number by itself to read one exact customer-facing invoice number, including its lines, linked ledger payments, and current Stripe state. Payment descriptions come from the A/R posting memo or payment transaction description. Receiving account names identify the asset accounts debited by the receipt. The text filter supports payer, email, description, and Stripe ID. Use invoice_id for an existing Accounting object binding. Refer to invoices by invoiceNumber when speaking to the user. If refreshFailed is true, Stripe status and amounts are the last saved values.",
     inputSchema: { invoice_id: invoiceId.optional(), cursor: invoiceId.optional(),
       invoice_number: z.number().int().positive().optional(),
       text: z.string().trim().min(1).max(255).optional(),
