@@ -2234,7 +2234,8 @@ type PostingAccountReview = {
   selectedCount: number;
   transactionCount: number;
   splitCount: number;
-  blockers: { reconciled: number; invoices: number; questions: number; statements: number };
+  invoiceCount: number;
+  blockers: { reconciled: number; invoices: number; invoiceDestinations: number; questions: number; statements: number };
   blockedTransactionIds: number[];
 };
 
@@ -3071,10 +3072,12 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       {bulkReview && <div className="register-bulk-result" role="status">
         <p>{bulkReview.splitCount === 0 ? "No selected transactions have a split in the source account."
           : `${bulkReview.splitCount} ${bulkReview.splitCount === 1 ? "split" : "splits"} in ${bulkReview.transactionCount} of ${bulkReview.selectedCount} selected transactions match.`}</p>
+        {bulkReview.invoiceCount > 0 && <p>Includes billing splits from {bulkReview.invoiceCount} posted {bulkReview.invoiceCount === 1 ? "invoice" : "invoices"}.</p>}
         {bulkReview.blockedTransactionIds.length > 0 ? <>
           <p>Protected splits block this batch.</p>
           <ul>{([
-            ["Reconciled", bulkReview.blockers.reconciled], ["Invoice-linked", bulkReview.blockers.invoices],
+            ["Reconciled", bulkReview.blockers.reconciled], ["Protected invoice posting or payment", bulkReview.blockers.invoices],
+            ["Destination ineligible for invoice billing", bulkReview.blockers.invoiceDestinations],
             ["Accounting question", bulkReview.blockers.questions], ["Statement evidence", bulkReview.blockers.statements],
           ] as const).filter(([, count]) => count > 0).map(([label, count]) => <li key={label}>{label} · {count}</li>)}</ul>
           <button type="button" className="secondary" onClick={() => {
