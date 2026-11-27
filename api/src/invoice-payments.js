@@ -120,11 +120,12 @@ export async function readInvoicePayments(db, invoiceId) {
       });
     }
     if (row.receiving_account_id != null) {
-      payments.get(row.payment_id).receivingAccounts.set(row.receiving_account_id, row.receiving_account_name);
+      payments.get(row.payment_id).receivingAccounts.set(Number(row.receiving_account_id), row.receiving_account_name);
     }
   }
   return [...payments.values()].map(({ receivingAccounts, ...payment }) => ({
     ...payment, receivingAccountNames: [...receivingAccounts.values()],
+    receivingAccounts: [...receivingAccounts].map(([accountId, accountName]) => ({ accountId, accountName })),
   }));
 }
 

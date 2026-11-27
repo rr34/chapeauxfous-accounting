@@ -7,6 +7,7 @@ import type { Account } from "./types";
 export type InvoicePayment = {
   id: string; transactionId: number; amountMinor: number; date: string;
   description?: string | null; receivingAccountNames?: string[];
+  receivingAccounts?: { accountId: number; accountName: string }[];
 };
 export type InvoicePaymentCredit = {
   lineItemId: number; transactionId: number; date: string; description: string | null;

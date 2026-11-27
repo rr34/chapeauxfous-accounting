@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { accountFullNames } from "./account-names";
 import { api, fetchInvoicePdf, uploadInvoiceReceipt } from "./api";
 import { decimalToUnits, unitsToDecimal } from "./money";
 import type { Account } from "./types";
@@ -109,6 +110,7 @@ async function finishStripeReturn(token: string) {
 export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPostingChanged }: {
   token: string; accounts: Account[]; onOpenPosting: (id: number) => Promise<void>; onPostingChanged: () => Promise<void>;
 }) {
+  const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
   const [connection, setConnection] = useState<StripeConnection | null>(null);
   const [page, setPage] = useState<Page>({ objects: [], nextCursor: null });
   const [filter, setFilter] = useState("");
@@ -340,15 +342,21 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
         {selected?.refreshFailed && <p className="error">Stripe could not be refreshed. Showing the last saved status.</p>}
         {selected?.payments && selected.payments.length > 0 && <div>
           <h3>Payments</h3>
-          <ul className="invoice-list invoice-payment-list">{selected.payments.map((payment) => <li key={payment.id}>
-            <button type="button" className="secondary invoice-payment-row" disabled={disabled || dirty}
-              onClick={() => void run(() => onOpenPosting(payment.transactionId))}>
-              <time dateTime={payment.date}>{payment.date}</time>
-              <span className="invoice-payment-description">{payment.description || "Payment"}</span>
-              <span className="invoice-payment-account">{payment.receivingAccountNames?.join(", ") || "Receiving account unavailable"}</span>
-              <strong className="invoice-payment-amount">{money(payment.amountMinor, selected.currency)}</strong>
-            </button>
-          </li>)}</ul>
+          <ul className="invoice-list invoice-payment-list">{selected.payments.map((payment) => {
+            const names = payment.receivingAccounts?.map(({ accountId, accountName }) => fullAccountNames.get(accountId) ?? accountName)
+              ?? payment.receivingAccountNames ?? [];
+            return <li key={payment.id}>
+              <button type="button" className="invoice-payment-row" disabled={disabled || dirty}
+                onClick={() => void run(() => onOpenPosting(payment.transactionId))}>
+                <time dateTime={payment.date}>{payment.date}</time>
+                <span className="invoice-payment-description">{payment.description || "Payment"}</span>
+                <span className="invoice-payment-account" title={names.join("\n") || undefined}>
+                  {names.join(", ") || "Receiving account unavailable"}
+                </span>
+                <strong className="invoice-payment-amount">{money(payment.amountMinor, selected.currency)}</strong>
+              </button>
+            </li>;
+          })}</ul>
         </div>}
         {selected && (selected.stripeInvoiceId || selected.postingTransactionId || Boolean(selected.payments?.length)) &&
           <p className="invoice-outstanding"><strong>{money(selected.amountRemainingMinor, selected.currency)}</strong> outstanding</p>}

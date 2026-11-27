@@ -719,6 +719,8 @@ export function createAccountingMcpServer({ personId, pool, artifactRoot, eviden
   const paymentOutput = z.object({
     id: z.guid(), amountMinor: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),
     description: z.string().nullable(), receivingAccountNames: z.array(z.string()),
+    receivingAccounts: z.array(z.object({ accountId: invoiceAccountId, accountName: z.string() }))
+      .describe("Exact ledger account IDs and account names for asset accounts debited by the receipt."),
   });
   const paymentCreditOutput = z.object({
     lineItemId: z.number().int().positive(), transactionId: z.number().int().positive(), date: z.iso.date(),

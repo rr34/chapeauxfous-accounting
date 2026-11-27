@@ -55,7 +55,7 @@ export default function AccountCombobox({ value, choices, onChange, label, place
     setActiveIndex(-1);
   };
 
-  return <div className="account-combobox" ref={wrapperRef} onBlur={(event) => {
+  return <div className="account-combobox" ref={wrapperRef} title={displayLabel || undefined} onBlur={(event) => {
     if (!event.relatedTarget || event.currentTarget.contains(event.relatedTarget)) return;
     setOpen(false);
     setActiveIndex(-1);

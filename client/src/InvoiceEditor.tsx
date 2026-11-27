@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import AccountCombobox from "./AccountCombobox";
 import { accountFullNames } from "./account-names";
 import { decimalToUnits } from "./money";
@@ -62,6 +62,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
   const payerEditable = editable || mode === "payer";
   const accountsEditable = editable || mode === "accounts";
   const receiptsEditable = mode !== "accounts";
+  const [openReceiptLine, setOpenReceiptLine] = useState<string | null>(null);
   const selectable = accounts.filter((account) => !account.placeholder && account.archivedAt == null
     && account.currencyCode === draft.currency);
   const accountNames = accountFullNames(accounts);
@@ -108,7 +109,9 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           <div className="invoice-header-field"><span>Total</span><strong>{editable ? total : savedTotal ?? total}</strong></div>
         </div>
         <div className="invoice-header-row invoice-header-account">
-          <label>Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
+          <label title={draft.receivableAccountId == null
+            ? "Default Accounts Receivable" : accountNames.get(draft.receivableAccountId)}>
+            Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable || receivableAccountLocked}
             onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
             <option value="" disabled={!creating}>Default Accounts Receivable</option>
             {selectable.filter((account) => account.type === "asset" && !account.suspense)
@@ -132,6 +135,10 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             <textarea aria-label={`Description for line ${index + 1}`} rows={1} value={line.description}
               maxLength={1000} readOnly={!editable}
               onChange={(event) => setLine(line.key, { description: event.target.value })} />
+            {receiptsEditable && !line.receiptRef && <button className="secondary invoice-line-receipt-toggle" type="button"
+              aria-label={`Add receipt to line ${index + 1}`} aria-expanded={openReceiptLine === line.key}
+              aria-controls={openReceiptLine === line.key ? `line-receipt-${line.key}` : undefined}
+              onClick={() => setOpenReceiptLine((current) => current === line.key ? null : line.key)}>+ receipt</button>}
             <AccountCombobox id={`line-account-${line.key}`} label={`Line account for line ${index + 1}`}
               placeholder="Account"
               value={line.accountId == null ? "" : String(line.accountId)} choices={lineAccountChoices}
@@ -141,14 +148,21 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             <input className="invoice-line-amount" aria-label={`Amount for line ${index + 1} (${draft.currency || "currency"})`}
               inputMode="decimal" value={line.amount} placeholder="0.00" readOnly={!editable}
               onChange={(event) => setLine(line.key, { amount: event.target.value })} />
-            {editable && index >= (existingLineCount ?? 0) && <button className="secondary" type="button"
+            {editable && index >= (existingLineCount ?? 0) && <button className="secondary invoice-line-remove" type="button"
               aria-label={`Remove line ${index + 1}`} title="Remove line"
               onClick={() => onChange({ ...draft, lines: draft.lines.filter((entry) => entry.key !== line.key) })}>×</button>}
           </div>
-          {(receiptsEditable || line.receiptRef) && <div className="invoice-line-references">
+          {(line.receiptRef || (receiptsEditable && openReceiptLine === line.key)) &&
+            <div className="invoice-line-references" id={`line-receipt-${line.key}`}>
             <select aria-label={`Receipt for line ${index + 1}`}
               value={line.receiptRef ?? ""} disabled={!receiptsEditable}
-              onChange={(event) => onReceiptChange(line.key, event.target.value || null)}>
+              onChange={(event) => {
+                const receiptRef = event.target.value || null;
+                if (!receiptRef && line.receiptRef) {
+                  setOpenReceiptLine((current) => current === line.key ? null : current);
+                }
+                onReceiptChange(line.key, receiptRef);
+              }}>
               <option value="">No receipt</option>
               {line.receiptRef && !receipts.some((file) => file.sourceRef === line.receiptRef) &&
                 <option value={line.receiptRef}>{line.receiptRef.startsWith("agent-slayer:")

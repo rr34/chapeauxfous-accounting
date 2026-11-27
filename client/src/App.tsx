@@ -3075,7 +3075,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                     {splitAccount ? signedAccountMovement(decimalToUnits(line.amountDecimal, splitAccount.scale), splitAccount)
                       : `${line.amountDecimal} ${account.currencyCode}`}</span>;
                 })}</td>
-                <td>{otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
+                <td title={otherAccounts.join("\n") || undefined}>
+                  {otherAccounts.length === 1 ? otherAccounts[0] : otherAccounts.length > 1 ? "Split" : "—"}</td>
                 <td className="amount balance">{row.row.decision === "include"
                   ? unitsToDecimal(row.projectedBalanceUnits, account.scale) : ""}</td>
                 <td></td>
@@ -3097,17 +3098,19 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                     ? movementEffectClass(amountUnits, splitAccount.type) : ""}`}>
                     {!line.thisAccount && splitAccount && amountUnits
                       ? signedAccountMovement(amountUnits, splitAccount) : !line.thisAccount ? line.amountDecimal : ""}</td>
-                  <td><strong>{line.accountFullName}</strong></td><td></td><td></td>
+                  <td title={line.accountFullName}><strong>{line.accountFullName}</strong></td><td></td><td></td>
                 </tr>;
               })}
             </Fragment>;
           }
           const { entry } = row;
-          const counterpartNames = [...new Map(entry.splits
+          const counterpartAccounts = [...new Map(entry.splits
             .filter((split) => split.accountId !== account.id)
-            .map((split) => [split.accountId, split.accountName])).values()];
-          const counterpartLabel = counterpartNames.length === 0 ? "—"
-            : counterpartNames.length === 1 ? counterpartNames[0] : "Split";
+            .map((split) => [split.accountId, split])).values()];
+          const counterpartLabel = counterpartAccounts.length === 0 ? "—"
+            : counterpartAccounts.length === 1 ? counterpartAccounts[0].accountName : "Split";
+          const counterpartTitle = counterpartAccounts
+            .map((split) => fullAccountNames.get(split.accountId) ?? split.accountName).join("\n");
           const suspenseGroup = suspenseGroupStartByLineItemId.get(entry.lineItemId);
           const rowSuspenseGroup = suspenseGroupByLineItemId.get(entry.lineItemId);
           const suspenseGroupLineIds = suspenseGroup?.rows.map((candidate) => candidate.entry.lineItemId) ?? [];
@@ -3224,7 +3227,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
                 {signedAccountMovement(row.totalAmountUnits, account)}</td>
               <td />
-              <td className={view === "journal" ? undefined : "register-other-account-summary"}>
+              <td className={view === "journal" ? undefined : "register-other-account-summary"}
+                title={view === "journal" ? undefined : counterpartTitle || undefined}>
                 {view === "journal" ? <span className="register-transaction-label">Transaction</span>
                   : counterpartLabel}</td>
               <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
@@ -3249,7 +3253,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   <td className={`amount ${splitAccount && !isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
                     {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
-                  <td><strong>{split.accountName}</strong></td><td></td><td></td>
+                  <td title={fullAccountNames.get(split.accountId) ?? split.accountName}><strong>{split.accountName}</strong></td><td></td><td></td>
                 </tr>;
               })}
             {!newRowsAtTop && rowBalanceForm}

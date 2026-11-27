@@ -39,7 +39,8 @@ test("historical invoices show ledger payment links without an app-issued postin
   assert.equal(invoice.postingTransactionId, 90);
   assert.deepEqual(invoice.payments, [
     { id: paymentId, transactionId: 16573, amountMinor: 49800, date: "2025-09-09",
-      description: "Payment memo", receivingAccountNames: ["Checking", "Savings"] },
+      description: "Payment memo", receivingAccountNames: ["Checking", "Savings"],
+      receivingAccounts: [{ accountId: 12, accountName: "Checking" }, { accountId: 13, accountName: "Savings" }] },
   ]);
 });
 
