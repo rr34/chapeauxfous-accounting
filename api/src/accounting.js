@@ -772,7 +772,7 @@ export async function updateTransaction({ personId, transactionId, description, 
     await requireAccessibleCurrency(connection, personId, valuationCurrencyId);
 
     const [existingRows] = await connection.query(
-      `SELECT line_item_id, account_id, amount_units, value_units, reconciliation_state,
+      `SELECT line_item_id, account_id, amount_units, value_units, reconciliation_state, memo,
               EXISTS (SELECT 1 FROM accounting_invoice_payments p WHERE p.line_item_id = line_items.line_item_id) AS has_invoice_payment
          FROM line_items
         WHERE transaction_id = ?
@@ -797,12 +797,19 @@ export async function updateTransaction({ personId, transactionId, description, 
     }
 
     const reconciledRows = existingRows.filter((row) => row.reconciliation_state === "reconciled");
-    for (const existing of existingRows.filter((row) => Boolean(row.has_invoice_payment))) {
+    const invoicePayments = existingRows.filter((row) => Number(row.has_invoice_payment));
+    const protectedPaymentIds = new Set(invoicePayments.map((row) => Number(row.line_item_id)));
+    if (invoicePayments.length && Number(transactionRows[0].valuation_currency_id) !== Number(valuationCurrencyId)) {
+      throw applicationError("A transaction applied to an invoice must keep its valuation currency.", 409, "INVOICE_PAYMENT_LINE_LOCKED");
+    }
+    for (const existing of invoicePayments) {
       const submitted = lineItems.find((line) => Number(line.id) === Number(existing.line_item_id));
       if (!submitted || Number(submitted.accountId) !== Number(existing.account_id)
         || integerString(submitted.amountUnits, "amountUnits") !== String(existing.amount_units)
-        || (submitted.valueUnits != null && integerString(submitted.valueUnits, "valueUnits") !== String(existing.value_units))) {
-        throw applicationError("A line applied to an invoice must keep its account and amount.", 409, "INVOICE_PAYMENT_LINE_LOCKED");
+        || (Object.hasOwn(submitted, "memo") && optionalBoundedText(submitted.memo, "line memo", 16000) !== (existing.memo?.trim() || null))
+        || (submitted.valueUnits != null && integerString(submitted.valueUnits, "valueUnits")
+          !== String(existing.value_units ?? existing.amount_units))) {
+        throw applicationError("Edit the applied payment through its invoice.", 409, "INVOICE_PAYMENT_LINE_LOCKED");
       }
     }
     if (reconciledRows.length) {
@@ -837,6 +844,7 @@ export async function updateTransaction({ personId, transactionId, description, 
     );
 
     for (const line of lineItems) {
+      if (line.id != null && protectedPaymentIds.has(Number(line.id))) continue;
       const accountId = Number(line.accountId);
       const amountUnits = integerString(line.amountUnits, "amountUnits");
       const [accountRows] = await connection.query(

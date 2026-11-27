@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { invoicePdfFilename, renderInvoicePdf } from "./invoice-pdf.js";
 import { invoicePaymentInput } from "./invoice-payments.js";
+import { readLedgerInvoiceLinks } from "./invoice-ledger.js";
 import { searchTransactionsPage } from "./transaction-search.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
@@ -208,6 +209,9 @@ app.get("/api/invoices/:id/payment-credits", ...invoiceRoute(async (owner, req) 
   credits: await invoices.paymentCredits(owner, invoiceId.parse(req.params.id),
     z.string().trim().min(1).max(255).optional().parse(req.query.text),
     z.coerce.number().int().positive().optional().parse(req.query.transactionId)),
+})));
+app.get("/api/invoices/:id/payment-deposit/:lineItemId", ...invoiceRoute(async (owner, req) => ({
+  options: await invoices.paymentDeposit(owner, invoiceId.parse(req.params.id), z.coerce.number().int().positive().parse(req.params.lineItemId)),
 })));
 app.post("/api/invoices/:id/payments", ...invoiceRoute((owner, req) =>
   invoices.applyPayment(owner, invoiceId.parse(req.params.id), invoicePaymentInput.parse(req.body))));
@@ -505,7 +509,12 @@ app.get("/api/transactions", requireAuth, async (req, res, next) => {
 });
 
 app.get("/api/transactions/:transactionId", requireAuth, async (req, res, next) => {
-  try { res.json({ transaction: await getTransaction(pool, req.auth.personId, Number(req.params.transactionId)) }); } catch (error) { next(error); }
+  try {
+    const owner = req.auth.personId;
+    const transaction = await getTransaction(pool, owner, Number(req.params.transactionId));
+    const invoiceLinks = await readLedgerInvoiceLinks(pool, owner, transaction.id);
+    res.json({ transaction: { ...transaction, invoiceLinks } });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/transactions", requireAuth, async (req, res, next) => {

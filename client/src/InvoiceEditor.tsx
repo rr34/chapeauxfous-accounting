@@ -109,7 +109,7 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
           <div className="invoice-header-field"><span>Total</span><strong>{editable ? total : savedTotal ?? total}</strong></div>
         </div>
         <div className="invoice-header-row invoice-header-account">
-          <label title={draft.receivableAccountId == null
+          <label id="invoice-receivable-account" tabIndex={-1} title={draft.receivableAccountId == null
             ? "Default Accounts Receivable" : accountNames.get(draft.receivableAccountId)}>
             Accounts Receivable<select value={draft.receivableAccountId ?? ""} disabled={!accountsEditable}
             onChange={(event) => onChange({ ...draft, receivableAccountId: Number(event.target.value) || undefined })}>
@@ -129,7 +129,8 @@ export default function InvoiceEditor({ draft, existingLineCount, invoiceNumber,
             {editable && <button className="secondary" type="button" disabled={draft.lines.length >= 100} onClick={addLine}>Add line</button>}
           </div></div>
         {receiptsEditable && !editable && draft.lines.length > 0 && <small>Receipt changes save automatically.</small>}
-        <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card" key={line.key}>
+        <div className="invoice-line-list">{draft.lines.map((line, index) => <article className="invoice-line-card"
+          key={line.key} id={`invoice-line-${line.key}`} tabIndex={-1}>
           <span className="invoice-line-number">{index + 1}.</span>
           <div className="invoice-line-main">
             <textarea aria-label={`Description for line ${index + 1}`} rows={1} value={line.description}

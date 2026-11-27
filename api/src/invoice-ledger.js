@@ -20,6 +20,27 @@ function invoiceLineId(line) {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
+export async function readLedgerInvoiceLinks(db, owner, transactionId) {
+  const [rows] = await db.execute(`SELECT i.invoice_id, i.invoice_number, i.currency, li.line_item_id, li.source_id,
+      li.account_id, i.receivable_account_id, NULL AS payment_id, NULL AS amount_minor
+    FROM accounting_invoices i JOIN line_items li ON li.transaction_id = i.ledger_transaction_id
+    WHERE i.owner_person_id = ? AND i.ledger_transaction_id = ?
+    UNION ALL
+    SELECT i.invoice_id, i.invoice_number, i.currency, li.line_item_id, li.source_id,
+      li.account_id, i.receivable_account_id, p.payment_id, p.amount_minor
+    FROM accounting_invoice_payments p JOIN accounting_invoices i USING (invoice_id)
+    JOIN line_items li ON li.line_item_id = p.line_item_id
+    WHERE i.owner_person_id = ? AND li.transaction_id = ?
+    ORDER BY invoice_number, line_item_id, payment_id`, [owner, transactionId, owner, transactionId]);
+  return rows.map((line) => ({
+    invoiceId: line.invoice_id, invoiceNumber: Number(line.invoice_number), lineItemId: Number(line.line_item_id),
+    ...(line.payment_id == null ? {
+      kind: "posting",
+      invoiceLineId: Number(line.account_id) === Number(line.receivable_account_id) ? null : invoiceLineId(line),
+    } : { kind: "payment", paymentId: line.payment_id, amountMinor: Number(line.amount_minor), currency: line.currency }),
+  }));
+}
+
 export async function readInvoiceLines(db, row, transaction, lock = false) {
   if (!transaction) return [];
   const [lines] = await db.execute(`SELECT li.line_item_id, li.source_id, li.memo AS description,

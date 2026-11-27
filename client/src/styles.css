@@ -221,3 +221,8 @@ input:focus, select:focus { outline: 2px solid #9eb49f; border-color: #69876c; }
 .invoice-payment-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; padding: .45rem .65rem; border-left: 3px solid #69876c; background: #e8f0e5; }
 .ledger-invoice-payment, .ledger-invoice-payment-splits { display: grid; justify-items: start; gap: .45rem; padding: .35rem 0; }
 .ledger-invoice-payment p { margin: 0; }
+.ledger-invoice-link { display: block; padding: .2rem 0; text-align: left; text-decoration: underline; }
+.invoice-line-card:focus, #invoice-receivable-account:focus, .invoice-payment-row:focus {
+  outline: 2px solid #69876c;
+  outline-offset: -2px;
+}

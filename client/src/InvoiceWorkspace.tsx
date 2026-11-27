@@ -127,6 +127,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
   const [issueDate, setIssueDate] = useState<string | null>(null);
   const [applyingPayment, setApplyingPayment] = useState(false);
   const [paymentCredit, setPaymentCredit] = useState<InvoicePaymentCredit | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -169,18 +170,31 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
       .then(({ invoice }) => {
         if (!current) return;
         showInvoice(invoice);
+        setFocusId(paymentReturn.focusId ?? null);
         if (paymentReturn.credit && invoice.status === "open" && invoice.amountRemainingMinor > 0
-          && invoice.postingTransactionId != null && !invoice.stripeInvoiceId) {
+          && invoice.postingTransactionId != null && !invoice.stripeInvoiceId
+          && paymentReturn.credit.receivableAccountId === invoice.receivableAccountId) {
           setPaymentCredit(paymentReturn.credit);
           setApplyingPayment(true);
         } else if (paymentReturn.credit) {
-          setError("This invoice no longer accepts ledger payments.");
+          setError("The invoice changed while you were browsing. Select the deposit again if the invoice is still open.");
         }
       })
       .catch((error) => { if (current) setError(errorMessage(error)); })
       .finally(() => { if (current) onPaymentReturnHandled(null); });
     return () => { current = false; };
   }, [token, paymentReturn, onPaymentReturnHandled]);
+
+  useEffect(() => {
+    if (!focusId || busy || paymentReturn) return;
+    const frame = requestAnimationFrame(() => {
+      const target = document.getElementById(focusId);
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: "nearest" });
+      setFocusId(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusId, busy, paymentReturn]);
 
   async function run(work: () => Promise<void>) {
     setBusy(true);
@@ -204,7 +218,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
 
   function findPaymentInLedger(invoice: Invoice) {
     onFindPayment({ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber,
-      currency: invoice.currency, scale: scale(invoice.currency) });
+      currency: invoice.currency, scale: scale(invoice.currency), receivableAccountId: invoice.receivableAccountId });
   }
 
   function showInvoice(invoice: Invoice) {
@@ -384,7 +398,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
             const names = payment.receivingAccounts?.map(({ accountId, accountName }) => fullAccountNames.get(accountId) ?? accountName)
               ?? payment.receivingAccountNames ?? [];
             return <li key={payment.id}>
-              <button type="button" className="invoice-payment-row" disabled={disabled || dirty}
+              <button type="button" id={`invoice-payment-${payment.id}`} className="invoice-payment-row" disabled={disabled || dirty}
                 onClick={() => void run(() => onOpenPosting(payment.transactionId))}>
                 <time dateTime={payment.date}>{payment.date}</time>
                 <span className="invoice-payment-description">{payment.description || "Payment"}</span>

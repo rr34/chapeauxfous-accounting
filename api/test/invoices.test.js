@@ -7,6 +7,7 @@ process.env.MYSQL_HOST = "127.0.0.1";
 process.env.MYSQL_USER = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 const { createInvoiceService } = await import("../src/invoices.js");
+const { readLedgerInvoiceLinks, readInvoiceLines } = await import("../src/invoice-ledger.js");
 const { createAccountingMcpServer } = await import("../src/mcp.js");
 const { extractDeferredActionReference } = await import("../../../agent-chapeaux-fous/src/deferred-actions.mjs");
 
@@ -23,6 +24,28 @@ const accounts = [
   { account_id: 12, type: "expense", name: "Suspense", is_suspense: 1, account_currency_id: 1, scale: 2 },
   { account_id: 13, type: "income", name: "Revenue", is_suspense: 0, account_currency_id: 1, scale: 2 },
 ];
+
+test("ledger invoice links identify exact billing and allocation rows without claiming the bank line", async () => {
+  const base = { invoice_id: id, invoice_number: "27", currency: "USD", receivable_account_id: "11" };
+  const charge = { ...base, line_item_id: "90", account_id: "11", payment_id: null };
+  const billing = { ...base, line_item_id: "91", account_id: "13", payment_id: null, amount_units: "-500", scale: 2 };
+  const credit = { ...base, line_item_id: "92", account_id: "11", payment_id: revision, amount_minor: "500" };
+  const db = { async execute(sql, args) {
+    if (sql.includes("UNION ALL")) {
+      assert.deepEqual(args, [7, 42, 7, 42]);
+      assert.match(sql, /JOIN line_items li ON li.line_item_id = p.line_item_id/);
+      return [[charge, billing, credit]];
+    }
+    return [[billing]];
+  } };
+  const [invoiceLine] = await readInvoiceLines(db, base, { transaction_id: 42 });
+  const links = await readLedgerInvoiceLinks(db, 7, 42);
+  assert.deepEqual(links, [
+    { invoiceId: id, invoiceNumber: 27, lineItemId: 90, kind: "posting", invoiceLineId: null },
+    { invoiceId: id, invoiceNumber: 27, lineItemId: 91, kind: "posting", invoiceLineId: invoiceLine.invoice_line_id },
+    { invoiceId: id, invoiceNumber: 27, lineItemId: 92, kind: "payment", paymentId: revision, amountMinor: 500, currency: "USD" },
+  ]);
+});
 
 test("drafts can change recipient and append a line, while local paid invoices only accept recipient correction", async () => {
   const row = {

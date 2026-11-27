@@ -207,6 +207,11 @@ export type TransactionSummary = {
   lineItemCount: number;
 };
 
+export type LedgerInvoiceLink = { invoiceId: string; invoiceNumber: number; lineItemId: number } & (
+  { kind: "posting"; invoiceLineId: string | null } |
+  { kind: "payment"; paymentId: string; amountMinor: number; currency: string }
+);
+
 export type TransactionDetail = {
   id: number;
   date: string;
@@ -214,6 +219,7 @@ export type TransactionDetail = {
   description: string | null;
   state: string;
   valuationCurrencyId: number;
+  invoiceLinks?: LedgerInvoiceLink[];
   lineItems: Array<{
     id: number;
     amountUnits: string;

@@ -6,13 +6,13 @@ import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs"
 import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import InvoiceWorkspace from "./InvoiceWorkspace";
-import LedgerInvoicePaymentPicker from "./LedgerInvoicePaymentPicker";
+import LedgerInvoicePaymentPicker, { isInvoiceDeposit } from "./LedgerInvoicePaymentPicker";
 import type { InvoicePaymentCredit, InvoicePaymentReturn, InvoicePaymentTarget } from "./InvoicePaymentForm";
 import AccountCombobox from "./AccountCombobox";
 import { accountFullNames } from "./account-names";
 import type {
   Account, AccountLedgerEntry, ApiTokenCredential, BalanceAssertion, CreatedApiToken, Currency,
-  CanonicalImportRecord, CurrencyType, EvidenceFile, TransactionDetail, TransactionImportException,
+  CanonicalImportRecord, CurrencyType, EvidenceFile, LedgerInvoiceLink, TransactionDetail, TransactionImportException,
   TransactionImportJob, TransactionImportReview, TransactionSummary, User,
 } from "./types";
 
@@ -769,7 +769,7 @@ function TransactionEditorModal({ eyebrow, title, onClose, children }: {
 function TransactionCard({ accounts, currencies, initialAccountId, initialTransaction = null,
   initialLineItemId = null, initialDateEditorOpen = false,
   knownBalanceAction = null, evidenceFiles = [],
-  layout = "standard", token, onSaved, onCancel, onDelete }: {
+  layout = "standard", token, onSaved, onCancel, onDelete, onOpenInvoiceLinks }: {
   accounts: Account[]; currencies: Currency[]; initialAccountId: number | null;
   initialTransaction?: TransactionDetail | null; initialLineItemId?: number | null;
   initialDateEditorOpen?: boolean;
@@ -778,10 +778,12 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
   layout?: "standard" | "register" | "register-edit"; token: string;
   onSaved: (saved: TransactionCardSave) => Promise<void>; onCancel?: () => void;
   onDelete?: () => void;
+  onOpenInvoiceLinks?: (links: LedgerInvoiceLink[]) => void;
 }) {
   const accountMap = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
   const currencyMap = useMemo(() => new Map(currencies.map((currency) => [currency.id, currency])), [currencies]);
   const fullNames = useMemo(() => accountFullNames(accounts), [accounts]);
+  const paymentLinks = initialTransaction?.invoiceLinks?.filter((link) => link.kind === "payment") ?? [];
   const initialAccount = accounts.find((account) => account.id === initialAccountId);
   const isRegisterEdit = layout === "register-edit" && initialTransaction != null;
   const blankLine = (accountId = ""): EditableLine => ({ id: null, accountId, amount: "", value: "", memo: "",
@@ -1105,6 +1107,16 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
       {activeLines.map((line, index) => {
         const isSelectedAccountLine = line.id === initialLineItemId;
         const isThisAccount = Number(line.accountId) === initialAccountId;
+        const links = paymentLinks.filter((link) => link.lineItemId === line.id);
+        if (links.length) return <tr className="register-inline-line register-transaction-card-line" key={line.id}>
+          <td><span className="register-line-marker" aria-hidden="true">↳</span></td>
+          <td>{line.memo}</td>
+          <td className="amount">{isThisAccount ? line.amount : ""}</td>
+          <td className="amount">{isThisAccount ? "" : line.amount}</td>
+          <td title={fullNames.get(Number(line.accountId))}>{fullNames.get(Number(line.accountId))}
+            <InvoiceLinksButton links={links} onOpen={onOpenInvoiceLinks} /></td>
+          <td /><td />
+        </tr>;
         return <Fragment key={line.id ?? `new-${index}`}>
           <tr className={`register-inline-line register-transaction-card-line ${isSelectedAccountLine ? "register-context-line" : ""} ${line.autoBalance ? "auto-balanced" : ""}`}>
             <td><span className="register-line-marker" aria-hidden="true">↳</span></td>
@@ -1132,6 +1144,7 @@ function TransactionCard({ accounts, currencies, initialAccountId, initialTransa
         <div className="register-inline-actions">
           <button type="button" className="secondary" onClick={addBalancingLine}>＋ Add line</button>
           <label className="register-inline-currency">Transaction value currency<select required value={valuationCurrencyId}
+            disabled={paymentLinks.length > 0}
             onChange={(event) => {
               const nextId = event.target.value ? Number(event.target.value) : "";
               setValuationCurrencyId(nextId);
@@ -1921,12 +1934,24 @@ type OpenPaymentPicker = {
   target: InvoicePaymentTarget; onChoose: (credit: InvoicePaymentCredit) => void;
 };
 
-function Ledger({ transactions, selected, onSelect, onClearSelection, onOpenInRegister, onVerify, onDelete, verification,
-  token, paymentPicker }: {
+function InvoiceLinksButton({ links, onOpen }: {
+  links: LedgerInvoiceLink[]; onOpen?: (links: LedgerInvoiceLink[]) => void;
+}) {
+  if (!links.length || !onOpen) return null;
+  return <button type="button" className="ledger-invoice-link link-button" onClick={(event) => {
+    event.stopPropagation();
+    onOpen(links);
+  }}>{links.length === 1 ? `Open invoice #${links[0].invoiceNumber}` : "Open linked invoices"}</button>;
+}
+
+function Ledger({ accounts, transactions, selected, onSelect, onClearSelection, onOpenInRegister, onVerify, onDelete, verification,
+  token, paymentPicker, onOpenInvoiceLinks }: {
+  accounts: Account[];
   transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void; onClearSelection: () => void;
   onOpenInRegister: (transaction: TransactionDetail) => void; onVerify: () => void;
   onDelete: (id: number) => void; verification: string;
   token: string; paymentPicker: OpenPaymentPicker | null;
+  onOpenInvoiceLinks: (links: LedgerInvoiceLink[]) => void;
 }) {
   type SearchPage = { transactions: Pick<TransactionSummary, "id" | "date" | "description" | "lineItemCount" | "state">[];
     nextCursor: string | null };
@@ -1934,6 +1959,8 @@ function Ledger({ transactions, selected, onSelect, onClearSelection, onOpenInRe
   const [search, setSearch] = useState<(SearchPage & { text: string }) | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const invoiceLinks = selected?.invoiceLinks ?? [];
+  const invoicePosting = invoiceLinks.find((link) => link.kind === "posting");
   async function findTransactions(query: string, cursor?: string) {
     setSearchError("");
     if (!cursor) onClearSelection();
@@ -1968,11 +1995,11 @@ function Ledger({ transactions, selected, onSelect, onClearSelection, onOpenInRe
     </div>
       <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p>
         {selected.transactionAt && <p>Source time (UTC): {selected.transactionAt}</p>}</div>
-      <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="secondary"
-        onClick={() => onOpenInRegister(selected)}>Open in register</button><button type="button" className="danger-link"
-          onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
-      {paymentPicker && <LedgerInvoicePaymentPicker key={`${paymentPicker.target.invoiceId}:${selected.id}`}
-        {...paymentPicker} transaction={selected} token={token} />}
+      <div className="detail-actions"><span>#{selected.id}</span>
+        {invoicePosting ? <InvoiceLinksButton links={[invoicePosting]} onOpen={onOpenInvoiceLinks} />
+          : <button type="button" className="secondary" onClick={() => onOpenInRegister(selected)}>Open in register</button>}
+        {!invoiceLinks.length && <button type="button" className="danger-link"
+          onClick={() => onDelete(selected.id)}>Delete transaction</button>}</div></div>
       {selected.mergedTransactions && selected.mergedTransactions.length > 0 && <details className="transaction-merge-provenance">
         <summary>Merged transfer source{selected.mergedTransactions.length === 1 ? "" : "s"}</summary>
         {selected.mergedTransactions.map((merged) => <p key={merged.absorbedTransactionId}>
@@ -1982,8 +2009,13 @@ function Ledger({ transactions, selected, onSelect, onClearSelection, onOpenInRe
         </p>)}
       </details>}
       {selected.lineItems.map((line) => <div className="detail-line" key={line.id}><div><strong>{line.accountName}</strong><small>{line.memo}</small>
+        <InvoiceLinksButton links={invoiceLinks.filter((link) => link.lineItemId === line.id)} onOpen={onOpenInvoiceLinks} />
         {line.tags.length > 0 && <div className="tag-list">{line.tags.map((tag) => <span key={`${tag.key}:${tag.value}`}>{tag.key}:{tag.value}</span>)}</div>}</div>
-        <b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
+        <div><b>{unitsToDecimal(line.amountUnits, line.scale)} {line.currencyCode}</b>
+          {paymentPicker && selected.state === "posted"
+            && isInvoiceDeposit(paymentPicker.target, accounts.find((account) => account.id === line.accountId), line.amountUnits)
+            && <LedgerInvoicePaymentPicker {...paymentPicker} lineItemId={line.id} token={token} />}
+        </div></div>)}</> : <p className="empty-state">Select a transaction to see its complete balanced entry.</p>}</div></div>
   </section>;
 }
 
@@ -2194,13 +2226,14 @@ function statementSummaryDateAmount(date: string | null, amountUnits: string | n
 }
 
 function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token,
-  openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged, paymentPicker }: {
+  openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged, paymentPicker, onOpenInvoiceLinks }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
   assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
   openTransaction: { transactionId: number; lineItemId: number } | null;
   onOpenTransactionHandled: () => void;
   onTransactionCreated: () => Promise<void>; onChanged: () => Promise<void>;
   paymentPicker: OpenPaymentPicker | null;
+  onOpenInvoiceLinks: (links: LedgerInvoiceLink[]) => void;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
   const [registerSort, setRegisterSort] = useState<RegisterSort>({ key: "date", direction: "desc" });
@@ -2702,8 +2735,20 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
       await onTransactionCreated(); setShowNewTransaction(false);
     }} />;
 
-  async function activateTransaction(entry: AccountLedgerEntry, openDateEditor = false) {
+  async function activateTransaction(entry: AccountLedgerEntry, openDateEditor = false, clickedLineId?: number) {
+    function openInvoiceForLine(transaction: TransactionDetail) {
+      if (paymentPicker) return false;
+      const lineIds = clickedLineId == null
+        ? new Set(entry.splits.filter((line) => line.accountId === account.id).map((line) => line.lineItemId))
+        : new Set([clickedLineId]);
+      lineIds.add(clickedLineId ?? entry.lineItemId);
+      const links = (transaction.invoiceLinks ?? []).filter((link) => lineIds.has(link.lineItemId));
+      if (!links.length) return false;
+      onOpenInvoiceLinks(links[0].kind === "posting" ? [links[0]] : links);
+      return true;
+    }
     if (selectedTransaction?.id === entry.transactionId) {
+      if (openInvoiceForLine(selectedTransaction)) return;
       if (selectedLineItemId === entry.lineItemId && openDateEditor) setDateEditorOpen(true);
       return;
     }
@@ -2716,6 +2761,7 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
     try {
       const result = await api<{ transaction: TransactionDetail }>(`/transactions/${entry.transactionId}`, {}, token);
       if (request !== selectionRequest.current) return;
+      if (openInvoiceForLine(result.transaction)) return;
       setSelectedTransaction(result.transaction); setSelectedLineItemId(entry.lineItemId);
       setDateEditorOpen(openDateEditor);
     } catch (nextError) {
@@ -3215,14 +3261,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
           </div>;
           const rowBalanceForm = showAddKnownBalance && knownBalanceFormMode === "add-row" && knownBalanceAnchorDate === entry.date
             && <tr className="register-known-balance-form-row"><td colSpan={7}>{knownBalanceForm}</td></tr>;
-          if (selectedTransaction?.id === entry.transactionId) {
+          if (selectedTransaction?.id === entry.transactionId && !paymentPicker) {
             return <Fragment key={entry.lineItemId}>
               {suspenseGroupHeader}
               {newRowsAtTop && rowBalanceForm}
-              {paymentPicker && <tr className="register-edit-transaction-row"><td colSpan={7}>
-                <LedgerInvoicePaymentPicker key={`${paymentPicker.target.invoiceId}:${selectedTransaction.id}`}
-                  {...paymentPicker} transaction={selectedTransaction} token={token} />
-              </td></tr>}
               <TransactionCard key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
@@ -3230,7 +3272,8 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 initialDateEditorOpen={dateEditorOpen}
                 evidenceFiles={entry.evidenceFiles}
                 knownBalanceAction={knownBalanceAction} layout="register-edit" token={token}
-                onDelete={() => setDeletingTransactionId(entry.transactionId)}
+                onDelete={selectedTransaction.invoiceLinks?.length ? undefined : () => setDeletingTransactionId(entry.transactionId)}
+                onOpenInvoiceLinks={onOpenInvoiceLinks}
                 onCancel={closeSelectedTransaction} onSaved={(saved) =>
                   finishTransactionCardSave(saved, rowSuspenseGroup, entry)} />
               {!newRowsAtTop && rowBalanceForm}
@@ -3272,7 +3315,13 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                 </small>}
                 {selectingTransactionId === entry.transactionId && <small>Opening transaction…</small>}</td>
               <td className={`amount ${movementEffectClass(row.totalAmountUnits, account.type)}`}>
-                {signedAccountMovement(row.totalAmountUnits, account)}</td>
+                {signedAccountMovement(row.totalAmountUnits, account)}
+                {paymentPicker && view !== "journal" && entry.splits.filter((line) => line.accountId === account.id
+                  && isInvoiceDeposit(paymentPicker.target, account, line.amountUnits)).map((line) =>
+                  <LedgerInvoicePaymentPicker key={line.lineItemId} {...paymentPicker} lineItemId={line.lineItemId}
+                    label={row.currentAccountLineCount > 1 ? signedAccountMovement(line.amountUnits, account) : undefined}
+                    token={token} />)}
+              </td>
               <td />
               <td className={view === "journal" ? undefined : "register-other-account-summary"}
                 title={view === "journal" ? undefined : counterpartTitle || undefined}>
@@ -3281,16 +3330,16 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
               <td className="amount balance">{unitsToDecimal(row.projectedBalanceUnits, account.scale)}</td>
               <td className="amount known-balance">{knownBalanceAction}</td>
             </tr>
-            {view !== "basic" && entry.splits
+            {(view !== "basic" || (paymentPicker && selectedTransaction?.id === entry.transactionId)) && entry.splits
               .filter((split) => view === "journal" || split.accountId !== account.id)
               .map((split) => {
                 const splitAccount = accountById.get(split.accountId);
                 const isThisAccount = split.accountId === account.id;
                 return <tr className="register-line-item-row selectable" key={split.lineItemId} tabIndex={0}
-                  onClick={() => void activateTransaction(entry)}
+                  onClick={() => void activateTransaction(entry, false, split.lineItemId)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault(); void activateTransaction(entry);
+                      event.preventDefault(); void activateTransaction(entry, false, split.lineItemId);
                     }
                   }}>
                   <td></td><td>{split.memo && <small>{split.memo}</small>}</td>
@@ -3300,7 +3349,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
                   <td className={`amount ${splitAccount && !isThisAccount
                     ? movementEffectClass(split.amountUnits, splitAccount.type) : ""}`}>
                     {!isThisAccount && splitAccount && signedAccountMovement(split.amountUnits, splitAccount)}</td>
-                  <td title={fullAccountNames.get(split.accountId) ?? split.accountName}><strong>{split.accountName}</strong></td><td></td><td></td>
+                  <td title={fullAccountNames.get(split.accountId) ?? split.accountName}><strong>{split.accountName}</strong>
+                    {paymentPicker && isInvoiceDeposit(paymentPicker.target, splitAccount, split.amountUnits)
+                      && <LedgerInvoicePaymentPicker {...paymentPicker} lineItemId={split.lineItemId} token={token} />}
+                  </td><td></td><td></td>
                 </tr>;
               })}
             {!newRowsAtTop && rowBalanceForm}
@@ -3817,6 +3869,7 @@ export default function App() {
   );
   const [pendingInvoicePayment, setPendingInvoicePayment] = useState<InvoicePaymentTarget | null>(null);
   const [paymentReturn, setPaymentReturn] = useState<InvoicePaymentReturn | null>(null);
+  const [invoiceLinkChoices, setInvoiceLinkChoices] = useState<LedgerInvoiceLink[]>([]);
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
@@ -3911,6 +3964,22 @@ export default function App() {
     selectWorkspaceView("invoices");
   }
 
+  function openLedgerInvoice(link: LedgerInvoiceLink) {
+    setInvoiceLinkChoices([]);
+    setPendingInvoicePayment(null);
+    setPaymentReturn({
+      invoiceId: link.invoiceId,
+      focusId: link.kind === "payment" ? `invoice-payment-${link.paymentId}`
+        : link.invoiceLineId ? `invoice-line-${link.invoiceLineId}` : "invoice-receivable-account",
+    });
+    selectWorkspaceView("invoices");
+  }
+
+  function openLedgerInvoiceLinks(links: LedgerInvoiceLink[]) {
+    if (links.length === 1) openLedgerInvoice(links[0]);
+    if (links.length > 1) setInvoiceLinkChoices(links);
+  }
+
   useEffect(() => {
     if (workspaceView === "invoices" && pendingInvoicePayment) {
       setPaymentReturn({ invoiceId: pendingInvoicePayment.invoiceId });
@@ -3989,7 +4058,7 @@ export default function App() {
     setImportJobs([]); setTransactions([]); setSelected(null); setWorkspaceView("chart");
     setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
     setOpenRegisterTransaction(null);
-    setPendingInvoicePayment(null); setPaymentReturn(null);
+    setPendingInvoicePayment(null); setPaymentReturn(null); setInvoiceLinkChoices([]);
   }
   async function refreshAfterTransaction() {
     await refresh();
@@ -4003,11 +4072,21 @@ export default function App() {
   }
   async function selectTransaction(id: number) {
     if (!token) return;
-    const result = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token); setSelected(result.transaction);
+    const { transaction } = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token);
+    const charge = transaction.invoiceLinks?.find((link) => link.kind === "posting");
+    if (charge && !pendingInvoicePayment) openLedgerInvoice(charge);
+    else setSelected(transaction);
   }
   function openTransactionInRegister(transaction: TransactionDetail) {
-    const line = transaction.lineItems.find((candidate) => accounts.some((account) => account.id === candidate.accountId));
-    if (!line) return;
+    const linkedLineIds = new Set(transaction.invoiceLinks?.map((link) => link.lineItemId));
+    const available = transaction.lineItems.filter((line) => !linkedLineIds.has(line.id)
+      && accounts.some((account) => account.id === line.accountId));
+    const line = available.find((candidate) => BigInt(candidate.amountUnits) > 0n) ?? available[0];
+    if (!line) {
+      setSelected(transaction);
+      selectWorkspaceView("activity");
+      return;
+    }
     const targetAccount = accounts.find((account) => account.id === line.accountId);
     if (!targetAccount) return;
     setOpenRegisterTransaction({ transactionId: transaction.id, lineItemId: line.id });
@@ -4054,7 +4133,7 @@ export default function App() {
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
       </nav>
       {pendingInvoicePayment && workspaceView !== "invoices" && <div className="invoice-payment-banner">
-        <span><strong>Applying payment to invoice #{pendingInvoicePayment.invoiceNumber}.</strong> Open the transaction that received the payment.</span>
+        <span><strong>Applying payment to invoice #{pendingInvoicePayment.invoiceNumber}.</strong> Find the money coming into your account and click Apply deposit.</span>
         <button type="button" className="secondary" onClick={() => finishPaymentBrowse()}>Cancel and return to invoice</button>
       </div>}
       </div>
@@ -4080,16 +4159,30 @@ export default function App() {
           ? <AccountRegister account={selectedAccount} accounts={accounts} currencies={currencies}
               entries={accountLedgerEntries} assertions={assertions}
               loading={accountLedgerLoading} error={accountLedgerError} token={token} paymentPicker={paymentPicker}
+              onOpenInvoiceLinks={openLedgerInvoiceLinks}
               openTransaction={openRegisterTransaction}
               onOpenTransactionHandled={() => setOpenRegisterTransaction(null)}
               onTransactionCreated={refreshAfterTransaction}
               onChanged={refreshAfterTransaction} />
-          : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
+          : <Ledger accounts={accounts} transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
               token={token} paymentPicker={paymentPicker} onClearSelection={() => setSelected(null)}
+              onOpenInvoiceLinks={openLedgerInvoiceLinks}
               onOpenInRegister={openTransactionInRegister}
               onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id],
                 deleteAccounts: false, deleteImportHistory: false })}
               onVerify={() => void verify()} verification={verification} />}</div></main>
+    {invoiceLinkChoices.length > 0 && <TransactionEditorModal eyebrow="Applied payments" title="Open an invoice"
+      onClose={() => setInvoiceLinkChoices([])}>
+      <div className="ledger-invoice-payment-splits">{invoiceLinkChoices.map((link) => {
+        const formatter = link.kind === "payment" ? new Intl.NumberFormat(undefined, { style: "currency", currency: link.currency }) : null;
+        const amount = formatter && link.kind === "payment"
+          ? formatter.format(link.amountMinor / 10 ** (formatter.resolvedOptions().maximumFractionDigits ?? 2)) : null;
+        return <button type="button" className="secondary"
+          key={link.kind === "payment" ? link.paymentId : link.lineItemId} onClick={() => openLedgerInvoice(link)}>
+          Invoice #{link.invoiceNumber}{amount && ` · ${amount} applied`}
+        </button>;
+      })}</div>
+    </TransactionEditorModal>}
     {showAgentAccess && <AgentAccessDialog loginToken={token} onClose={() => setShowAgentAccess(false)} />}
     {showCurrencyManager && <CurrencyManagerDialog currencies={currencies} accounts={accounts}
       token={token} onClose={() => setShowCurrencyManager(false)} onChanged={refresh} />}

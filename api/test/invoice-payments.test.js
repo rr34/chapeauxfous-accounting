@@ -6,7 +6,66 @@ process.env.MYSQL_HOST = "127.0.0.1";
 process.env.MYSQL_USER = "test";
 process.env.MYSQL_DATABASE = "accounting_test";
 const { createInvoiceService } = await import("../src/invoices.js");
+const { linkInvoiceDeposit, previewInvoiceDeposit } = await import("../src/invoice-payments.js");
 const { invoicePdfHtml } = await import("../src/invoice-pdf.js");
+
+test("a bank deposit can pay an invoice even if its available offset was booked as income", async () => {
+  const invoice = { invoice_id: randomUUID(), invoice_number: 7, owner_person_id: 7, currency: "USD",
+    amount_minor: 5000, amount_remaining_minor: 5000 };
+  const ar = { account_id: 2, account_currency_id: 1, scale: 2 };
+  const line = (line_item_id, account_id, amount_units, AccountName, AccountType) => ({
+    line_item_id, account_id, amount_units, value_units: amount_units, AccountName, AccountType, transaction_id: 77,
+    account_currency_id: 1, account_owner_person_id: 7, is_placeholder: 0, is_suspense: 0,
+    reconciliation_state: line_item_id === 10 ? "reconciled" : "unreconciled",
+    TransactionDate: "2026-11-20", description: "Customer deposit", memo: null,
+  });
+  const lines = [line(10, 1, "7500", "Checking", "asset"), line(11, 3, "-6500", "Sales", "income"),
+    line(12, 2, "-1000", "Receivables", "asset")];
+  const db = {
+    async execute(sql, args) {
+      if (sql.includes("FROM line_items deposit")) {
+        assert.deepEqual(args, [10, 7, 1]);
+        return [lines];
+      }
+      if (sql.includes("FROM accounting_invoice_payments")) return [[{ line_item_id: 12, amount_minor: 1000 }]];
+      if (sql.startsWith("UPDATE line_items")) {
+        assert.equal(args[2], 11);
+        [lines[1].amount_units, lines[1].value_units] = args;
+        return [[]];
+      }
+      if (sql.startsWith("INSERT INTO line_items")) {
+        assert.deepEqual(args, [77, "-5000", "-5000", null, 2]);
+        lines.push(line(13, 2, "-5000", "Receivables", "asset"));
+        return [{ insertId: 13 }];
+      }
+      assert.match(sql, /^UPDATE transactions/);
+      return [[]];
+    },
+    async query(sql) {
+      if (sql.includes("FROM transactions")) return [[{ valuation_currency_id: 1, TransactionState: "posted" }]];
+      if (sql.includes("FROM line_items")) return [lines];
+      assert.match(sql, /FROM xrates/);
+      return [[]];
+    },
+  };
+  const originalDeposit = { ...lines[0] };
+  const available = await previewInvoiceDeposit(db, invoice, ar, 10);
+  assert.deepEqual(available.map((option) => [option.depositLineItemId, option.lineItemId, option.accountName,
+    option.offsetAccountName, option.availableMinor, option.moveOffset]), [[10, 11, "Checking", "Sales", 6500, true]]);
+  const input = { line_item_id: 10, offset_line_item_id: 11, offset_account_id: 3, amount_minor: 5000 };
+  await assert.rejects(linkInvoiceDeposit(db, invoice, ar, { ...input, amount_minor: 6501 }, 6501n),
+    { code: "INVOICE_DEPOSIT_CHANGED" });
+  assert.deepEqual(await linkInvoiceDeposit(db, invoice, ar, input, 5000n), { lineItemId: 13, transactionId: 77 });
+  assert.deepEqual(lines[0], originalDeposit);
+  assert.equal(lines[1].amount_units, "-1500");
+  assert.deepEqual((await previewInvoiceDeposit(db, invoice, ar, 10)).map((option) => option.lineItemId), [13]);
+  assert.deepEqual(await linkInvoiceDeposit(db, invoice, ar, {
+    line_item_id: 10, offset_line_item_id: 13, offset_account_id: 2, amount_minor: 5000,
+  }, 5000n), { lineItemId: 13, transactionId: 77 });
+  assert.equal(lines.length, 4);
+  lines[1].reconciliation_state = "reconciled";
+  assert.deepEqual((await previewInvoiceDeposit(db, invoice, ar, 10)).map((option) => option.lineItemId), [13]);
+});
 
 test("historical invoices show ledger payment links without an app-issued posting", async () => {
   const id = randomUUID();

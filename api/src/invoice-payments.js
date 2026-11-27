@@ -11,7 +11,9 @@ export const recordInvoicePaymentInput = z.object({ ...paymentFields, method: z.
   receiving_account_id: z.number().int().positive(), payment_date: z.iso.date(),
   memo: z.string().trim().max(500).optional() });
 export const linkInvoicePaymentInput = z.object({ ...paymentFields, method: z.literal("link"), line_item_id: z.number().int().positive() });
-export const invoicePaymentInput = z.discriminatedUnion("method", [recordInvoicePaymentInput, linkInvoicePaymentInput]);
+const linkDepositInput = z.object({ ...paymentFields, method: z.literal("deposit"), line_item_id: z.number().int().positive(),
+  offset_line_item_id: z.number().int().positive(), offset_account_id: z.number().int().positive() });
+export const invoicePaymentInput = z.discriminatedUnion("method", [recordInvoicePaymentInput, linkInvoicePaymentInput, linkDepositInput]);
 
 const error = (message, code, status = 409) => Object.assign(new Error(message), { code, status });
 const minorScale = (currency) => new Intl.NumberFormat("en", { style: "currency", currency })
@@ -163,16 +165,103 @@ export async function linkInvoicePayment(db, row, ar, input, units) {
   const used = existing.reduce((sum, payment) => sum + invoiceMinorToLedgerUnits(payment.amount_minor, row.currency, ar.scale), 0n);
   const available = -BigInt(line.amount_units) - used;
   if (units > available) throw error("The payment exceeds the available amount on the ledger line.", "INVOICE_PAYMENT_EXCEEDS_CREDIT");
+  return settlePaymentCredit(db, row, ar, line, units, Boolean(Number(line.is_suspense)));
+}
+
+async function depositPaymentOptions(db, row, ar, depositId, lock = false) {
+  const [lines] = await db.execute(`SELECT li.line_item_id, li.transaction_id, li.account_id,
+      li.amount_units, li.value_units, li.memo, li.reconciliation_state, a.AccountName,
+      a.AccountType, a.account_currency_id, a.is_suspense, a.is_placeholder,
+      t.TransactionDate, t.description
+    FROM line_items deposit
+    JOIN transactions t ON t.transaction_id = deposit.transaction_id
+    JOIN line_items li ON li.transaction_id = t.transaction_id
+    JOIN accounts a ON a.account_id = li.account_id AND a.owner_person_id = t.owner_person_id
+    WHERE deposit.line_item_id = ? AND t.owner_person_id = ? AND t.TransactionState = 'posted'
+      AND t.valuation_currency_id = ?
+      AND NOT EXISTS (SELECT 1 FROM accounting_invoices i WHERE i.ledger_transaction_id = t.transaction_id)
+    ORDER BY li.line_item_id${lock ? " FOR UPDATE" : ""}`, [depositId, row.owner_person_id, ar.account_currency_id]);
+  const isDeposit = (line) => line.AccountType === "asset" && !Number(line.is_suspense) && !Number(line.is_placeholder)
+    && BigInt(line.amount_units) > 0n;
+  const deposit = lines.find((line) => Number(line.line_item_id) === depositId);
+  if (!deposit || !isDeposit(deposit) || Number(deposit.account_id) === Number(ar.account_id)
+    || Number(deposit.account_currency_id) !== Number(ar.account_currency_id)
+    || (deposit.value_units != null && BigInt(deposit.value_units) !== BigInt(deposit.amount_units))) {
+    throw error("Choose a posted line where money came into a bank or cash account in the invoice’s currency.",
+      "INVOICE_DEPOSIT_LINE_UNAVAILABLE");
+  }
+  if (lines.filter(isDeposit).length !== 1) {
+    throw error("This entry has more than one receiving line. Use an entry with a single bank or cash receipt to apply it here.",
+      "INVOICE_DEPOSIT_AMBIGUOUS");
+  }
+  const [allocations] = await db.execute(`SELECT p.line_item_id, p.amount_minor
+    FROM accounting_invoice_payments p JOIN line_items li ON li.line_item_id = p.line_item_id
+    WHERE li.transaction_id = ?${lock ? " FOR UPDATE" : ""}`, [deposit.transaction_id]);
+  const used = new Map();
+  let depositRemaining = BigInt(deposit.amount_units);
+  for (const allocation of allocations) {
+    const amount = invoiceMinorToLedgerUnits(allocation.amount_minor, row.currency, ar.scale);
+    const lineId = Number(allocation.line_item_id);
+    used.set(lineId, (used.get(lineId) ?? 0n) + amount);
+    depositRemaining -= amount;
+  }
+  const options = lines.flatMap((line) => {
+    if (Number(line.account_currency_id) !== Number(ar.account_currency_id) || Number(line.is_placeholder)
+      || Number(line.account_id) === Number(deposit.account_id)
+      || BigInt(line.amount_units) >= 0n
+      || (line.value_units != null && BigInt(line.value_units) !== BigInt(line.amount_units))) return [];
+    const move = Number(line.account_id) !== Number(ar.account_id);
+    const allocated = used.get(Number(line.line_item_id)) ?? 0n;
+    if (move && (line.reconciliation_state === "reconciled" || allocated > 0n)) return [];
+    const capacity = -BigInt(line.amount_units) - allocated;
+    const remaining = capacity < depositRemaining ? capacity : depositRemaining;
+    const minor = availableMinor(remaining, row.currency, ar.scale);
+    if (minor <= 0n) return [];
+    return [{ line, move, available: Math.min(Number(minor), Number.MAX_SAFE_INTEGER) }];
+  });
+  if (!options.length) {
+    throw error(depositRemaining <= 0n ? "This deposit has already been fully applied."
+      : "There’s no available offset on this deposit. Its offset may already be reconciled or applied to another invoice.",
+    "INVOICE_DEPOSIT_OFFSET_UNAVAILABLE");
+  }
+  return { deposit, options };
+}
+
+export async function previewInvoiceDeposit(db, row, ar, depositId) {
+  const { deposit, options } = await depositPaymentOptions(db, row, ar, depositId);
+  const existing = options.filter((option) => !option.move);
+  const balance = Number(row.amount_remaining_minor ?? row.amount_minor);
+  const choices = existing.length === 1 && existing[0].available >= balance ? existing : options;
+  return choices.map(({ line, move, available }) => ({
+    lineItemId: Number(line.line_item_id), transactionId: Number(deposit.transaction_id),
+    date: deposit.TransactionDate, description: deposit.memo?.trim() || deposit.description,
+    accountName: deposit.AccountName, availableMinor: available,
+    depositLineItemId: depositId, offsetAccountId: Number(line.account_id), offsetAccountName: line.AccountName,
+    offsetMemo: line.memo, moveOffset: move, receivableAccountId: Number(ar.account_id),
+  }));
+}
+
+export async function linkInvoiceDeposit(db, row, ar, input, units) {
+  const { options } = await depositPaymentOptions(db, row, ar, input.line_item_id, true);
+  const choice = options.find(({ line }) => Number(line.line_item_id) === input.offset_line_item_id
+    && Number(line.account_id) === input.offset_account_id);
+  if (!choice || input.amount_minor > choice.available) {
+    throw error("This deposit changed. Select it again to review the available amount.", "INVOICE_DEPOSIT_CHANGED");
+  }
+  return settlePaymentCredit(db, row, ar, choice.line, units, choice.move);
+}
+
+async function settlePaymentCredit(db, row, ar, line, units, move) {
   const transactionId = Number(line.transaction_id);
-  if (!Number(line.is_suspense)) return { lineItemId: line.line_item_id, transactionId };
+  if (!move) return { lineItemId: line.line_item_id, transactionId };
 
   let lineItemId = line.line_item_id;
   const remaining = BigInt(line.amount_units) + units;
   if (remaining === 0n) {
-    const [[question]] = await db.execute(`SELECT tag.tag_id FROM lineitems_tags_join tagged
+    const [[question]] = Number(line.is_suspense) ? await db.execute(`SELECT tag.tag_id FROM lineitems_tags_join tagged
       JOIN tags tag ON tag.tag_id = tagged.tag_id
       WHERE tagged.tagged_line_item_id = ? AND tag.owner_person_id = ? AND tag.tag_key = ? AND tag.tag_value = 'open'`,
-    [lineItemId, row.owner_person_id, accountingQuestionTagKeys.status]);
+    [lineItemId, row.owner_person_id, accountingQuestionTagKeys.status]) : [[]];
     if (question) {
       await resolveAccountingQuestionWithConnection(db, { personId: Number(row.owner_person_id),
         lineItemId: Number(lineItemId), targetAccountId: Number(ar.account_id), resolution: `Payment for invoice #${row.invoice_number}` });

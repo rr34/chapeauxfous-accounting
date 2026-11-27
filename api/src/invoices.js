@@ -5,7 +5,7 @@ import { createTransaction, validateTransaction } from "./accounting.js";
 import { withConnectionTransaction, withPoolTransaction } from "./db.js";
 import { invoiceTransaction, postInvoiceLedger, readInvoiceLines, saveInvoiceLedgerDraft } from "./invoice-ledger.js";
 import { validateInvoiceReceiptRefs } from "./invoice-receipts.js";
-import { findInvoicePaymentCredits, invoiceMinorToLedgerUnits, invoicePaymentInput, linkInvoicePayment,
+import { findInvoicePaymentCredits, invoiceMinorToLedgerUnits, invoicePaymentInput, linkInvoiceDeposit, linkInvoicePayment, previewInvoiceDeposit,
   paymentReceivable, readInvoicePayments, recordInvoicePayment } from "./invoice-payments.js";
 
 const policies = {
@@ -345,6 +345,12 @@ export function createInvoiceService(pool, {
     return findInvoicePaymentCredits(pool, row, await paymentReceivable(pool, row), text, transactionId);
   }
 
+  async function paymentDeposit(owner, id, lineItemId) {
+    const row = await getRow(pool, owner, id);
+    await requirePayableInvoice(pool, row);
+    return previewInvoiceDeposit(pool, row, await paymentReceivable(pool, row), lineItemId);
+  }
+
   async function applyPayment(owner, id, input) {
     const data = invoicePaymentInput.parse(input);
     const requestHash = createHash("sha256").update(JSON.stringify(data)).digest();
@@ -369,7 +375,8 @@ export function createInvoiceService(pool, {
       const units = invoiceMinorToLedgerUnits(amount, row.currency, ar.scale);
       const { lineItemId } = data.method === "record"
         ? await recordInvoicePayment(db, row, ar, data, units, postTransaction)
-        : await linkInvoicePayment(db, row, ar, data, units);
+        : data.method === "deposit" ? await linkInvoiceDeposit(db, row, ar, data, units)
+          : await linkInvoicePayment(db, row, ar, data, units);
       await db.execute(`INSERT INTO accounting_invoice_payments (payment_id, invoice_id, line_item_id, amount_minor, request_sha256)
         VALUES (?, ?, ?, ?, ?)`, [data.request_id, id, lineItemId, data.amount_minor, requestHash]);
       await db.execute(`UPDATE accounting_invoices SET amount_paid_minor = ?, amount_remaining_minor = ?, invoice_status = ?, revision = ?
@@ -767,6 +774,6 @@ export function createInvoiceService(pool, {
 
   const readSavedInvoice = (owner, id) => withPoolTransaction(pool, async (db) =>
     invoiceObject(db, await getRow(db, owner, id), { includePdfDate: true }));
-  return { saveDraft, issue, paymentCredits, applyPayment, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice,
+  return { saveDraft, issue, paymentCredits, paymentDeposit, applyPayment, assignAccounts, assignReceipts, correctPaidPayer, readSavedInvoice,
     list, connectionStatus, beginConnect, finishConnect, completeConnect, prepareSend, send, adopt, webhook };
 }

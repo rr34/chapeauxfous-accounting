@@ -303,6 +303,27 @@ test("an existing transaction is updated atomically without replacing retained l
   assert.equal(headerUpdate.params[3], "2026-08-12 19:30:00.000");
 });
 
+test("a ledger edit cannot change an applied invoice payment split", async () => {
+  const runInTransaction = async (work) => work({
+    async query(sql) {
+      if (sql.includes("SELECT transaction_id, TransactionState")) return [[{
+        transaction_id: 44, TransactionState: "posted", valuation_currency_id: 3,
+      }]];
+      if (sql.includes("FROM currencies")) return [[{ currency_id: 3, CurrencyAbbreviation: "USD", scale: 2 }]];
+      assert.match(sql, /has_invoice_payment/);
+      return [[{ line_item_id: 10, account_id: 20, amount_units: "1250" },
+        { line_item_id: 11, account_id: 21, amount_units: "-1250", value_units: "-1250",
+          memo: "Payment", has_invoice_payment: 1 }]];
+    },
+  });
+  await assert.rejects(updateTransaction({
+    personId: 7, transactionId: 44, transactionDate: "2026-08-12", valuationCurrencyId: 3, lineItems: [
+      { id: 10, accountId: 20, amountUnits: "1250" },
+      { id: 11, accountId: 21, amountUnits: "-1250", memo: "Changed outside the invoice" },
+    ],
+  }, runInTransaction), { code: "INVOICE_PAYMENT_LINE_LOCKED" });
+});
+
 test("a reconciled account line cannot be moved or have its amount changed", async () => {
   const runInTransaction = async (work) => work({
     async query(sql) {

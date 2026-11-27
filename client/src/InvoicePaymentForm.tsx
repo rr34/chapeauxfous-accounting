@@ -11,12 +11,15 @@ export type InvoicePayment = {
 };
 export type InvoicePaymentCredit = {
   lineItemId: number; transactionId: number; date: string; description: string | null;
-  accountName: string; fromSuspense: boolean; availableMinor: number;
+  accountName: string; availableMinor: number; depositLineItemId: number;
+  offsetAccountId: number; offsetAccountName: string; offsetMemo: string | null; moveOffset: boolean;
+  receivableAccountId: number;
 };
-export type InvoicePaymentTarget = { invoiceId: string; invoiceNumber: number; currency: string; scale: number };
-export type InvoicePaymentReturn = { invoiceId: string; credit?: InvoicePaymentCredit };
+export type InvoicePaymentTarget = { invoiceId: string; invoiceNumber: number; currency: string; scale: number;
+  receivableAccountId: number };
+export type InvoicePaymentReturn = { invoiceId: string; credit?: InvoicePaymentCredit; focusId?: string };
 type PaymentDetails = { method: "record"; receiving_account_id: number; payment_date: string; memo: string }
-  | { method: "link"; line_item_id: number };
+  | { method: "deposit"; line_item_id: number; offset_line_item_id: number; offset_account_id: number };
 export type InvoicePaymentInput = PaymentDetails & { amount_minor: number; request_id: string; revision: string };
 
 export default function InvoicePaymentForm({ currency, scale, remaining, revision, receivableAccountId, accounts, today,
@@ -50,7 +53,8 @@ export default function InvoicePaymentForm({ currency, scale, remaining, revisio
   function apply() {
     if (!canApply) return;
     const details: PaymentDetails = credit
-      ? { method: "link", line_item_id: credit.lineItemId }
+      ? { method: "deposit", line_item_id: credit.depositLineItemId,
+        offset_line_item_id: credit.lineItemId, offset_account_id: credit.offsetAccountId }
       : { method: "record", receiving_account_id: Number(account), payment_date: date, memo };
     const input = { ...details, revision, amount_minor: amountMinor };
     const key = JSON.stringify(input);
@@ -76,9 +80,12 @@ export default function InvoicePaymentForm({ currency, scale, remaining, revisio
       </div>
       <label>Memo<input value={memo} maxLength={500} onChange={(event) => setMemo(event.target.value)} disabled={busy} /></label>
     </> : <>
-      <p>Transaction #{credit.transactionId} · {credit.date} · {credit.description || "Payment"}</p>
+      <p>{credit.date} · {credit.description || "Deposit"}</p>
       <p>{credit.accountName} · {money(credit.availableMinor)} available</p>
-      {credit.fromSuspense && <p>The applied amount will move from {credit.accountName} to {names.get(receivableAccountId) ?? "Accounts Receivable"}.</p>}
+      {credit.moveOffset && <p>Accounting will move the applied amount from {names.get(credit.offsetAccountId) ?? credit.offsetAccountName}
+        {" "}to {names.get(receivableAccountId) ?? "Accounts Receivable"}. Your deposit stays as recorded.</p>}
+      {!credit.moveOffset && <p>The other side of this deposit is already in {names.get(receivableAccountId) ?? "Accounts Receivable"}.
+        {" "}Applying it connects that existing line to this invoice.</p>}
     </>}
     <label>Payment amount ({currency})<input inputMode="decimal" value={amount} disabled={busy}
       onChange={(event) => setAmount(event.target.value)} /></label>
