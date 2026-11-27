@@ -74,20 +74,25 @@ const eligibleCredit = `
 const creditParameters = (row, ar) => [row.owner_person_id, ar.account_currency_id, invoicePostingSource,
   ar.account_currency_id, ar.account_id, ar.account_id];
 
-export async function findInvoicePaymentCredits(db, row, ar, text) {
+export async function findInvoicePaymentCredits(db, row, ar, text, transactionId) {
+  const exactTransaction = transactionId != null;
+  const description = exactTransaction ? "COALESCE(NULLIF(TRIM(li.memo), ''), t.description)" : "t.description";
+  const match = exactTransaction ? "t.transaction_id = ?" : `(? IS NULL OR LOCATE(LOWER(?),
+    LOWER(CONCAT_WS(' ', t.transaction_id, t.TransactionDate, t.description, li.memo, a.AccountName))) > 0)`;
   const [rows] = await db.execute(`SELECT eligible.* FROM (
-      SELECT li.line_item_id, t.transaction_id, t.TransactionDate, t.description,
+      SELECT li.line_item_id, t.transaction_id, t.TransactionDate,
+        ${description} AS description,
         a.AccountName, a.is_suspense, li.amount_units,
         COALESCE((SELECT SUM(p.amount_minor) FROM accounting_invoice_payments p WHERE p.line_item_id = li.line_item_id), 0) AS applied_minor
       ${eligibleCredit}
-      AND (? IS NULL OR LOCATE(LOWER(?), LOWER(CONCAT_WS(' ', t.transaction_id, t.TransactionDate,
-        t.description, li.memo, a.AccountName))) > 0)
+      AND ${match}
     ) AS eligible
     WHERE (-CAST(amount_units AS DECIMAL(65,0)) * CAST(? AS DECIMAL(65,0))
       >= (applied_minor + 1) * CAST(? AS DECIMAL(65,0)))
     ORDER BY TransactionDate DESC, transaction_id DESC, line_item_id
-    LIMIT 40`,
-  [...creditParameters(row, ar), text ?? null, text ?? null, String(10n ** BigInt(minorScale(row.currency))), String(10n ** BigInt(ar.scale))]);
+    ${exactTransaction ? "" : "LIMIT 40"}`,
+  [...creditParameters(row, ar), ...(exactTransaction ? [transactionId] : [text ?? null, text ?? null]),
+    String(10n ** BigInt(minorScale(row.currency))), String(10n ** BigInt(ar.scale))]);
   return rows.flatMap((line) => {
     const amount = availableMinor(-BigInt(line.amount_units), row.currency, ar.scale) - BigInt(line.applied_minor);
     if (amount <= 0n) return [];

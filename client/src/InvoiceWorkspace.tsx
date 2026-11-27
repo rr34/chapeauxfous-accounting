@@ -5,7 +5,8 @@ import { decimalToUnits, unitsToDecimal } from "./money";
 import type { Account } from "./types";
 import InvoiceEditor, { blankInvoiceLine, invoiceCurrencyScale as scale,
   type InvoiceDraftFields, type InvoiceReceiptOption, type PaymentMethods } from "./InvoiceEditor";
-import InvoicePaymentForm, { type InvoicePayment, type InvoicePaymentCredit } from "./InvoicePaymentForm";
+import InvoicePaymentForm, { type InvoicePayment, type InvoicePaymentCredit, type InvoicePaymentReturn,
+  type InvoicePaymentTarget } from "./InvoicePaymentForm";
 
 type StripeConnection = { configured: boolean; stripeAccountId: string | null;
   webhookConfigured?: boolean; missingConnectSettings?: string[] };
@@ -107,8 +108,11 @@ async function finishStripeReturn(token: string) {
   }
 }
 
-export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPostingChanged }: {
+export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPostingChanged,
+  paymentReturn, onPaymentReturnHandled, onFindPayment }: {
   token: string; accounts: Account[]; onOpenPosting: (id: number) => Promise<void>; onPostingChanged: () => Promise<void>;
+  paymentReturn: InvoicePaymentReturn | null; onPaymentReturnHandled: (value: null) => void;
+  onFindPayment: (target: InvoicePaymentTarget) => void;
 }) {
   const fullAccountNames = useMemo(() => accountFullNames(accounts), [accounts]);
   const [connection, setConnection] = useState<StripeConnection | null>(null);
@@ -122,6 +126,7 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [issueDate, setIssueDate] = useState<string | null>(null);
   const [applyingPayment, setApplyingPayment] = useState(false);
+  const [paymentCredit, setPaymentCredit] = useState<InvoicePaymentCredit | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -157,6 +162,26 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
     return () => { current = false; };
   }, [token]);
 
+  useEffect(() => {
+    if (!paymentReturn) return;
+    let current = true;
+    void api<{ invoice: Invoice }>(`/invoices/${paymentReturn.invoiceId}`, {}, token)
+      .then(({ invoice }) => {
+        if (!current) return;
+        showInvoice(invoice);
+        if (paymentReturn.credit && invoice.status === "open" && invoice.amountRemainingMinor > 0
+          && invoice.postingTransactionId != null && !invoice.stripeInvoiceId) {
+          setPaymentCredit(paymentReturn.credit);
+          setApplyingPayment(true);
+        } else if (paymentReturn.credit) {
+          setError("This invoice no longer accepts ledger payments.");
+        }
+      })
+      .catch((error) => { if (current) setError(errorMessage(error)); })
+      .finally(() => { if (current) onPaymentReturnHandled(null); });
+    return () => { current = false; };
+  }, [token, paymentReturn, onPaymentReturnHandled]);
+
   async function run(work: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -174,12 +199,22 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
 
   async function openInvoice(id: string) {
     const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${id}`, {}, token);
+    showInvoice(invoice);
+  }
+
+  function findPaymentInLedger(invoice: Invoice) {
+    onFindPayment({ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber,
+      currency: invoice.currency, scale: scale(invoice.currency) });
+  }
+
+  function showInvoice(invoice: Invoice) {
     setSelected(invoice);
-    setPage((current) => ({ ...current, objects: current.objects.map((item) => item.id === id ? invoice : item) }));
+    setPage((current) => ({ ...current, objects: current.objects.map((item) => item.id === invoice.id ? invoice : item) }));
     setDraft(invoiceDraft(invoice));
     setEditingAccounts(false);
     setConfirm(null);
     setApplyingPayment(false);
+    setPaymentCredit(null);
   }
 
   async function reloadAfterChange(invoice: Invoice, message: string) {
@@ -247,14 +282,14 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
     });
   }
 
-  const disabled = busy || confirm !== null || issueDate !== null || applyingPayment;
+  const disabled = busy || paymentReturn !== null || confirm !== null || issueDate !== null || applyingPayment;
   const postingTransactionId = selected?.postingTransactionId;
   const dirty = Boolean(draft && (!draft.invoice || JSON.stringify(draft) !== JSON.stringify(invoiceDraft(draft.invoice))));
   const closeEditor = () => {
     if (editingAccounts && selected) {
       setEditingAccounts(false); setDraft(invoiceDraft(selected)); setError(""); return;
     }
-    setDraft(null); setSelected(null); setConfirm(null); setIssueDate(null); setApplyingPayment(false); setError("");
+    setDraft(null); setSelected(null); setConfirm(null); setIssueDate(null); setApplyingPayment(false); setPaymentCredit(null); setError("");
   };
   return <section className="account-register invoice-workspace" aria-label="Invoices">
     <div className="section-heading"><h2>Invoices</h2><button className="secondary" type="button"
@@ -321,9 +356,12 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
             setError("");
           }}>Post invoice</button>}
         {selected.status === "open" && selected.amountRemainingMinor > 0 && postingTransactionId != null
-          && !selected.stripeInvoiceId && !applyingPayment &&
+          && !selected.stripeInvoiceId && !applyingPayment && <>
           <button className="primary" type="button" disabled={disabled || dirty}
-            onClick={() => { setApplyingPayment(true); setError(""); }}>Apply payment</button>}
+            onClick={() => { setApplyingPayment(true); setError(""); }}>Apply payment</button>
+          <button className="secondary" type="button" disabled={disabled || dirty}
+            onClick={() => findPaymentInLedger(selected)}>Find payment in ledger</button>
+        </>}
         {connection?.configured && connection.stripeAccountId && !selected.sentAt && !selected.adoptedAt
           && !selected.sendReviewRequired && (selected.status === "draft" || selected.sendPending) && !confirm && issueDate === null &&
           <button className="primary" type="button" disabled={busy || dirty} onClick={() => void run(async () => {
@@ -361,22 +399,19 @@ export default function InvoiceWorkspace({ token, accounts, onOpenPosting, onPos
         {selected && (selected.stripeInvoiceId || selected.postingTransactionId || Boolean(selected.payments?.length)) &&
           <p className="invoice-outstanding"><strong>{money(selected.amountRemainingMinor, selected.currency)}</strong> outstanding</p>}
       </>}
-      confirmation={applyingPayment && selected ? <InvoicePaymentForm currency={selected.currency}
+      confirmation={applyingPayment && selected ? <InvoicePaymentForm key={paymentCredit?.lineItemId ?? "record"} currency={selected.currency}
         scale={scale(selected.currency)} remaining={selected.amountRemainingMinor} revision={selected.revision}
         receivableAccountId={selected.receivableAccountId} accounts={accounts} today={localDate()} busy={busy}
-        onFindCredits={async (text) => {
-          const query = text ? `?text=${encodeURIComponent(text)}` : "";
-          const { credits } = await api<{ credits: InvoicePaymentCredit[] }>(
-            `/invoices/${selected.id}/payment-credits${query}`, {}, token);
-          return credits;
-        }}
+        credit={paymentCredit}
+        onFindPayment={() => findPaymentInLedger(selected)}
         onApply={(input) => void run(async () => {
           const { invoice } = await api<{ invoice: Invoice }>(`/invoices/${selected.id}/payments`, json(input), token);
           setApplyingPayment(false);
+          setPaymentCredit(null);
           await reloadAfterChange(invoice, "Payment applied.");
           await onPostingChanged();
         })}
-        onCancel={() => { setApplyingPayment(false); setError(""); }}
+        onCancel={() => { setApplyingPayment(false); setPaymentCredit(null); setError(""); }}
       /> : confirm ? <div className="invoice-confirmation" role="group" aria-label="Confirm sending">
           <p>{confirm.instruction}</p>
           <div className="invoice-actions">

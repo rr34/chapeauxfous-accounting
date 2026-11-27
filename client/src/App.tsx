@@ -6,6 +6,8 @@ import { findUnambiguousSuspenseTransferPairs } from "./suspense-transfer-pairs"
 import { knownBalanceOrderForSameDate, sameDateChronologicalOrder } from "./register-row-order";
 import StatementWorkspace from "./StatementWorkspace";
 import InvoiceWorkspace from "./InvoiceWorkspace";
+import LedgerInvoicePaymentPicker from "./LedgerInvoicePaymentPicker";
+import type { InvoicePaymentCredit, InvoicePaymentReturn, InvoicePaymentTarget } from "./InvoicePaymentForm";
 import AccountCombobox from "./AccountCombobox";
 import { accountFullNames } from "./account-names";
 import type {
@@ -1915,22 +1917,62 @@ function ImportMisfits({ jobs, accounts, currencies, token, onChanged }: {
   </section>;
 }
 
-function Ledger({ transactions, selected, onSelect, onOpenInRegister, onVerify, onDelete, verification }: {
-  transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void;
+type OpenPaymentPicker = {
+  target: InvoicePaymentTarget; onChoose: (credit: InvoicePaymentCredit) => void;
+};
+
+function Ledger({ transactions, selected, onSelect, onClearSelection, onOpenInRegister, onVerify, onDelete, verification,
+  token, paymentPicker }: {
+  transactions: TransactionSummary[]; selected: TransactionDetail | null; onSelect: (id: number) => void; onClearSelection: () => void;
   onOpenInRegister: (transaction: TransactionDetail) => void; onVerify: () => void;
   onDelete: (id: number) => void; verification: string;
+  token: string; paymentPicker: OpenPaymentPicker | null;
 }) {
+  type SearchPage = { transactions: Pick<TransactionSummary, "id" | "date" | "description" | "lineItemCount" | "state">[];
+    nextCursor: string | null };
+  const [text, setText] = useState("");
+  const [search, setSearch] = useState<(SearchPage & { text: string }) | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  async function findTransactions(query: string, cursor?: string) {
+    setSearchError("");
+    if (!cursor) onClearSelection();
+    if (!query) { setSearch(null); return; }
+    setSearchBusy(true);
+    try {
+      const params = new URLSearchParams({ text: query });
+      if (cursor) params.set("cursor", cursor);
+      const result = await api<SearchPage>(`/transactions?${params}`, {}, token);
+      setSearch((current) => ({ ...result, text: query, transactions: cursor && current?.text === query
+        ? [...current.transactions, ...result.transactions] : result.transactions }));
+    } catch (error) { setSearchError(errorMessage(error)); }
+    finally { setSearchBusy(false); }
+  }
   return <section className="ledger card"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Ledger</h2></div>
     <button className="secondary" onClick={onVerify}>Verify ledger</button></div>{verification && <p className="verification">{verification}</p>}
-    <div className="ledger-layout"><div className="transaction-list">{transactions.map((transaction) => <button key={transaction.id}
+    <form className="invoice-inline-form" onSubmit={(event) => { event.preventDefault(); void findTransactions(text.trim()); }}>
+      <label>Search transactions<input type="search" value={text} maxLength={255} disabled={searchBusy}
+        onChange={(event) => setText(event.target.value)} /></label>
+      <button type="submit" className="secondary" disabled={searchBusy}>Search</button>
+      {search && <button type="button" className="secondary" disabled={searchBusy}
+        onClick={() => { setText(""); void findTransactions(""); }}>Clear search</button>}
+    </form>
+    {searchError && <p className="error" role="alert">{searchError}</p>}
+    <div className="ledger-layout"><div className="transaction-list">{(search?.transactions ?? transactions).map((transaction) => <button key={transaction.id}
       className={`transaction-row ${selected?.id === transaction.id ? "selected" : ""}`} onClick={() => onSelect(transaction.id)}>
       <span>{transaction.date}</span><strong>{transaction.description || "Untitled transaction"}</strong><small>{transaction.lineItemCount} lines · {transaction.state}</small>
-    </button>)}</div>
+    </button>)}
+      {search?.transactions.length === 0 && <p className="empty-state">No matching transactions.</p>}
+      {search?.nextCursor && <button type="button" className="secondary" disabled={searchBusy}
+        onClick={() => void findTransactions(search.text, search.nextCursor ?? undefined)}>More results</button>}
+    </div>
       <div className="transaction-detail">{selected ? <><div className="detail-title"><div><h3>{selected.description || "Untitled transaction"}</h3><p>{selected.date} · {selected.state}</p>
         {selected.transactionAt && <p>Source time (UTC): {selected.transactionAt}</p>}</div>
       <div className="detail-actions"><span>#{selected.id}</span><button type="button" className="secondary"
         onClick={() => onOpenInRegister(selected)}>Open in register</button><button type="button" className="danger-link"
           onClick={() => onDelete(selected.id)}>Delete transaction</button></div></div>
+      {paymentPicker && <LedgerInvoicePaymentPicker key={`${paymentPicker.target.invoiceId}:${selected.id}`}
+        {...paymentPicker} transaction={selected} token={token} />}
       {selected.mergedTransactions && selected.mergedTransactions.length > 0 && <details className="transaction-merge-provenance">
         <summary>Merged transfer source{selected.mergedTransactions.length === 1 ? "" : "s"}</summary>
         {selected.mergedTransactions.map((merged) => <p key={merged.absorbedTransactionId}>
@@ -2152,12 +2194,13 @@ function statementSummaryDateAmount(date: string | null, amountUnits: string | n
 }
 
 function AccountRegister({ account, accounts, currencies, entries, assertions, loading, error, token,
-  openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged }: {
+  openTransaction, onOpenTransactionHandled, onTransactionCreated, onChanged, paymentPicker }: {
   account: Account; accounts: Account[]; currencies: Currency[]; entries: AccountLedgerEntry[];
   assertions: BalanceAssertion[]; loading: boolean; error: string; token: string;
   openTransaction: { transactionId: number; lineItemId: number } | null;
   onOpenTransactionHandled: () => void;
   onTransactionCreated: () => Promise<void>; onChanged: () => Promise<void>;
+  paymentPicker: OpenPaymentPicker | null;
 }) {
   const [view, setView] = useState<"basic" | "auto-split" | "journal">("basic");
   const [registerSort, setRegisterSort] = useState<RegisterSort>({ key: "date", direction: "desc" });
@@ -3176,6 +3219,10 @@ function AccountRegister({ account, accounts, currencies, entries, assertions, l
             return <Fragment key={entry.lineItemId}>
               {suspenseGroupHeader}
               {newRowsAtTop && rowBalanceForm}
+              {paymentPicker && <tr className="register-edit-transaction-row"><td colSpan={7}>
+                <LedgerInvoicePaymentPicker key={`${paymentPicker.target.invoiceId}:${selectedTransaction.id}`}
+                  {...paymentPicker} transaction={selectedTransaction} token={token} />
+              </td></tr>}
               <TransactionCard key={`${entry.transactionId}:${entry.lineItemId}`}
                 accounts={accounts} currencies={currencies} initialAccountId={account.id}
                 initialLineItemId={selectedLineItemId ?? entry.lineItemId}
@@ -3768,6 +3815,8 @@ export default function App() {
     () => window.location.hash.split("?")[0] === "#invoices" ? "invoices"
       : window.location.hash === "#import-misfits" ? "misfits" : "chart",
   );
+  const [pendingInvoicePayment, setPendingInvoicePayment] = useState<InvoicePaymentTarget | null>(null);
+  const [paymentReturn, setPaymentReturn] = useState<InvoicePaymentReturn | null>(null);
   const [loading, setLoading] = useState(true);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
@@ -3849,6 +3898,26 @@ export default function App() {
     revealMainContent();
   }
 
+  function beginPaymentBrowse(target: InvoicePaymentTarget) {
+    setPendingInvoicePayment(target);
+    setPaymentReturn(null);
+    selectWorkspaceView("chart");
+  }
+
+  function finishPaymentBrowse(credit?: InvoicePaymentCredit) {
+    if (!pendingInvoicePayment) return;
+    setPaymentReturn({ invoiceId: pendingInvoicePayment.invoiceId, credit });
+    setPendingInvoicePayment(null);
+    selectWorkspaceView("invoices");
+  }
+
+  useEffect(() => {
+    if (workspaceView === "invoices" && pendingInvoicePayment) {
+      setPaymentReturn({ invoiceId: pendingInvoicePayment.invoiceId });
+      setPendingInvoicePayment(null);
+    }
+  }, [workspaceView, pendingInvoicePayment]);
+
   useEffect(() => {
     if (!token) { setUser(null); setCurrencies([]); setLoading(false); return; }
     setLoading(true);
@@ -3920,6 +3989,7 @@ export default function App() {
     setImportJobs([]); setTransactions([]); setSelected(null); setWorkspaceView("chart");
     setShowAppMenu(false); setShowAgentAccess(false); setShowAccountData(false); setDeletionRequest(null);
     setOpenRegisterTransaction(null);
+    setPendingInvoicePayment(null); setPaymentReturn(null);
   }
   async function refreshAfterTransaction() {
     await refresh();
@@ -3959,6 +4029,7 @@ export default function App() {
     .map((id) => accounts.find((account) => account.id === id)).filter((account): account is Account => account != null);
   const currentAccount = selectedAccount ?? recentAccounts[0] ?? null;
   const unresolvedMisfits = importJobs.reduce((total, job) => total + job.progress.transaction_totals.unresolved_exceptions, 0);
+  const paymentPicker = pendingInvoicePayment ? { target: pendingInvoicePayment, onChoose: finishPaymentBrowse } : null;
   return <div className="app-shell"><header><div><p className="eyebrow">Time v3 Tech</p><h1>Accounting</h1></div><div className="user-menu"><span>{user.name}</span>
     <AppMenu open={showAppMenu} onToggle={() => setShowAppMenu((current) => !current)}
       onCurrencies={() => { setShowAppMenu(false); setShowCurrencyManager(true); }}
@@ -3966,6 +4037,7 @@ export default function App() {
       onAgentAccess={() => { setShowAppMenu(false); setShowAgentAccess(true); }}
       onSignOut={logout} /></div></header>
     <main className="workspace">
+      <div className="workspace-navigation">
       <nav className="workspace-nav" aria-label="Accounting views">
         <button className={workspaceView === "chart" ? "active" : ""} aria-pressed={workspaceView === "chart"}
           onClick={() => selectWorkspaceView("chart")}>Chart of accounts</button>
@@ -3976,17 +4048,23 @@ export default function App() {
         <button className={workspaceView === "activity" ? "active" : ""} aria-pressed={workspaceView === "activity"}
           onClick={() => selectWorkspaceView("activity")}>All activity</button>
         <button className={workspaceView === "invoices" ? "active" : ""} aria-pressed={workspaceView === "invoices"}
-          onClick={() => selectWorkspaceView("invoices")}>Invoices</button>
+          onClick={() => pendingInvoicePayment ? finishPaymentBrowse() : selectWorkspaceView("invoices")}>Invoices</button>
         <button className={workspaceView === "misfits" ? "active" : ""} aria-pressed={workspaceView === "misfits"}
           onClick={() => selectWorkspaceView("misfits")}>Import issues
           {unresolvedMisfits > 0 && <span>{unresolvedMisfits}</span>}</button>
       </nav>
+      {pendingInvoicePayment && workspaceView !== "invoices" && <div className="invoice-payment-banner">
+        <span><strong>Applying payment to invoice #{pendingInvoicePayment.invoiceNumber}.</strong> Open the transaction that received the payment.</span>
+        <button type="button" className="secondary" onClick={() => finishPaymentBrowse()}>Cancel and return to invoice</button>
+      </div>}
+      </div>
       <div id="import-misfits" className="main-column" ref={mainContentRef} tabIndex={-1}>
         {workspaceView === "chart"
           ? <ChartOfAccounts accounts={accounts} currencies={currencies} selectedAccountId={selectedAccountId}
               token={token} onSelectAccount={selectAccount} onChanged={refresh} />
           : workspaceView === "invoices"
-          ? <InvoiceWorkspace token={token} accounts={accounts} onPostingChanged={refreshAfterTransaction} onOpenPosting={async (id) => {
+          ? <InvoiceWorkspace token={token} accounts={accounts} onPostingChanged={refreshAfterTransaction}
+            paymentReturn={paymentReturn} onPaymentReturnHandled={setPaymentReturn} onFindPayment={beginPaymentBrowse} onOpenPosting={async (id) => {
             const { transaction } = await api<{ transaction: TransactionDetail }>(`/transactions/${id}`, {}, token);
             openTransactionInRegister(transaction);
           }} />
@@ -4001,12 +4079,13 @@ export default function App() {
           : workspaceView === "account" && selectedAccount
           ? <AccountRegister account={selectedAccount} accounts={accounts} currencies={currencies}
               entries={accountLedgerEntries} assertions={assertions}
-              loading={accountLedgerLoading} error={accountLedgerError} token={token}
+              loading={accountLedgerLoading} error={accountLedgerError} token={token} paymentPicker={paymentPicker}
               openTransaction={openRegisterTransaction}
               onOpenTransactionHandled={() => setOpenRegisterTransaction(null)}
               onTransactionCreated={refreshAfterTransaction}
               onChanged={refreshAfterTransaction} />
           : <Ledger transactions={transactions} selected={selected} onSelect={(id) => void selectTransaction(id)}
+              token={token} paymentPicker={paymentPicker} onClearSelection={() => setSelected(null)}
               onOpenInRegister={openTransactionInRegister}
               onDelete={(id) => setDeletionRequest({ scope: "selected", transactionIds: [id],
                 deleteAccounts: false, deleteImportHistory: false })}

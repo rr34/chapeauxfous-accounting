@@ -339,10 +339,10 @@ export function createInvoiceService(pool, {
     }
   }
 
-  async function paymentCredits(owner, id, text) {
+  async function paymentCredits(owner, id, text, transactionId) {
     const row = await getRow(pool, owner, id);
     await requirePayableInvoice(pool, row);
-    return findInvoicePaymentCredits(pool, row, await paymentReceivable(pool, row), text);
+    return findInvoicePaymentCredits(pool, row, await paymentReceivable(pool, row), text, transactionId);
   }
 
   async function applyPayment(owner, id, input) {

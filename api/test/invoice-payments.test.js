@@ -108,7 +108,9 @@ test("new and existing receipts settle a posted invoice in partial amounts", asy
       }
       if (sql.includes("SUM(p.amount_minor)")) {
         assert.equal(args[0], owner);
-        return [lines.filter((line) => Number(line.amount_units) < 0).map((line) => ({
+        const exact = sql.includes("AND t.transaction_id = ?");
+        if (exact) assert.doesNotMatch(sql, /LIMIT 40/);
+        return [lines.filter((line) => Number(line.amount_units) < 0 && (!exact || line.transaction_id === args[6])).map((line) => ({
           ...line, TransactionDate: date, description: "Existing deposit", AccountName: line.is_suspense ? "Suspense" : "A/R",
           applied_minor: payments.filter((payment) => payment.line_item_id === line.line_item_id)
             .reduce((sum, payment) => sum + payment.amount_minor, 0),
@@ -167,6 +169,10 @@ test("new and existing receipts settle a posted invoice in partial amounts", asy
   const credits = await invoices.paymentCredits(owner, id, "Deposit");
   assert.deepEqual(credits.map((credit) => [credit.lineItemId, credit.availableMinor, credit.fromSuspense]),
     [[101, 20000, false], [201, 45000, true]]);
+  const picked = await invoices.paymentCredits(owner, id, undefined, 60);
+  assert.deepEqual(picked.map((credit) => [credit.lineItemId, credit.transactionId, credit.availableMinor]),
+    [[201, 60, 45000]]);
+  assert.deepEqual(await invoices.paymentCredits(owner, id, undefined, 6), []);
   const applyLink = (line_item_id, amount_minor) => invoices.applyPayment(owner, id, {
     request_id: randomUUID(), revision: state.invoice.revision, method: "link", line_item_id, amount_minor,
   });

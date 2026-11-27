@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createInvoiceService, invoiceAccountAssignments, invoiceAccountId, invoiceDraft, invoiceId, invoiceIssue, invoiceReceiptAssignments, stripeBrowserKey, stripeInvoiceId } from "./invoices.js";
 import { invoicePdfFilename, renderInvoicePdf } from "./invoice-pdf.js";
 import { invoicePaymentInput } from "./invoice-payments.js";
+import { searchTransactionsPage } from "./transaction-search.js";
 import { appendInvoiceReceipts, invoiceReceiptMaximumBytes, invoiceReceiptMediaTypes, listInvoiceReceipts,
   loadInvoiceReceipts, uploadInvoiceReceipt } from "./invoice-receipts.js";
 import { getUser, loginUser, registerUser } from "./users.js";
@@ -205,7 +206,8 @@ app.post("/api/invoices/:id/issue", ...invoiceRoute(async (owner, req) => ({
 })));
 app.get("/api/invoices/:id/payment-credits", ...invoiceRoute(async (owner, req) => ({
   credits: await invoices.paymentCredits(owner, invoiceId.parse(req.params.id),
-    z.string().trim().min(1).max(255).optional().parse(req.query.text)),
+    z.string().trim().min(1).max(255).optional().parse(req.query.text),
+    z.coerce.number().int().positive().optional().parse(req.query.transactionId)),
 })));
 app.post("/api/invoices/:id/payments", ...invoiceRoute((owner, req) =>
   invoices.applyPayment(owner, invoiceId.parse(req.params.id), invoicePaymentInput.parse(req.body))));
@@ -491,7 +493,15 @@ app.post("/api/purchase-evidence-jobs/:purchaseEvidenceJobId/restart", requireAu
 });
 
 app.get("/api/transactions", requireAuth, async (req, res, next) => {
-  try { res.json({ transactions: await listTransactions(pool, req.auth.personId, req.query.limit) }); } catch (error) { next(error); }
+  try {
+    const text = z.string().trim().min(1).max(255).optional().parse(req.query.text);
+    if (!text) return res.json({ transactions: await listTransactions(pool, req.auth.personId, req.query.limit) });
+    const cursor = z.string().max(2000).optional().parse(req.query.cursor);
+    const { transactions, nextCursor } = await searchTransactionsPage(pool, req.auth.personId, { text, cursor });
+    res.json({ nextCursor, transactions: transactions.map(({ id, date, description, state, lineItems }) => ({
+      id, date, description, state, lineItemCount: lineItems.length,
+    })) });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/transactions/:transactionId", requireAuth, async (req, res, next) => {
